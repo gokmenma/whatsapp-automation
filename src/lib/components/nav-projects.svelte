@@ -6,6 +6,7 @@
 	import FolderIcon from "@lucide/svelte/icons/folder";
 	import ForwardIcon from "@lucide/svelte/icons/forward";
 	import Trash2Icon from "@lucide/svelte/icons/trash-2";
+	import { page } from "$app/stores";
 
 	let {
 		projects,
@@ -20,6 +21,13 @@
 	} = $props();
 
 	const sidebar = useSidebar();
+
+	function isItemActive(url: string) {
+		if (url === "/") {
+			return $page.url.pathname === "/";
+		}
+		return $page.url.pathname.startsWith(url);
+	}
 </script>
 
 <Sidebar.Group class="group-data-[collapsible=icon]:hidden">
@@ -27,7 +35,7 @@
 	<Sidebar.Menu>
 		{#each projects as item (item.name)}
 			<Sidebar.MenuItem>
-				<Sidebar.MenuButton>
+				<Sidebar.MenuButton isActive={isItemActive(item.url)}>
 					{#snippet child({ props })}
 						<a href={item.url} {...props}>
 							<item.icon />

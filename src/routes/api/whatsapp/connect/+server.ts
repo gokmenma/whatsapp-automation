@@ -1,8 +1,8 @@
 import { json } from '@sveltejs/kit';
 import { initializeWhatsApp, getAccountStatus } from '$lib/whatsapp';
 import { db } from '$lib/server/db';
-import { accounts } from '$lib/server/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { accounts, purchases } from '$lib/server/db/schema';
+import { eq, and, sql, desc } from 'drizzle-orm';
 import { slugify } from '$lib/utils';
 
 export const POST = async ({ request, locals }) => {
@@ -11,37 +11,78 @@ export const POST = async ({ request, locals }) => {
     }
 
     try {
-        const { accountId: name } = await request.json(); // we got the display name
+        const { accountId: inputIdOrName } = await request.json();
         
-        if (!name) {
-            return json({ success: false, error: 'Hesap ismi gereklidir.' }, { status: 400 });
+        if (!inputIdOrName) {
+            return json({ success: false, error: 'Hesap ID veya ismi gereklidir.' }, { status: 400 });
         }
 
-        const safeId = slugify(name);
-        
-        // Find if already exists for THIS user
-        const existing = await db.select().from(accounts).where(
+        // 1. Try finding by ID first (SAFE UUID)
+        let existing = await db.select().from(accounts).where(
             and(
                 eq(accounts.userId, locals.user.id),
-                eq(accounts.id, safeId)
+                eq(accounts.id, inputIdOrName)
             )
-        ).limit(1);
+        ).get();
 
-        if (existing.length === 0) {
-            // New account, save to DB
+        // 2. If not found by ID, try finding by Name
+        if (!existing) {
+            existing = await db.select().from(accounts).where(
+                and(
+                    eq(accounts.userId, locals.user.id),
+                    eq(accounts.name, inputIdOrName)
+                )
+            ).get();
+        }
+
+        let targetId = existing?.id;
+        let finalName = existing?.name || inputIdOrName;
+
+        if (!existing) {
+            // New account - Check Limit (Standard: 1, Pro: 3)
+            const countRes = await db.select({ count: sql`count(*)` }).from(accounts)
+                .where(eq(accounts.userId, locals.user.id)).get();
+            
+            const count = Number((countRes as any)?.count || 0);
+
+            // Check if user has a Pro purchase
+            const purchaseHistory = await db.select()
+                .from(purchases)
+                .where(eq(purchases.userId, locals.user.id))
+                .all();
+            
+            const limit = purchaseHistory.some(p => p.packageName === "Pro Aylık") ? 3 : 1;
+
+            if (count >= limit) {
+                return json({ 
+                    success: false, 
+                    error: `Üzgünüz, mevcut paketinizde sadece ${limit} WhatsApp hesabı ekleyebilirsiniz. Daha fazla hesap için lütfen paketinizi yükseltin.` 
+                }, { status: 403 });
+            }
+
+            // Generate a TRULY unique ID
+            targetId = crypto.randomUUID();
+            finalName = inputIdOrName;
+
+            const isFirst = count === 0;
+
             await db.insert(accounts).values({
-                id: safeId,
-                name: name,
+                id: targetId,
+                name: finalName,
                 userId: locals.user.id,
-                createdAt: new Date()
+                createdAt: new Date(),
+                isDefault: isFirst
             });
         }
 
-        // Initializing in background with the SAFE id
-        initializeWhatsApp(safeId).catch(e => console.error(`BG Initialization Error for ${safeId}:`, e));
+        if (!targetId) throw new Error("Could not determine Account ID");
+
+        // Initializing in background with the SAFE unique id
+        initializeWhatsApp(targetId).catch(e => console.error(`BG Initialization Error for ${targetId}:`, e));
         
-        return json({ success: true, ...getAccountStatus(safeId), id: safeId, name: name });
+        return json({ success: true, ...getAccountStatus(targetId), id: targetId, name: finalName });
     } catch (e: any) {
+        console.error('API Connect Error:', e);
         return json({ success: false, error: e.message || 'Bağlantı başlatılamadı' }, { status: 500 });
     }
 };

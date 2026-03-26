@@ -7,11 +7,11 @@
 	import { Loader2, CheckCircle2 } from "@lucide/svelte";
 
 	let settings = $state({
-		autoReply: false,
 		readReceipt: true,
 		darkMode: true,
-		messageDelay: 2000
+		messageDelay: 2000,
 	});
+
 
 	let isLoading = $state(true);
 	let isSaving = $state(false);
@@ -27,7 +27,8 @@
 					autoReply: !!data.autoReply,
 					readReceipt: !!data.readReceipt,
 					darkMode: !!data.darkMode,
-					messageDelay: data.messageDelay || 2000
+					messageDelay: data.messageDelay || 2000,
+					autoReplyMessage: data.autoReplyMessage || "Merhaba, şu an müsait değilim. En kısa sürede size geri dönüş yapacağım."
 				};
 			}
 		} catch (e) {
@@ -36,6 +37,7 @@
 			isLoading = false;
 		}
 	}
+
 
 	async function saveSettings() {
 		isSaving = true;
@@ -103,14 +105,6 @@
 				<Card.Description>Genel uygulama ayarlarını buradan yapabilirsiniz.</Card.Description>
 			</Card.Header>
 			<Card.Content class="space-y-6">
-				<div class="flex items-center justify-between">
-					<div class="space-y-0.5">
-						<Label>Otomatik Yanıt</Label>
-						<p class="text-sm text-muted-foreground">Gelen mesajlara otomatik cevap verir.</p>
-					</div>
-					<Switch checked={settings.autoReply} onCheckedChange={() => toggleValue('autoReply')} />
-				</div>
-
 				<div class="flex items-center justify-between">
 					<div class="space-y-0.5">
 						<Label>Okundu Bilgisi Gönder</Label>

@@ -12,13 +12,14 @@ export const GET = async ({ locals }) => {
         // Create default settings if not exists
         const newSettings = {
             userId: locals.user.id,
-            autoReply: false,
             readReceipt: true,
             darkMode: true,
-            messageDelay: 2000
+            messageDelay: 2000,
         };
         await db.insert(userSettings).values(newSettings);
         settings = newSettings;
+
+
     }
 
     return json(settings);

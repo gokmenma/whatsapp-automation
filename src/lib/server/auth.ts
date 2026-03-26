@@ -52,7 +52,7 @@ export async function getSession(sessionId: string) {
     const result = await db
         .select({
             session: sessions,
-            user: { id: users.id, name: users.name, email: users.email }
+            user: { id: users.id, name: users.name, email: users.email, credits: users.credits }
         })
         .from(sessions)
         .innerJoin(users, eq(sessions.userId, users.id))

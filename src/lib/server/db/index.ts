@@ -5,5 +5,6 @@ import path from 'path';
 
 const dbPath = path.resolve('sqlite.db');
 const sqlite = new Database(dbPath);
+sqlite.pragma('journal_mode = WAL');
 
 export const db = drizzle(sqlite, { schema });

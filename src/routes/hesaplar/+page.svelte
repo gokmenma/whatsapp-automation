@@ -9,9 +9,13 @@
     import * as Dialog from "$lib/components/ui/dialog";
     import * as AlertDialog from "$lib/components/ui/alert-dialog";
     import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
-    import { Power, RefreshCcw, Smartphone, Unplug, Plus, Trash2, Loader2, QrCode, Edit2, Download, FileSpreadsheet } from "@lucide/svelte";
+    import { Switch } from "$lib/components/ui/switch";
+    import { Textarea } from "$lib/components/ui/textarea";
+    import { Power, RefreshCcw, Smartphone, Unplug, Plus, Trash2, Loader2, QrCode, Edit2, Download, FileSpreadsheet, Settings, Copy, Check } from "@lucide/svelte";
+
 
 	let accounts: any[] = $state([]);
+    let limit = $state(1);
 	let newAccountName = $state("");
     let isDialogOpen = $state(false);
     let isLoading = $state(true);
@@ -20,12 +24,76 @@
     let editDialogOpen = $state(false);
     let accountToEdit: any = $state(null);
     let editedName = $state("");
+    let settingsDialogOpen = $state(false);
+    let accountToSettings: any = $state(null);
+    let isSavingSettings = $state(false);
+    let isDeleting = $state(false);
+    let isAddingAccount = $state(false);
+    let isSavingName = $state(false);
+    let copiedId = $state("");
+
+    async function copyImageToClipboard(imageUrl: string, id: string) {
+        if (!imageUrl) return;
+        try {
+            const response = await fetch(imageUrl);
+            const blob = await response.blob();
+            await navigator.clipboard.write([
+                new ClipboardItem({
+                    [blob.type]: blob
+                })
+            ]);
+            copiedId = id;
+            setTimeout(() => {
+                if (copiedId === id) copiedId = "";
+            }, 2000);
+        } catch (e) {
+            console.error("Resim kopyalanırken hata oluştu:", e);
+        }
+    }
+
+    function openAccountSettings(acc: any) {
+        accountToSettings = { 
+            id: acc.id, 
+            name: acc.name, 
+            autoReply: !!acc.autoReply, 
+            isDefault: !!acc.isDefault,
+            autoReplyMessage: acc.autoReplyMessage || 'Merhaba, şu an müsait değilim. En kısa sürede size geri dönüş yapacağım.' 
+        };
+        settingsDialogOpen = true;
+    }
+
+    async function saveAccountSettings() {
+        if (!accountToSettings) return;
+        isSavingSettings = true;
+        try {
+            const res = await fetch('/api/whatsapp/update-settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    accountId: accountToSettings.id,
+                    autoReply: accountToSettings.autoReply,
+                    isDefault: accountToSettings.isDefault,
+                    autoReplyMessage: accountToSettings.autoReplyMessage
+                })
+            });
+            const data = await res.json();
+            if (data.success) {
+                settingsDialogOpen = false;
+                await fetchAccounts();
+            }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            isSavingSettings = false;
+        }
+    }
 
 	async function fetchAccounts() {
 		try {
 			const res = await fetch('/api/whatsapp/status');
 			const data = await res.json();
 			accounts = data.accounts || [];
+            limit = data.limit || 1;
             isLoading = false;
 		} catch (e) {
 			console.error(e);
@@ -34,7 +102,8 @@
 	}
 
 	async function addAccount() {
-        if (!newAccountName.trim()) return;
+        if (!newAccountName.trim() || accounts.length >= limit) return;
+        isAddingAccount = true;
 		try {
 			const res = await fetch('/api/whatsapp/connect', { 
                 method: 'POST',
@@ -46,45 +115,16 @@
                 newAccountName = "";
                 isDialogOpen = false;
 				await fetchAccounts();
-			}
-		} catch (e) {
+			} else {
+                alert(data.error || "Hesap eklenemedi");
+            }
+		} catch (e: any) {
 			console.error(e);
-		}
+            alert("Bir hata oluştu: " + (e.message || "Bilinmeyen hata"));
+		} finally {
+            isAddingAccount = false;
+        }
 	}
-
-    async function startAccount(name: string) {
-		try {
-			await fetch('/api/whatsapp/connect', { 
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ accountId: name }) 
-            });
-			await fetchAccounts();
-		} catch (e) {
-			console.error(e);
-		}
-	}
-
-    function confirmDelete(acc: any) {
-        accountToDelete = acc;
-        deleteDialogOpen = true;
-    }
-
-    async function deleteAccount() {
-        if (!accountToDelete) return;
-        const name = accountToDelete.id;
-        try {
-            await fetch('/api/whatsapp/remove', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ accountId: name })
-            });
-            deleteDialogOpen = false;
-            accountToDelete = null;
-            await fetchAccounts();
-        } catch (e) { console.error(e); }
-    }
-
     function openEditDialog(acc: any) {
         accountToEdit = acc;
         editedName = acc.name || acc.id;
@@ -93,28 +133,80 @@
 
     async function saveAccountName() {
         if (!accountToEdit || !editedName.trim()) return;
+        isSavingName = true;
         try {
             const res = await fetch('/api/whatsapp/update-name', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    accountId: accountToEdit.id,
-                    newName: editedName
-                })
+                body: JSON.stringify({ accountId: accountToEdit.id, newName: editedName })
             });
             const data = await res.json();
             if (data.success) {
                 editDialogOpen = false;
-                accountToEdit = null;
                 await fetchAccounts();
             }
-        } catch (e) { console.error(e); }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            isSavingName = false;
+        }
     }
 
-    function exportContacts(accountId: string, type: string) {
+    async function startAccount(accountId: string) {
+        try {
+            await fetch('/api/whatsapp/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ accountId })
+            });
+            await fetchAccounts();
+        } catch (e) {
+            console.error(e);
+        }
+    }
+
+    async function stopAccount(accountId: string) {
+        try {
+            await fetch('/api/whatsapp/stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ accountId })
+            });
+            await fetchAccounts();
+        } catch (e) {
+            console.error(e);
+        }
+    }
+
+    function confirmDelete(acc: any) {
+        accountToDelete = acc;
+        deleteDialogOpen = true;
+    }
+
+    async function deleteAccount() {
+        if (!accountToDelete) return;
+        isDeleting = true;
+        try {
+            const res = await fetch('/api/whatsapp/remove', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ accountId: accountToDelete.id })
+            });
+            const data = await res.json();
+            if (data.success) {
+                deleteDialogOpen = false;
+                await fetchAccounts();
+            }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            isDeleting = false;
+        }
+    }
+
+    function exportContacts(accountId: string, type: 'all' | 'conversations') {
         window.location.href = `/api/whatsapp/export-contacts?accountId=${accountId}&type=${type}`;
     }
-
 	onMount(() => {
         fetchAccounts();
 		const interval = setInterval(fetchAccounts, 5000); 
@@ -129,33 +221,53 @@
             <p class="text-muted-foreground text-sm">WhatsApp hesaplarınızı buradan ekleyebilir ve bağlantılarını yönetebilirsiniz.</p>
         </div>
         
-        <Dialog.Root bind:open={isDialogOpen}>
-            <Dialog.Trigger>
-                {#snippet child({ props })}
-                    <Button {...props} class="gap-2">
-                        <Plus class="w-4 h-4" /> Yeni Hesap Ekle
-                    </Button>
-                {/snippet}
-            </Dialog.Trigger>
-            <Dialog.Content class="sm:max-w-md">
-                <Dialog.Header>
-                    <Dialog.Title>Yeni WhatsApp Hesabı</Dialog.Title>
-                    <Dialog.Description>Hesabınızı ayırt etmek için benzersiz bir isim girin.</Dialog.Description>
-                </Dialog.Header>
-                <div class="grid w-full items-center gap-1.5 py-4">
-                    <Label for="acname">Hesap İsmi</Label>
-                    <Input 
-                        id="acname" 
-                        placeholder="Örn: Kendi Hesabım" 
-                        bind:value={newAccountName} 
-                        onkeydown={(e) => e.key === 'Enter' && addAccount()}
-                    />
-                </div>
-                <Dialog.Footer>
-                    <Button onclick={addAccount} disabled={!newAccountName}>Hesabı Oluştur</Button>
-                </Dialog.Footer>
-            </Dialog.Content>
-        </Dialog.Root>
+        <div class="flex items-center gap-3">
+            <Badge variant="outline" class="h-9 px-4 border-dashed {accounts.length >= limit ? 'border-orange-500/50 text-orange-600' : 'border-green-500/50 text-green-600'} bg-primary/5 animate-in fade-in slide-in-from-right-2 duration-500">
+                Limit: {accounts.length}/{limit} Hesap Aktif
+            </Badge>
+
+            <Dialog.Root bind:open={isDialogOpen}>
+                <Dialog.Trigger>
+                    {#snippet child({ props })}
+                        <Button 
+                            {...props} 
+                            class="gap-2" 
+                            disabled={accounts.length >= limit}
+                            variant={accounts.length >= limit ? "secondary" : "default"}
+                        >
+                            {#if accounts.length >= limit}
+                                <Power class="w-4 h-4 text-muted-foreground" /> Paket Limiti Doldu
+                            {:else}
+                                <Plus class="w-4 h-4" /> Yeni Hesap Ekle
+                            {/if}
+                        </Button>
+                    {/snippet}
+                </Dialog.Trigger>
+                <Dialog.Content class="sm:max-w-md">
+                    <Dialog.Header>
+                        <Dialog.Title>Yeni WhatsApp Hesabı</Dialog.Title>
+                        <Dialog.Description>Hesabınızı ayırt etmek için benzersiz bir isim girin.</Dialog.Description>
+                    </Dialog.Header>
+                    <div class="grid w-full items-center gap-1.5 py-4">
+                        <Label for="acname">Hesap İsmi</Label>
+                        <Input 
+                            id="acname" 
+                            placeholder="Örn: Kendi Hesabım" 
+                            bind:value={newAccountName} 
+                            onkeydown={(e) => e.key === 'Enter' && addAccount()}
+                        />
+                    </div>
+                    <Dialog.Footer>
+                        <Button onclick={addAccount} disabled={!newAccountName || accounts.length >= limit || isAddingAccount} class="min-w-[120px]">
+                            {#if isAddingAccount}
+                                <Loader2 class="w-4 h-4 animate-spin mr-2" />
+                            {/if}
+                            Hesabı Oluştur
+                        </Button>
+                    </Dialog.Footer>
+                </Dialog.Content>
+            </Dialog.Root>
+        </div>
 	</div>
 
     {#if isLoading}
@@ -194,6 +306,9 @@
                         </div>
                         <Card.Description class="text-[10px] font-mono uppercase">ID: {acc.id}</Card.Description>
                     </div>
+                    {#if acc.isDefault}
+                        <Badge variant="outline" class="border-primary text-primary bg-primary/5">Varsayılan</Badge>
+                    {/if}
                     {#if acc.status === 'ready'}
                         <Badge class="bg-green-500 hover:bg-green-600 shadow-[0_0_10px_rgba(34,197,94,0.3)]">Aktif</Badge>
                     {:else if acc.status === 'connecting'}
@@ -223,6 +338,19 @@
                     {:else if acc.status === "connecting" && acc.qr}
                         <div class="flex flex-col items-center space-y-4 animate-in fade-in zoom-in-95 duration-300">
                             <div class="p-3 bg-white rounded-xl border-2 border-primary/20 shadow-sm relative group">
+                                <Button 
+                                    variant="outline" 
+                                    size="icon" 
+                                    class="absolute -top-2.5 -right-2.5 h-8 w-8 rounded-full shadow-lg bg-background border-primary/30 hover:border-primary transition-all z-10 active:scale-95" 
+                                    onclick={() => copyImageToClipboard(acc.qr, acc.id)}
+                                    title="QR kodunu kopyala"
+                                >
+                                    {#if copiedId === acc.id}
+                                        <Check class="w-4 h-4 text-green-600" />
+                                    {:else}
+                                        <Copy class="w-4 h-4 text-primary" />
+                                    {/if}
+                                </Button>
                                 <img src={acc.qr} alt="QR Code" class="w-40 h-40" />
                                 <div class="absolute inset-0 bg-white/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-[1px]">
                                     <QrCode class="w-8 h-8 text-primary" />
@@ -257,14 +385,14 @@
                             <Power class="w-4 h-4" /> Sistemi Başlat
                         </Button>
                     {:else if acc.status === "ready"}
-                        <Button variant="outline" size="sm" class="flex-1 h-9 text-xs" disabled>
-                            Bağlantı Aktif
+                        <Button variant="outline" size="sm" class="flex-1 h-9 text-xs" onclick={() => stopAccount(acc.id)}>
+                            Durdur
                         </Button>
                         <DropdownMenu.Root>
-                            <DropdownMenu.Trigger asChild>
+                            <DropdownMenu.Trigger>
                                 {#snippet child({ props })}
-                                    <Button {...props} variant="outline" size="sm" class="flex-1 h-9 gap-2">
-                                        <Download class="w-4 h-4" /> Dışarı Aktar
+                                    <Button {...props} variant="outline" size="sm" class="flex-1 h-9 gap-1 text-[11px] px-2 leading-none whitespace-nowrap">
+                                        <Download class="w-3.5 h-3.5" /> Aktar
                                     </Button>
                                 {/snippet}
                             </DropdownMenu.Trigger>
@@ -279,11 +407,18 @@
                                 </DropdownMenu.Item>
                             </DropdownMenu.Content>
                         </DropdownMenu.Root>
+                    {:else if acc.status === "connecting"}
+                        <Button variant="outline" size="sm" class="flex-1 h-9 text-xs" onclick={() => stopAccount(acc.id)}>
+                            İptal
+                        </Button>
                     {:else}
                         <Button variant="outline" size="sm" class="flex-1 h-9 text-xs" disabled>
                             <Loader2 class="w-3 h-3 animate-spin mr-2" /> İşlemde...
                         </Button>
                     {/if}
+                    <Button variant="ghost" size="icon" class="h-9 w-9 text-muted-foreground hover:text-primary hover:bg-primary/10" onclick={() => openAccountSettings(acc)}>
+                        <Settings class="w-4 h-4" />
+                    </Button>
                     <Button variant="ghost" size="icon" class="h-9 w-9 text-muted-foreground hover:text-destructive hover:bg-destructive/10" onclick={() => confirmDelete(acc)}>
                         <Trash2 class="w-4 h-4" />
                     </Button>
@@ -292,6 +427,58 @@
         {/each}
 	</div>
 </div>
+
+<Dialog.Root bind:open={settingsDialogOpen}>
+    <Dialog.Content class="sm:max-w-md">
+        <Dialog.Header>
+            <Dialog.Title>{accountToSettings?.name || accountToSettings?.id} Ayarları</Dialog.Title>
+            <Dialog.Description>Bu hesaba özel otomatik yanıt ayarlarını yapın.</Dialog.Description>
+        </Dialog.Header>
+        <div class="grid w-full items-center gap-6 py-4">
+            <div class="flex items-center justify-between">
+                <div class="space-y-0.5">
+                    <Label for="default-account">Varsayılan Hesap</Label>
+                    <p class="text-[10px] text-muted-foreground">Bu hesabı mesaj gönderiminde varsayılan olarak seçer.</p>
+                </div>
+                {#if accountToSettings}
+                    <Switch id="default-account" bind:checked={accountToSettings.isDefault} />
+                {/if}
+            </div>
+
+            <div class="flex items-center justify-between">
+                <div class="space-y-0.5">
+                    <Label for="auto-reply">Otomatik Yanıt</Label>
+                    <p class="text-[10px] text-muted-foreground">Bu hesap için otomatik yanıtı aktif eder.</p>
+                </div>
+                {#if accountToSettings}
+                    <Switch id="auto-reply" bind:checked={accountToSettings.autoReply} />
+                {/if}
+            </div>
+            {#if accountToSettings?.autoReply}
+                <div class="space-y-2 animate-in slide-in-from-top-2 duration-300">
+                    <Label for="auto-msg" class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Otomatik Yanıt Mesajı</Label>
+                    <Textarea 
+                        id="auto-msg" 
+                        bind:value={accountToSettings.autoReplyMessage}
+                        placeholder="Yanıt mesajınızı yazın..."
+                        class="min-h-[120px] bg-muted/30 border-none rounded-xl focus:ring-1 focus:ring-primary/20"
+                    />
+                    <p class="text-[10px] text-muted-foreground italic">Bu mesaj, bu hesaba <b>ilk kez</b> mesaj gönderen kişilere bir defaya mahsus iletilecektir.</p>
+                </div>
+            {/if}
+        </div>
+        <Dialog.Footer class="gap-2">
+            <Button variant="outline" onclick={() => settingsDialogOpen = false}>Vazgeç</Button>
+            <Button onclick={saveAccountSettings} class="gap-2 min-w-[100px]">
+                {#if isSavingSettings}
+                    <Loader2 class="w-4 h-4 animate-spin" />
+                {/if}
+                Değişiklikleri Kaydet
+            </Button>
+        </Dialog.Footer>
+    </Dialog.Content>
+</Dialog.Root>
+
 
 <AlertDialog.Root bind:open={deleteDialogOpen}>
     <AlertDialog.Content>
@@ -302,8 +489,11 @@
             </AlertDialog.Description>
         </AlertDialog.Header>
         <AlertDialog.Footer>
-            <AlertDialog.Cancel>Vazgeç</AlertDialog.Cancel>
-            <AlertDialog.Action onclick={deleteAccount} class="bg-destructive text-white hover:bg-destructive/90">
+            <AlertDialog.Cancel disabled={isDeleting}>Vazgeç</AlertDialog.Cancel>
+            <AlertDialog.Action onclick={deleteAccount} class="bg-destructive text-white hover:bg-destructive/90 min-w-[100px]" disabled={isDeleting}>
+                {#if isDeleting}
+                    <Loader2 class="w-4 h-4 animate-spin mr-2" />
+                {/if}
                 Hesabı Sil
             </AlertDialog.Action>
         </AlertDialog.Footer>
@@ -326,8 +516,13 @@
             />
         </div>
         <Dialog.Footer>
-            <Button variant="outline" onclick={() => editDialogOpen = false}>Vazgeç</Button>
-            <Button onclick={saveAccountName} disabled={!editedName.trim()}>Kaydet</Button>
+            <Button variant="outline" onclick={() => editDialogOpen = false} disabled={isSavingName}>Vazgeç</Button>
+            <Button onclick={saveAccountName} disabled={!editedName.trim() || isSavingName} class="min-w-[100px]">
+                {#if isSavingName}
+                    <Loader2 class="w-4 h-4 animate-spin mr-2" />
+                {/if}
+                Kaydet
+            </Button>
         </Dialog.Footer>
     </Dialog.Content>
 </Dialog.Root>

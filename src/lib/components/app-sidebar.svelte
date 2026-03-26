@@ -29,7 +29,6 @@
 				title: "Ana Sayfa",
 				url: "/",
 				icon: SquareTerminalIcon,
-				isActive: true,
 			},
 			{
 				title: "Mesaj Gönder",
@@ -47,13 +46,11 @@
 				icon: ChartPieIcon,
 			},
 		],
-		projects: [],
 	};
 </script>
 
 <script lang="ts">
 	import NavMain from "./nav-main.svelte";
-	import NavProjects from "./nav-projects.svelte";
 	import NavUser from "./nav-user.svelte";
 	import TeamSwitcher from "./team-switcher.svelte";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
@@ -73,7 +70,6 @@
 	</Sidebar.Header>
 	<Sidebar.Content>
 		<NavMain items={data.navMain} />
-		<NavProjects projects={data.projects} />
 	</Sidebar.Content>
 	<Sidebar.Footer>
 		<NavUser user={user || data.user} />

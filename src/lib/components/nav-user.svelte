@@ -56,31 +56,33 @@
 				</DropdownMenu.Label>
 				<DropdownMenu.Separator />
 				<DropdownMenu.Group>
-					<DropdownMenu.Item>
+					<DropdownMenu.Item class="cursor-pointer">
 						<SparklesIcon />
-						Upgrade to Pro
+						Pro'ya Yükselt
 					</DropdownMenu.Item>
 				</DropdownMenu.Group>
 				<DropdownMenu.Separator />
 				<DropdownMenu.Group>
-					<DropdownMenu.Item>
-						<BadgeCheckIcon />
-						Account
-					</DropdownMenu.Item>
-					<DropdownMenu.Item>
+					<a href="/hesabim">
+						<DropdownMenu.Item class="cursor-pointer">
+							<BadgeCheckIcon />
+							Hesabım
+						</DropdownMenu.Item>
+					</a>
+					<DropdownMenu.Item class="cursor-pointer">
 						<CreditCardIcon />
-						Billing
+						Faturalandırma
 					</DropdownMenu.Item>
-					<DropdownMenu.Item>
+					<DropdownMenu.Item class="cursor-pointer">
 						<BellIcon />
-						Notifications
+						Bildirimler
 					</DropdownMenu.Item>
 				</DropdownMenu.Group>
 				<DropdownMenu.Separator />
 				<a href="/logout">
 					<DropdownMenu.Item class="cursor-pointer">
 						<LogOutIcon />
-						Log out
+						Çıkış Yap
 					</DropdownMenu.Item>
 				</a>
 			</DropdownMenu.Content>

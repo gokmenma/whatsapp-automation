@@ -28,9 +28,12 @@
 	import * as Dialog from "$lib/components/ui/dialog";
 
 
+	import * as XLSX from 'xlsx';
+
 	let phoneNumberText = $state("");
 	let messageBody = $state("");
 	let selectedAccountId = $state("");
+	let userCredits = $state(0);
 	let accounts: any[] = $state([]);
 	let isBulk = $state(false);
 	
@@ -43,21 +46,33 @@
 	let mediaData: { data: string, mimetype: string, filename: string } | null = $state(null);
 	let mediaPreview: string | null = $state(null);
 
+	// Personalized Bulk
+	let isPersonalized = $state(false);
+	let useFileMedia = $state(false);
+	let personalizedRecipients: { to: string, message: string, filePath?: string }[] = $state([]);
+
 	// Contact picker states
+    // ... rest of picker states ...
 	let isContactModalOpen = $state(false);
 	let allContacts: any[] = $state([]);
 	let filteredContacts: any[] = $state([]);
 	let searchQuery = $state("");
 	let isLoadingContacts = $state(false);
 	let selectedContacts: Set<string> = $state(new Set());
+    
+    // Input references for resetting
+    let mediaInput: HTMLInputElement | undefined = $state();
+    let fileInput: HTMLInputElement | undefined = $state();
 
 	async function fetchAccounts() {
 		try {
 			const res = await fetch('/api/whatsapp/status');
 			const data = await res.json();
 			accounts = (data.accounts || []).filter((a: any) => a.status === 'ready');
+			userCredits = data.credits || 0;
 			if (accounts.length > 0 && !selectedAccountId) {
-				selectedAccountId = accounts[0].id;
+				const defaultAccount = accounts.find((a: any) => a.isDefault);
+				selectedAccountId = defaultAccount ? defaultAccount.id : accounts[0].id;
 			}
 		} catch (e) {
 			console.error("Account fetch error:", e);
@@ -131,40 +146,102 @@
 		selectedContacts.clear();
 	}
 
-	function handleFileSelect(event: Event) {
-		const target = event.target as HTMLInputElement;
-		const file = target.files?.[0];
-		if (!file) return;
+    function handleFileSelect(event: Event) {
+        const target = event.target as HTMLInputElement;
+        const file = target.files?.[0];
+        if (!file) return;
 
-		const reader = new FileReader();
-		reader.onload = (e) => {
-			const content = e.target?.result as string;
-			if (file.type === "text/csv" || file.name.endsWith('.csv')) {
-				// Support multiple delimiters: newline, comma, semicolon, tab
-				const numbers = content.split(/[\n,;\t]+/)
-					.map(n => n.trim().replace(/[^\d+]/g, '')) // Clean characters except digits and +
-					.filter(n => n.length > 5);
-				phoneNumberText = Array.from(new Set(numbers)).join('\n'); // Unique numbers
-			} else {
-				const base64 = content.split(',')[1];
-				mediaData = {
-					data: base64,
-					mimetype: file.type,
-					filename: file.name
-				};
-				if (file.type.startsWith('image/')) {
-					mediaPreview = content;
-				} else {
-					mediaPreview = "doc"; // Placeholder for documents
-				}
-			}
-		};
-		if (file.type === "text/csv" || file.name.endsWith('.csv')) {
-			reader.readAsText(file);
-		} else {
-			reader.readAsDataURL(file);
-		}
-	}
+        if (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type === 'application/pdf') {
+            const mediaReader = new FileReader();
+            mediaReader.onload = (e) => {
+                const content = e.target?.result as string;
+                const base64 = content.split(',')[1];
+                mediaData = { data: base64, mimetype: file.type, filename: file.name };
+                if (file.type.startsWith('image/')) mediaPreview = content;
+                else mediaPreview = "doc";
+            };
+            mediaReader.readAsDataURL(file);
+            return;
+        }
+
+        // Data file branch (Excel/CSV)
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const data = new Uint8Array(e.target?.result as ArrayBuffer);
+                const workbook = XLSX.read(data, { type: 'array' });
+                if (workbook.SheetNames.length === 0) return;
+                
+                const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+                const rows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                if (rows.length === 0) return;
+
+                const tempRecipients: { to: string, message: string, filePath?: string }[] = [];
+                const tempNumbers: string[] = [];
+                
+                let foundPhoneIdx = -1;
+                let foundMsgIdx = -1;
+                let foundPathIdx = -1;
+
+                for (const row of rows.slice(0, 10)) {
+                    if (foundPhoneIdx !== -1 && foundMsgIdx !== -1 && foundPathIdx !== -1) break;
+                    row.forEach((cell, idx) => {
+                        const sVal = String(cell || '').trim();
+                        const digits = sVal.replace(/[^\d]/g, '');
+                        // Path detection: starts with letter:\ or / and has extension
+                        const isPath = (sVal.includes(':\\') || sVal.startsWith('/')) && sVal.includes('.');
+                        
+                        if (foundPhoneIdx === -1 && digits.length >= 7 && digits.length <= 15) {
+                            foundPhoneIdx = idx;
+                        } else if (isPath && foundPathIdx === -1) {
+                            foundPathIdx = idx;
+                        } else if (foundMsgIdx === -1 && sVal.length > 2 && isNaN(Number(sVal))) {
+                            if (idx !== foundPhoneIdx && idx !== foundPathIdx) foundMsgIdx = idx;
+                        }
+                    });
+                }
+
+                if (foundPhoneIdx === -1) foundPhoneIdx = 0;
+                if (foundMsgIdx === -1 && rows[0].length > 1) foundMsgIdx = 1;
+                if (foundPathIdx === -1 && rows[0].length > 2) foundPathIdx = 2;
+
+                rows.forEach((row) => {
+                    const rawPhone = String(row[foundPhoneIdx] || '').trim();
+                    let phone = rawPhone.replace(/[^\d]/g, '');
+                    
+                    // Normalize Turkish numbers (10 digits starting with 5 -> add 90)
+                    if (phone.length === 10 && (phone.startsWith('5') || phone.startsWith('8'))) {
+                        phone = '90' + phone;
+                    } else if (phone.length === 11 && phone.startsWith('05')) {
+                        phone = '90' + phone.substring(1);
+                    }
+
+                    if (phone.length < 5) return;
+                    const message = foundMsgIdx !== -1 ? String(row[foundMsgIdx] || '').trim() : '';
+                    const fPath = foundPathIdx !== -1 ? String(row[foundPathIdx] || '').trim() : '';
+                    
+                    tempNumbers.push(phone);
+                    if (message.length > 0 || fPath.length > 0) {
+                        tempRecipients.push({ to: phone, message, filePath: fPath });
+                    }
+                });
+
+                phoneNumberText = Array.from(new Set(tempNumbers)).join('\n');
+                isBulk = tempNumbers.length > 1;
+                
+                if (tempRecipients.length > 0) {
+                    personalizedRecipients = tempRecipients;
+                    isPersonalized = true;
+                } else {
+                    personalizedRecipients = [];
+                    isPersonalized = false;
+                }
+            } catch (err) {
+                console.error("File parse error:", err);
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    }
 
 	let userSettings = $state({
 		messageDelay: 2000
@@ -183,44 +260,66 @@
 	}
 
 	async function startSending() {
-		// Final cleaning of recipients
-		const recipients = phoneNumberText.split(/[\n,;\t]+/)
-			.map(n => n.trim().replace(/[^\d+]/g, '')) 
+		const recipientsInTextarea = phoneNumberText.split(/[\n,;\t]+/)
+			.map(n => n.trim().replace(/[^\d+]/g, ''))
 			.filter(n => n.length > 5);
 
-		if (recipients.length === 0) return alert("Hatalı veya eksik numaralar");
+		totalCount = recipientsInTextarea.length;
+
+		if (totalCount === 0) return alert("Hatalı veya eksik numaralar");
+		if (userCredits <= 0) return alert("Krediniz tükenmiş! Lütfen yükleme yapın.");
 		
-		totalCount = recipients.length;
 		sentCount = 0;
 		errorCount = 0;
 		sendStatus = "sending";
 
-		for (const recipient of recipients) {
+		const finalRecipients = recipientsInTextarea.map(phone => {
+            // Find if this phone has a personalized data from file
+            const personalized = (isPersonalized || useFileMedia) ? personalizedRecipients.find(r => r.to === phone) : null;
+            return {
+                to: phone,
+                message: (isPersonalized && personalized) ? personalized.message : messageBody,
+                filePath: (useFileMedia && personalized) ? personalized.filePath : undefined
+            };
+        });
+
+        const batchId = finalRecipients.length > 1 ? Math.random().toString(36).substr(2, 9) : undefined;
+
+		for (const item of finalRecipients) {
 			if (sendStatus !== "sending") break;
-			currentRecipient = recipient;
+			if (userCredits <= 0) {
+				alert("Gönderim sırasında krediniz bitti!");
+				break;
+			}
+
+			currentRecipient = item.to;
 			try {
 				const res = await fetch('/api/whatsapp/send', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
 						accountId: selectedAccountId,
-						to: recipient,
-						message: messageBody,
-						media: mediaData
+						to: item.to,
+						message: item.message,
+						media: useFileMedia ? null : mediaData,
+                        filePath: item.filePath,
+                        batchId: batchId
 					})
 				});
 				const data = await res.json();
 				if (data.success) {
 					sentCount++;
+					if (data.remainingCredits !== undefined) {
+						userCredits = data.remainingCredits;
+					}
 				} else {
 					errorCount++;
 				}
 			} catch (e) {
 				errorCount++;
 			}
-			// Wait between messages using user setting (with bit of randomness for safety)
 			const baseDelay = userSettings.messageDelay;
-			const randomVariation = Math.random() * 1000 - 500; // +/- 500ms
+			const randomVariation = Math.random() * 1000 - 500;
 			const finalDelay = Math.max(600, baseDelay + randomVariation);
 			await new Promise(r => setTimeout(r, finalDelay));
 		}
@@ -237,6 +336,11 @@
 		sentCount = 0;
 		errorCount = 0;
 		totalCount = 0;
+        isPersonalized = false;
+        useFileMedia = false;
+        personalizedRecipients = [];
+        if (mediaInput) mediaInput.value = "";
+        if (fileInput) fileInput.value = "";
 	}
 
 	onMount(() => {
@@ -247,6 +351,13 @@
 	$effect(() => {
 		if (searchQuery !== undefined) {
 			filterContacts();
+		}
+	});
+
+	$effect(() => {
+		if (!isBulk) {
+			isPersonalized = false;
+			useFileMedia = false;
 		}
 	});
 </script>
@@ -260,9 +371,14 @@
 				<Send class="w-3.5 h-3.5" /> Tekli veya toplu WhatsApp mesajları oluşturun ve gönderin.
 			</p>
 		</div>
-		<div class="flex items-center gap-2">
+		<div class="flex items-center gap-3">
+			<Badge variant={userCredits > 5 ? "secondary" : "destructive"} class="h-9 px-4 flex items-center gap-2 rounded-full border shadow-sm font-bold text-sm">
+				<div class="w-2 h-2 rounded-full {userCredits > 5 ? 'bg-primary' : 'bg-destructive'} animate-pulse"></div>
+				Kalan Kredi: {userCredits}
+			</Badge>
+
 			{#if sendStatus === "finished"}
-				<Button variant="outline" size="sm" onclick={resetForm} class="h-9">
+				<Button variant="outline" size="sm" onclick={resetForm} class="h-9 rounded-full px-4">
 					<Plus class="w-4 h-4 mr-2" /> Yeni Mesaj
 				</Button>
 			{/if}
@@ -289,14 +405,27 @@
 					<div class="space-y-3">
 						<div class="flex items-center justify-between">
 							<Label class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Medya Ekleyin <span class="text-[10px] font-normal lowercase">(isteğe bağlı)</span></Label>
-							{#if mediaData}
-								<Button variant="ghost" size="sm" class="h-7 text-xs text-destructive hover:text-destructive/80" onclick={() => { mediaData = null; mediaPreview = null; }}>
-									<Trash2 class="w-3 h-3 mr-1" /> Kaldır
-								</Button>
-							{/if}
+							<div class="flex items-center gap-3">
+								{#if isBulk}
+									<div class="flex items-center gap-2 animate-in fade-in zoom-in-95">
+										<Label for="use-file-media" class="text-[10px] font-bold {useFileMedia ? 'text-primary' : 'text-muted-foreground'} cursor-pointer transition-colors">Dosyadaki dosya yolunu kullan</Label>
+										<Checkbox 
+											id="use-file-media" 
+											bind:checked={useFileMedia} 
+											disabled={personalizedRecipients.length === 0}
+											class="h-3.5 w-3.5 rounded" 
+										/>
+									</div>
+								{/if}
+								{#if mediaData && !useFileMedia}
+									<Button variant="ghost" size="sm" class="h-7 text-xs text-destructive hover:text-destructive/80" onclick={() => { mediaData = null; mediaPreview = null; }}>
+										<Trash2 class="w-3 h-3 mr-1" /> Kaldır
+									</Button>
+								{/if}
+							</div>
 						</div>
 
-						<div class="relative group">
+						<div class="relative group {useFileMedia ? 'pointer-events-none' : ''}">
 							{#if mediaPreview}
 								<div class="relative w-full aspect-video rounded-xl border bg-muted/20 flex items-center justify-center overflow-hidden transition-all duration-300 group-hover:shadow-inner group-hover:bg-muted/40">
 									{#if mediaPreview === "doc"}
@@ -311,7 +440,7 @@
 									{/if}
 								</div>
 							{:else}
-								<input type="file" id="media" class="hidden" onchange={handleFileSelect} />
+								<input type="file" id="media" bind:this={mediaInput} class="hidden" onchange={handleFileSelect} />
 								<Label for="media" class="flex flex-col items-center justify-center h-44 rounded-xl border-2 border-dashed border-muted-foreground/20 bg-muted/5 transition-all duration-300 hover:border-primary/50 hover:bg-primary/2 cursor-pointer group">
 									<div class="flex flex-col items-center gap-3 transition-transform duration-300 group-hover:-translate-y-1">
 										<div class="p-3 bg-background rounded-full shadow-sm border group-hover:border-primary/50">
@@ -324,6 +453,18 @@
 									</div>
 								</Label>
 							{/if}
+
+							{#if useFileMedia}
+								<div class="absolute inset-0 z-10 bg-background/80 backdrop-blur-sm flex items-center justify-center rounded-xl border border-dashed border-primary/30 animate-in fade-in duration-300">
+									<div class="text-center p-6">
+										<div class="p-3 bg-primary/10 rounded-full w-fit mx-auto mb-3">
+											<FileText class="w-6 h-6 text-primary" />
+										</div>
+										<p class="text-sm font-bold text-primary">Dosyadaki Medyalar Kullanılıyor</p>
+										<p class="text-[11px] text-muted-foreground mt-1 max-w-[200px]">Gönderim sırasında her numara için Excel'deki dosya yolu kullanılacaktır.</p>
+									</div>
+								</div>
+							{/if}
 						</div>
 					</div>
 
@@ -331,13 +472,27 @@
 
 					<!-- Message Textarea -->
 					<div class="space-y-3">
-						<Label for="message" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Mesaj Metni</Label>
+						<div class="flex items-center justify-between">
+							<Label for="message" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Mesaj Metni</Label>
+							{#if isBulk}
+								<div class="flex items-center gap-2 animate-in fade-in zoom-in-95">
+									<Label for="use-file-msg" class="text-[10px] font-bold {isPersonalized ? 'text-primary' : 'text-muted-foreground'} cursor-pointer transition-colors">Dosyadaki mesajları kullan</Label>
+									<Checkbox 
+										id="use-file-msg" 
+										bind:checked={isPersonalized} 
+										disabled={personalizedRecipients.length === 0}
+										class="h-3.5 w-3.5 rounded" 
+									/>
+								</div>
+							{/if}
+						</div>
 						<div class="relative group">
 							<Textarea 
 								id="message" 
 								bind:value={messageBody} 
-								placeholder="Mesajınızı buraya yazın..." 
-								class="min-h-[180px] text-sm resize-none border-none bg-muted/10 p-4 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-xl shadow-inner-sm" 
+								placeholder={isPersonalized ? "Excel dosyasındaki kişiye özel mesajlar kullanılacaktır." : "Mesajınızı buraya yazın..."} 
+								disabled={isPersonalized}
+								class="min-h-[180px] text-sm resize-none border-none bg-muted/10 p-4 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-xl shadow-inner-sm {isPersonalized ? 'opacity-50' : ''}" 
 							/>
 							{#if messageBody.length > 0}
 								<div class="absolute bottom-3 right-3 text-[10px] bg-background/80 backdrop-blur-sm px-2 py-1 rounded border shadow-sm text-muted-foreground font-mono">
@@ -365,26 +520,43 @@
 					</div>
 				</Card.Header>
 				<Card.Content class="p-6 space-y-6">
-					<!-- Account Selection -->
-					<div class="space-y-3">
-						<Label class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Giriş Yapılan Hesap</Label>
-						<Select.Root type="single" bind:value={selectedAccountId}>
-							<Select.Trigger class="w-full bg-muted/10 border-none transition-all hover:bg-muted/20 focus:ring-1 focus:ring-primary/20 rounded-lg">
-								<div class="flex items-center gap-2">
-									<User class="w-3.5 h-3.5 text-muted-foreground" />
-									<span>{selectedAccountId || "Hesap Seçin"}</span>
+					<!-- Account Selection Redesign (Matches User's reference) -->
+					<div class="p-6 bg-background border border-border/80 rounded-2xl shadow-xs flex items-center justify-between transition-all hover:shadow-md hover:border-primary/20 group">
+						<div class="flex flex-col gap-1.5 min-w-0">
+							<h3 class="font-bold text-base text-foreground flex items-center gap-2 leading-none">
+								<div class="p-1 bg-primary/10 rounded-md group-hover:bg-primary/20 transition-colors">
+									<User class="w-3.5 h-3.5 text-primary" />
 								</div>
+								<span class="truncate">{accounts.find(a => a.id === selectedAccountId)?.name || "Seçili Hesap Yok"}</span>
+								{#if selectedAccountId}
+									<div class="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)] animate-pulse"></div>
+								{/if}
+							</h3>
+							<p class="text-xs text-muted-foreground font-medium opacity-80 truncate pl-8">
+								{selectedAccountId ? `Bağlı hesap üzerinden gönderime hazır (ID: ${selectedAccountId.substring(0, 8)}...)` : "Mesaj gönderimi için aktif bir WhatsApp hesabı seçin."}
+							</p>
+						</div>
+
+						<Select.Root type="single" bind:value={selectedAccountId}>
+							<Select.Trigger class="w-auto h-9 px-4 min-w-[100px] bg-background border shadow-xs hover:bg-muted hover:border-primary/30 transition-all rounded-xl text-xs font-bold flex items-center justify-center gap-2">
+								{selectedAccountId ? 'Değiştir' : 'Hesap Seç'}
 							</Select.Trigger>
-							<Select.Content>
+							<Select.Content class="rounded-xl shadow-2xl border-primary/10">
 								{#if accounts.length === 0}
-									<div class="p-2 text-xs text-muted-foreground text-center">Aktif hesap bulunamadı...</div>
+									<div class="p-4 text-xs text-muted-foreground text-center italic">Aktif bağlı hesap bulunamadı...</div>
 								{:else}
 									{#each accounts as acc}
-										<Select.Item value={acc.id} label={acc.id}>
-											<span class="flex items-center gap-2">
-												<div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]"></div>
-												{acc.id}
-											</span>
+										<Select.Item value={acc.id} label={acc.name} class="py-3 px-4 rounded-lg focus:bg-primary/5 mb-1 last:mb-0 transition-colors">
+											<div class="flex items-center gap-3 w-full">
+												<div class="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-muted-foreground font-bold shrink-0">
+													{acc.name.charAt(0)}
+												</div>
+												<div class="flex flex-col">
+													<span class="font-bold text-sm tracking-tight">{acc.name}</span>
+													<span class="text-[10px] text-muted-foreground font-mono">{acc.id.substring(0, 12)}...</span>
+												</div>
+												<div class="ml-auto w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]"></div>
+											</div>
 										</Select.Item>
 									{/each}
 								{/if}
@@ -415,11 +587,24 @@
 								class="min-h-[120px] text-sm font-mono border-none bg-muted/10 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-lg shadow-inner-sm" 
 							/>
 							{#if isBulk}
-								<div class="absolute bottom-2 right-2">
-									<input type="file" id="csv" accept=".csv" class="hidden" onchange={handleFileSelect} />
-									<Button variant="outline" size="sm" class="h-7 text-[10px] bg-background/80" onclick={() => document.getElementById('csv')?.click()}>
-										<UploadCloud class="w-3 h-3 mr-1" /> CSV
+								<div class="absolute bottom-2 right-2 flex flex-wrap justify-end gap-1.5 backdrop-blur-sm p-1 rounded-lg">
+									<input type="file" id="csv" bind:this={fileInput} accept=".csv,.xlsx,.xls" class="hidden" onchange={handleFileSelect} />
+									
+                                    {#if isPersonalized}
+                                        <Badge variant="outline" class="h-7 border-primary/40 text-primary bg-primary/5 animate-in fade-in zoom-in-95">
+                                            Özel Mod: {personalizedRecipients.length} Satır
+                                        </Badge>
+                                    {/if}
+
+                                    <Button variant="outline" size="sm" class="h-7 text-[10px] bg-background/90 shadow-sm" onclick={() => document.getElementById('csv')?.click()}>
+										<UploadCloud class="w-3 h-3 mr-1" /> {isPersonalized ? "Dosya Değiştir" : "Dosya Yükle"}
 									</Button>
+
+									{#if isPersonalized}
+										<Button variant="destructive" size="sm" class="h-7 text-[10px] shadow-sm" onclick={() => { isPersonalized = false; personalizedRecipients = []; phoneNumberText = ""; isBulk = false; if (fileInput) fileInput.value = ""; }}>
+											<Trash2 class="w-3 h-3 mr-1" /> Temizle
+										</Button>
+									{/if}
 								</div>
 							{/if}
 						</div>
@@ -463,7 +648,7 @@
 							<Button 
 								onclick={startSending} 
 								class="w-full h-11 rounded-xl shadow-lg shadow-primary/20 transition-all hover:-translate-y-px active:translate-y-0 font-semibold text-sm" 
-								disabled={!selectedAccountId || !messageBody || !phoneNumberText}
+								disabled={!selectedAccountId || !phoneNumberText || ((!isPersonalized && !messageBody) && (!useFileMedia && !mediaData)) || ( (isPersonalized || useFileMedia) && personalizedRecipients.length === 0)}
 							>
 								<Send class="w-4 h-4 mr-2" /> Gönderimi Başlat
 							</Button>

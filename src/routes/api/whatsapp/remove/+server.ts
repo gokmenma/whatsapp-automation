@@ -28,8 +28,8 @@ export async function POST({ request, locals }) {
             return json({ success: false, error: 'Account not found or not owned by you' }, { status: 404 });
         }
 
-        // Now remove from WhatsApp instances
-        removeAccount(accountId);
+        // Now remove from WhatsApp instances (and delete session data)
+        await removeAccount(accountId);
         
         return json({ success: true, message: `Account ${accountId} removed` });
     } catch (e: any) {

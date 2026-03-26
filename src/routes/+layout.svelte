@@ -4,6 +4,9 @@
 	import { Separator } from "$lib/components/ui/separator";
 	import * as Sidebar from "$lib/components/ui/sidebar";
 	import { page } from "$app/state";
+	import { ModeWatcher } from "mode-watcher";
+	import ThemeToggle from "$lib/components/theme-toggle.svelte";
+	import { Toaster } from "svelte-sonner";
 	import './layout.css';
 
 	let { children, data } = $props();
@@ -12,7 +15,20 @@
 		page.url.pathname.startsWith('/login') || 
 		page.url.pathname.startsWith('/register')
 	);
+	function getRouteTitle(path: string) {
+		if (path === '/') return 'Genel Bakış';
+		if (path.startsWith('/mesaj-gonder')) return 'Mesaj Gönder';
+		if (path.startsWith('/hesaplar')) return 'Hesaplar';
+		if (path.startsWith('/ayarlar')) return 'Ayarlar';
+		if (path.startsWith('/hesabim')) return 'Hesabım';
+		return 'Panel';
+	}
+
+	const currentTitle = $derived(getRouteTitle(page.url.pathname));
 </script>
+
+<ModeWatcher />
+<Toaster position="top-right" richColors />
 
 {#if isAuthPage}
 	{@render children()}
@@ -29,14 +45,17 @@
 					<Breadcrumb.Root>
 						<Breadcrumb.List>
 							<Breadcrumb.Item class="hidden md:block">
-								<Breadcrumb.Link href="/">Dashboard</Breadcrumb.Link>
+								<Breadcrumb.Link href="/">Panel</Breadcrumb.Link>
 							</Breadcrumb.Item>
 							<Breadcrumb.Separator class="hidden md:block" />
 							<Breadcrumb.Item>
-								<Breadcrumb.Page>Overview</Breadcrumb.Page>
+								<Breadcrumb.Page>{currentTitle}</Breadcrumb.Page>
 							</Breadcrumb.Item>
 						</Breadcrumb.List>
 					</Breadcrumb.Root>
+				</div>
+				<div class="ms-auto px-4 relative z-50">
+					<ThemeToggle />
 				</div>
 			</header>
 			<div class="flex flex-1 flex-col gap-4 p-4 pt-0">
