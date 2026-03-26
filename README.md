@@ -29,6 +29,29 @@ npm run dev
 npm run dev -- --open
 ```
 
+## Database Setup
+
+This project uses SQLite with Drizzle ORM. Since the database file (`sqlite.db`) is not tracked in git, you need to initialize it after cloning:
+
+1.  **Install dependencies**:
+    ```sh
+    npm install
+    ```
+
+2.  **Initialize the database**:
+    Create the database file and set up the tables:
+    ```sh
+    npm run db:push
+    ```
+
+3.  **Seed initial data**:
+    After starting the development server, visit the following URL in your browser to seed the credit packages:
+    `http://localhost:5173/api/seed-packages`
+
+4.  **Register**:
+    Go to `/register` to create your first user account.
+
+
 ## Building
 
 To create a production version of your app:
