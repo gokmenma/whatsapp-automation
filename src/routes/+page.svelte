@@ -63,12 +63,27 @@
                 }
             });
 
-            // Update status for batch groups
+            // Update status and summary for all groups
             groups.forEach(g => {
+                const total = g.logs.length;
+                const success = g.logs.filter((l: any) => l.status === 'success').length;
+                const error = g.logs.filter((l: any) => l.status === 'error').length;
+                
+                g.totalCount = total;
+                g.successCount = success;
+                g.errorCount = error;
+
                 if (g.isBatch) {
-                    const hasError = g.logs.some((l: any) => l.status === 'error');
-                    g.status = hasError ? 'error' : 'success';
-                    g.recipient = `${g.logs.length} Alıcı`;
+                    if (success === total) {
+                        g.status = 'success';
+                    } else if (error === total) {
+                        g.status = 'error';
+                    } else {
+                        g.status = 'partial';
+                    }
+                    g.recipient = `${total} Alıcı`;
+                } else {
+                    g.status = g.logs[0].status;
                 }
             });
 
@@ -205,11 +220,19 @@
                             <div class="w-24 font-medium text-[10px] bg-muted px-1.5 py-0.5 rounded truncate shrink-0">
                                 {group.accountName}
                             </div>
-                            <div class="w-32 font-medium truncate shrink-0 flex items-center gap-2">
+                            <div class="w-40 font-medium truncate shrink-0 flex items-center gap-1.5">
                                 {#if group.isBatch}
-                                    <Badge variant="outline" class="h-5 px-1 bg-blue-50 text-blue-600 border-blue-200">BATCH</Badge>
+                                    <Badge variant="outline" class="h-4 px-1 bg-blue-50 text-blue-600 border-blue-200 text-[8px] font-bold">BATCH</Badge>
                                 {/if}
-                                {group.recipient}
+                                <span class="truncate">{group.recipient}</span>
+                                
+                                {#if group.isBatch}
+                                    <div class="flex items-center gap-1 ml-auto mr-2">
+                                        <span class="text-[10px] font-bold text-green-600">{group.successCount}</span>
+                                        <span class="text-[9px] text-muted-foreground">/</span>
+                                        <span class="text-[10px] font-bold text-red-500">{group.errorCount}</span>
+                                    </div>
+                                {/if}
                             </div>
                             <div class="flex-1 text-xs text-muted-foreground truncate">
                                 {#if group.isBatch}
@@ -220,9 +243,11 @@
                             </div>
                             <div class="shrink-0 flex items-center gap-2">
                                 {#if group.status === 'success'}
-                                    <Badge class="bg-green-500">İletildi</Badge>
+                                    <Badge class="bg-green-600 hover:bg-green-600 min-w-[75px] justify-center">İletildi</Badge>
+                                {:else if group.status === 'error'}
+                                    <Badge variant="destructive" class="min-w-[75px] justify-center">İletilmedi</Badge>
                                 {:else}
-                                    <Badge variant="destructive">Hata</Badge>
+                                    <Badge variant="outline" class="bg-amber-50 text-amber-600 border-amber-200 hover:bg-amber-50 min-w-[75px] justify-center">Kısmi Başarı</Badge>
                                 {/if}
                                 <Button variant="ghost" size="sm" class="h-8 px-2" onclick={() => showDetails(group)}>Detay</Button>
                             </div>
@@ -343,7 +368,7 @@
                                             {#if log.status === 'success'}
                                                 <span class="text-[9px] font-bold uppercase text-green-600 px-1.5 py-0.5 rounded bg-green-50 border border-green-200">İletildi</span>
                                             {:else}
-                                                 <span class="text-[9px] font-bold uppercase text-red-500 px-1.5 py-0.5 rounded bg-red-50 border border-red-200">Hata</span>
+                                                 <span class="text-[9px] font-bold uppercase text-red-500 px-1.5 py-0.5 rounded bg-red-50 border border-red-200">İletilmedi</span>
                                             {/if}
                                         </div>
                                     </div>

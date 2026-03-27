@@ -86,3 +86,13 @@ export const logs = sqliteTable('logs', {
 }, (t) => ({
     accountIdIdx: index('logs_account_id_idx').on(t.accountId)
 }));
+
+export const messageTemplates = sqliteTable('message_templates', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    content: text('content').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
+}, (t) => ({
+    userIdIdx: index('message_templates_user_id_idx').on(t.userId)
+}));

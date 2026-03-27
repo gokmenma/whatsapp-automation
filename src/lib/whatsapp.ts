@@ -103,9 +103,18 @@ export async function initializeWhatsApp(accountId: string) {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(path.join(AUTH_PATH, `session-${accountId}`));
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    
-    console.log(`[${accountId}] Starting Baileys version ${version.join('.')} (Latest: ${isLatest})`);
+    // Cache Baileys version to avoid multiple network calls
+    if (!globalRef.baileysVersion) {
+        try {
+            const { version, isLatest } = await fetchLatestBaileysVersion();
+            globalRef.baileysVersion = version;
+            console.log(`[${accountId}] Fetched Baileys version: ${version.join('.')} (Latest: ${isLatest})`);
+        } catch (e) {
+            console.error(`[${accountId}] Failed to fetch Baileys version, using default:`, e);
+            globalRef.baileysVersion = [2, 3000, 1015901307]; // Fallback version
+        }
+    }
+    const version = globalRef.baileysVersion;
 
     const status: AccountStatus = {
         id: accountId,
@@ -232,7 +241,7 @@ export async function initializeWhatsApp(accountId: string) {
             
             if (shouldReconnect) {
                 // Short delay to avoid infinite retry loops on network issues
-                setTimeout(() => initializeWhatsApp(accountId), 1000);
+                setTimeout(() => initializeWhatsApp(accountId).catch(e => console.error(`[${accountId}] Reconnect error:`, e)), 3000);
             } else {
                 console.log(`[${accountId}] Connection closed. Device logged out.`);
                 clients.delete(accountId);
@@ -369,7 +378,61 @@ export async function sendWhatsAppMessage(accountId: string, to: string, message
         throw new Error(`Account ${accountId} is not ready`);
     }
 
-    const jid = toJid(to);
+    let jid = toJid(to);
+    let verificationPassed = false;
+    
+    // Verify number exists on WhatsApp (Fast & Precise Check)
+    try {
+        const cleanNumber = to.replace(/\D/g, '');
+        console.log(`[${accountId}] Checking onWhatsApp for: ${cleanNumber}`);
+        const results = await client.onWhatsApp(cleanNumber);
+        
+        console.log(`[${accountId}] onWhatsApp result for ${cleanNumber}:`, JSON.stringify(results));
+        
+        if (results && results.length > 0) {
+            const onWa = results[0];
+            if (onWa.exists) {
+                // IMPORTANT: Always use the JID provided by the server to avoid ghosting
+                jid = onWa.jid;
+                verificationPassed = true;
+                console.log(`[${accountId}] ✅ Number verified: ${cleanNumber} -> ${jid}`);
+            } else {
+                // Number is definitely NOT on WhatsApp - refund credit and stop
+                console.log(`[${accountId}] ❌ Number NOT on WhatsApp: ${cleanNumber}`);
+                await db.update(users).set({ credits: sql`${users.credits} + 1` }).where(eq(users.id, account.userId));
+                await db.insert(logs).values({
+                    id: Math.random().toString(36).substr(2, 9),
+                    batchId,
+                    accountId,
+                    timestamp: new Date(),
+                    recipient: to,
+                    status: "error",
+                    message: message.substring(0, 100),
+                    error: 'Bu numara WhatsApp kullanmıyor.'
+                });
+                return { success: false, error: 'Bu numara WhatsApp kullanmıyor.', remainingCredits: result[0].updatedCredits + 1 };
+            }
+        } else {
+            // Empty result - number likely not on WhatsApp, refund and stop
+            console.log(`[${accountId}] ❌ No onWhatsApp result for: ${cleanNumber}`);
+            await db.update(users).set({ credits: sql`${users.credits} + 1` }).where(eq(users.id, account.userId));
+            await db.insert(logs).values({
+                id: Math.random().toString(36).substr(2, 9),
+                batchId,
+                accountId,
+                timestamp: new Date(),
+                recipient: to,
+                status: "error",
+                message: message.substring(0, 100),
+                error: 'Bu numara WhatsApp kullanmıyor.'
+            });
+            return { success: false, error: 'Bu numara WhatsApp kullanmıyor.', remainingCredits: result[0].updatedCredits + 1 };
+        }
+    } catch (verifyErr: any) {
+        // On technical errors (timeout, connection issue), log warning but attempt to send anyway
+        console.warn(`[${accountId}] ⚠️ WhatsApp verification failed for ${to} (technical error), attempting delivery anyway:`, verifyErr.message || verifyErr);
+        // Keep the default jid and attempt to send - don't block valid numbers due to API hiccups
+    }
     
     try {
         let sentMsg;
@@ -421,7 +484,7 @@ export async function sendWhatsAppMessage(accountId: string, to: string, message
             message: message.substring(0, 100),
             error: e.message || 'Unknown error'
         });
-        return { success: false, error: e.message || 'WhatsApp gönderim hatası' };
+        return { success: false, error: e.message || 'WhatsApp gönderim hatası', remainingCredits: result[0].updatedCredits + 1 };
     }
 }
 
@@ -562,7 +625,9 @@ export async function initAllAccounts() {
 }
 
 if (!building) {
+    // Check if we are in dev mode to avoid multiple initializations during HMR
+    // SvelteKit re-imports this file often in dev mode
     setTimeout(() => {
         initAllAccounts().catch(e => console.error(e));
-    }, 1000);
+    }, 3000); // 3-second delay to let the server start properly
 }

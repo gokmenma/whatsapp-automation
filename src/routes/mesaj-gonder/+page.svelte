@@ -27,16 +27,40 @@
 		UserPlus,
 		X,
 		HelpCircle,
-		Info
+		Info,
+		BookTemplate,
+		LayoutTemplate,
+		Save,
+		Download,
+		Bold,
+		Italic,
+		Strikethrough,
+		Code,
+		Quote,
+		List,
+		ListOrdered
 	} from "@lucide/svelte";
 	import * as Dialog from "$lib/components/ui/dialog";
 	import * as Tooltip from "$lib/components/ui/tooltip";
+	import { ChevronRight, ChevronDown } from "@lucide/svelte";
+	import * as Collapsible from "$lib/components/ui/collapsible";
 
 
 	import * as XLSX from 'xlsx';
 
 	let phoneNumberText = $state("");
 	let messageBody = $state("");
+	let textareaSelection = $state({ start: 0, end: 0, text: '' });
+	let isTextSelected = $derived((textareaSelection.end ?? 0) > (textareaSelection.start ?? 0));
+	
+	let validNumberCount = $derived(
+		phoneNumberText.split(/\r?\n/)
+			.filter(line => line.trim().length > 0)
+			.map(line => line.split(';')[0].replace(/[^\d+]/g, ''))
+			.filter(to => to.length > 5)
+			.length
+	);
+
 	let selectedAccountId = $state("");
 	let userCredits = $state(0);
 	let accounts: any[] = $state([]);
@@ -47,6 +71,7 @@
 	let sentCount = $state(0);
 	let errorCount = $state(0);
 	let currentRecipient = $state("");
+	let sendingResults: { to: string, message: string, status: string, error?: string }[] = $state([]);
 
 	let mediaData: { data: string, mimetype: string, filename: string } | null = $state(null);
 	let mediaPreview: string | null = $state(null);
@@ -55,6 +80,14 @@
 	let isPersonalized = $state(false);
 	let useFileMedia = $state(false);
 	let personalizedRecipients: { to: string, message: string, filePath?: string }[] = $state([]);
+
+	// Template states
+	let templates: any[] = $state([]);
+	let isTemplateModalOpen = $state(false);
+	let isSaveTemplateModalOpen = $state(false);
+	let newTemplateName = $state("");
+	let isSavingTemplate = $state(false);
+	let isInfoOpen = $state(false);
 
 	// Contact picker states
     // ... rest of picker states ...
@@ -71,6 +104,7 @@
     let mediaInput: HTMLInputElement | undefined = $state();
     let fileInput: HTMLInputElement | undefined = $state();
     let isDraggingMedia = $state(false);
+	let isDraggingNumbers = $state(false);
 
 	async function fetchAccounts() {
 		try {
@@ -345,6 +379,7 @@
 		
 		sentCount = 0;
 		errorCount = 0;
+		sendingResults = [];
 		sendStatus = "sending";
 
         const batchId = finalRecipients.length > 1 ? Math.random().toString(36).substr(2, 9) : undefined;
@@ -373,14 +408,20 @@
 				const data = await res.json();
 				if (data.success) {
 					sentCount++;
+					sendingResults.push({ to: item.to, message: item.message, status: "Başarılı" });
 					if (data.remainingCredits !== undefined) {
 						userCredits = data.remainingCredits;
 					}
 				} else {
 					errorCount++;
+					sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: data.error || "Bilinmeyen hata" });
+					if (data.remainingCredits !== undefined) {
+						userCredits = data.remainingCredits;
+					}
 				}
-			} catch (e) {
+			} catch (e: any) {
 				errorCount++;
+				sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: e.message || "Bağlantı hatası" });
 			}
 			const baseDelay = userSettings.messageDelay;
 			const randomVariation = Math.random() * 1000 - 500;
@@ -389,6 +430,65 @@
 		}
 		
 		sendStatus = "finished";
+	}
+
+	async function fetchTemplates() {
+		try {
+			const res = await fetch('/api/templates');
+			const data = await res.json();
+			if (data.success) {
+				templates = data.templates;
+			}
+		} catch (e) {
+			console.error("Fetch templates error:", e);
+		}
+	}
+
+	async function saveTemplate() {
+		if (!newTemplateName) return alert("Şablon adı giriniz");
+		if (!messageBody) return alert("Mesaj içeriği boş olamaz");
+		
+		isSavingTemplate = true;
+		try {
+			const res = await fetch('/api/templates', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name: newTemplateName, content: messageBody })
+			});
+			const data = await res.json();
+			if (data.success) {
+				templates = [data.template, ...templates];
+				isSaveTemplateModalOpen = false;
+				newTemplateName = "";
+			} else {
+				alert(data.error || "Şablon kaydedilemedi");
+			}
+		} catch (e) {
+			console.error("Save template error:", e);
+		} finally {
+			isSavingTemplate = false;
+		}
+	}
+
+	async function deleteTemplate(id: number) {
+		if (!confirm("Bu şablonu silmek istediğinize emin misiniz?")) return;
+		
+		try {
+			const res = await fetch(`/api/templates/${id}`, { method: 'DELETE' });
+			const data = await res.json();
+			if (data.success) {
+				templates = templates.filter(t => t.id !== id);
+			} else {
+				alert(data.error || "Şablon silinemedi");
+			}
+		} catch (e) {
+			console.error("Delete template error:", e);
+		}
+	}
+
+	function useTemplate(content: string) {
+		messageBody = content;
+		isTemplateModalOpen = false;
 	}
 
 	function resetForm() {
@@ -400,18 +500,92 @@
 		sentCount = 0;
 		errorCount = 0;
 		totalCount = 0;
+		sendingResults = [];
         isPersonalized = false;
         useFileMedia = false;
         personalizedRecipients = [];
-        if (mediaInput) mediaInput.value = "";
+		if (mediaInput) mediaInput.value = "";
         if (fileInput) fileInput.value = "";
 		selectedContacts = new Set();
 		searchQuery = "";
+		textareaSelection = { start: 0, end: 0, text: '' };
 	}
+
+	function handleTextareaSelection(e: Event) {
+		const target = e.target as HTMLTextAreaElement;
+		const start = target.selectionStart;
+		const end = target.selectionEnd;
+		
+		if (start !== undefined && end !== undefined && end > start) {
+			textareaSelection = {
+				start,
+				end,
+				text: target.value.substring(start, end)
+			};
+		} else {
+			textareaSelection = { start: 0, end: 0, text: '' };
+		}
+	}
+
+	function applyFormatting(formatStr: string) {
+		if (textareaSelection.start === textareaSelection.end) return;
+
+		const start = textareaSelection.start;
+		const end = textareaSelection.end;
+		const selectedText = messageBody.substring(start, end);
+		
+		let formattedText = "";
+		if (formatStr === 'bold') {
+			formattedText = `*${selectedText}*`;
+		} else if (formatStr === 'italic') {
+			formattedText = `_${selectedText}_`;
+		} else if (formatStr === 'strike') {
+			formattedText = `~${selectedText}~`;
+		} else if (formatStr === 'mono') {
+			formattedText = `\`\`\`${selectedText}\`\`\``;
+		} else if (formatStr === 'quote') {
+			formattedText = `> ${selectedText}`;
+		} else if (formatStr === 'list') {
+			formattedText = selectedText.split('\n').map(l => `- ${l}`).join('\n');
+		} else if (formatStr === 'ordered') {
+			formattedText = selectedText.split('\n').map((l, i) => `${i + 1}. ${l}`).join('\n');
+		}
+
+		if (formattedText) {
+			messageBody = messageBody.substring(0, start) + formattedText + messageBody.substring(end);
+			textareaSelection = { start: 0, end: 0, text: '' };
+		}
+	}
+
+    function handleNumbersDrop(event: DragEvent) {
+        event.preventDefault();
+        isDraggingNumbers = false;
+        
+        const file = event.dataTransfer?.files?.[0];
+        if (!file) return;
+
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        if (ext === 'csv' || ext === 'xlsx' || ext === 'xls') {
+            processFile(file);
+        } else {
+            alert("Lütfen sadece Excel veya CSV dosyası yükleyin.");
+        }
+    }
+
+    function handleNumbersDragOver(event: DragEvent) {
+        event.preventDefault();
+        isDraggingNumbers = true;
+    }
+
+    function handleNumbersDragLeave(event: DragEvent) {
+        event.preventDefault();
+        isDraggingNumbers = false;
+    }
 
 	onMount(() => {
 		fetchAccounts();
 		fetchUserSettings();
+		fetchTemplates();
 	});
 
 	$effect(() => {
@@ -458,6 +632,24 @@
 			updatePhoneNumberText();
 		}
 	});
+
+	function exportReport() {
+		if (sendingResults.length === 0) return;
+		
+		const data = sendingResults.map(r => ({
+			"Alıcı": r.to,
+			"Mesaj": r.message,
+			"Durum": r.status,
+			"Hata Detayı": r.error || "-"
+		}));
+
+		const ws = XLSX.utils.json_to_sheet(data);
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, "Gönderim Raporu");
+		
+		const date = new Date().toLocaleString('tr-TR').replace(/[:/ ]/g, '-');
+		XLSX.writeFile(wb, `Gonderim_Raporu_${date}.xlsx`);
+	}
 </script>
 
 <div class="flex-1 w-full max-w-6xl mx-auto p-4 md:p-8 space-y-8 animate-in fade-in duration-500">
@@ -579,7 +771,70 @@
 					<!-- Message Textarea -->
 					<div class="space-y-3">
 						<div class="flex items-center justify-between">
-							<Label for="message" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Mesaj Metni</Label>
+							<div class="flex items-center gap-2">
+								<Label for="message" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">Mesaj Metni</Label>
+								
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										<Button 
+											variant="ghost" 
+											size="icon" 
+											class="w-7 h-7 rounded-full bg-primary/5 text-primary hover:bg-primary/10 transition-colors {isPersonalized ? 'opacity-30' : ''}"
+											onclick={() => isTemplateModalOpen = true}
+											disabled={isPersonalized}
+										>
+											<LayoutTemplate class="w-3.5 h-3.5" />
+										</Button>
+									</Tooltip.Trigger>
+									<Tooltip.Content>Şablon Seç</Tooltip.Content>
+								</Tooltip.Root>
+
+								{#if messageBody && !isPersonalized}
+									<Tooltip.Root>
+										<Tooltip.Trigger>
+											<Button 
+												variant="ghost" 
+												size="icon" 
+												class="w-7 h-7 rounded-full bg-green-500/5 text-green-600 hover:bg-green-500/10 transition-colors"
+												onclick={() => {
+													newTemplateName = "";
+													isSaveTemplateModalOpen = true;
+												}}
+											>
+												<Save class="w-3.5 h-3.5" />
+											</Button>
+										</Tooltip.Trigger>
+										<Tooltip.Content>Şablon Olarak Kaydet</Tooltip.Content>
+									</Tooltip.Root>
+								{/if}
+
+								{#if isTextSelected && !isPersonalized}
+									<div class="flex flex-wrap items-center gap-1 bg-muted/60 backdrop-blur-sm rounded-lg p-1 border border-primary/10 shadow-sm animate-in fade-in slide-in-from-left-2 duration-300 ml-1">
+										<Button variant="ghost" size="icon" class="w-6 h-6 rounded-md text-foreground/70 hover:text-foreground hover:bg-background hover:shadow-xs transition-all" onclick={() => applyFormatting('bold')} title="Kalın">
+											<Bold class="w-2.5 h-2.5" />
+										</Button>
+										<Button variant="ghost" size="icon" class="w-6 h-6 rounded-md text-foreground/70 hover:text-foreground hover:bg-background hover:shadow-xs transition-all" onclick={() => applyFormatting('italic')} title="İtalik">
+											<Italic class="w-2.5 h-2.5" />
+										</Button>
+										<Button variant="ghost" size="icon" class="w-6 h-6 rounded-md text-foreground/70 hover:text-foreground hover:bg-background hover:shadow-xs transition-all" onclick={() => applyFormatting('strike')} title="Üstü Çizili">
+											<Strikethrough class="w-2.5 h-2.5" />
+										</Button>
+										<Button variant="ghost" size="icon" class="w-6 h-6 rounded-md text-foreground/70 hover:text-foreground hover:bg-background hover:shadow-xs transition-all" onclick={() => applyFormatting('mono')} title="Kod / Tek Aralıklı">
+											<Code class="w-2.5 h-2.5" />
+										</Button>
+										<Button variant="ghost" size="icon" class="w-6 h-6 rounded-md text-foreground/70 hover:text-foreground hover:bg-background hover:shadow-xs transition-all" onclick={() => applyFormatting('ordered')} title="Numaralı Liste">
+											<ListOrdered class="w-2.5 h-2.5" />
+										</Button>
+										<Button variant="ghost" size="icon" class="w-6 h-6 rounded-md text-foreground/70 hover:text-foreground hover:bg-background hover:shadow-xs transition-all" onclick={() => applyFormatting('list')} title="Maddeli Liste">
+											<List class="w-2.5 h-2.5" />
+										</Button>
+										<Button variant="ghost" size="icon" class="w-6 h-6 rounded-md text-foreground/70 hover:text-foreground hover:bg-background hover:shadow-xs transition-all" onclick={() => applyFormatting('quote')} title="Alıntı">
+											<Quote class="w-2.5 h-2.5" />
+										</Button>
+									</div>
+								{/if}
+							</div>
+
 							{#if isBulk}
 								<div class="flex items-center gap-2 animate-in fade-in zoom-in-95">
 									<Label for="use-file-msg" class="text-[10px] font-bold {isPersonalized ? 'text-primary' : 'text-muted-foreground'} cursor-pointer transition-colors">Dosyadaki mesajları kullan</Label>
@@ -596,9 +851,12 @@
 							<Textarea 
 								id="message" 
 								bind:value={messageBody} 
+								onmouseup={handleTextareaSelection}
+								onkeyup={handleTextareaSelection}
+								onmouseleave={handleTextareaSelection}
 								placeholder={isPersonalized ? "Excel dosyasındaki kişiye özel mesajlar kullanılacaktır." : "Mesajınızı buraya yazın..."} 
 								disabled={isPersonalized}
-								class="min-h-[180px] text-sm resize-none border-none bg-muted/10 p-4 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-xl shadow-inner-sm {isPersonalized ? 'opacity-50' : ''}" 
+								class="min-h-[160px] max-h-[200px] overflow-y-auto text-sm resize-none border-none bg-muted/10 p-4 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-xl shadow-inner-sm {isPersonalized ? 'opacity-50' : ''}" 
 							/>
 							{#if messageBody.length > 0}
 								<div class="absolute bottom-3 right-3 text-[10px] bg-background/80 backdrop-blur-sm px-2 py-1 rounded border shadow-sm text-muted-foreground font-mono">
@@ -676,72 +934,122 @@
 						</Select.Root>
 					</div>
 
-					<!-- Recipients Section -->
 					<div class="space-y-3">
 						<div class="flex items-center justify-between">
-							<Label for="numbers" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Alıcı Numaraları</Label>
+							<div class="flex items-center gap-2">
+								<Label for="numbers" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Alıcı Numaraları</Label>
+								{#if validNumberCount > 0}
+									<Badge variant="secondary" class="h-5 px-1.5 text-[9px] font-bold rounded-md bg-primary/10 text-primary border-primary/20 animate-in zoom-in-95 duration-300">
+										{validNumberCount}
+									</Badge>
+								{/if}
+							</div>
 							<div class="flex items-center gap-1.5">
 								<Button variant="ghost" size="sm" class="h-6 px-2 text-[10px] text-primary hover:bg-primary/10 transition-colors" onclick={openContactModal}>
 									<UserPlus class="w-3 h-3 mr-1" /> Rehberden Seç
 								</Button>
-								<div class="flex items-center gap-1.5 ml-1">
-									<Checkbox id="bulk" bind:checked={isBulk} class="h-3.5 w-3.5 rounded" />
-									<Label for="bulk" class="text-[10px] font-medium cursor-pointer select-none">Dosya Yükle</Label>
-								</div>
 							</div>
 						</div>
 
-						<div class="relative">
+						<div 
+							class="relative group rounded-2xl transition-all duration-300 {isDraggingNumbers ? 'ring-2 ring-primary ring-offset-2' : ''}"
+							ondragover={handleNumbersDragOver}
+							ondragleave={handleNumbersDragLeave}
+							ondrop={handleNumbersDrop}
+						>
+							<div class="absolute inset-0 rounded-2xl border-2 border-dashed transition-all duration-300 
+								{phoneNumberText ? 'border-transparent opacity-0 pointer-events-none' : 
+								(isDraggingNumbers ? 'border-primary bg-primary/5' : 'border-muted-foreground/20 bg-muted/5 group-hover:border-primary/40 group-hover:bg-primary/2')}">
+								<div class="flex flex-col items-center justify-center h-full gap-2 text-center p-4">
+									<div class="p-2.5 bg-background rounded-full shadow-sm border border-muted-foreground/10 group-hover:border-primary/30 transition-colors">
+										<UploadCloud class="w-5 h-5 text-muted-foreground group-hover:text-primary transition-colors" />
+									</div>
+									<div class="space-y-0.5">
+										<p class="text-[11px] font-bold text-foreground/70 group-hover:text-primary transition-colors uppercase tracking-tight">Sürükle Bırak veya Yaz</p>
+										<p class="text-[10px] text-muted-foreground px-4">Excel/CSV dosyanızı buraya bırakın veya numaraları manuel girmeye başlayın.</p>
+									</div>
+								</div>
+							</div>
+
 							<Textarea 
 								id="numbers" 
 								bind:value={phoneNumberText} 
-								placeholder={isBulk ? "Örn: 905321112233\n     905334445566" : "905XXXXXXXXX"} 
+								placeholder=""
 								wrap="off"
-								class="min-h-[120px] text-sm font-mono border-none bg-muted/10 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-lg shadow-inner-sm overflow-x-auto whitespace-pre" 
+								class="min-h-[140px] max-h-[200px] w-full overflow-y-auto text-sm font-mono border-2 border-transparent bg-transparent focus-visible:ring-1 focus-visible:ring-primary/20 transition-all rounded-2xl shadow-inner-sm overflow-x-auto whitespace-pre p-4 {phoneNumberText ? 'border-muted-foreground/10 bg-muted/5' : 'opacity-0 focus:opacity-100'} {isDraggingNumbers ? 'opacity-0' : ''}" 
 							/>
+
+							{#if isDraggingNumbers}
+								<div class="absolute inset-0 bg-primary/10 backdrop-blur-[2px] flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-primary pointer-events-none animate-in fade-in zoom-in-95 duration-200 z-10">
+									<div class="p-4 bg-background rounded-full shadow-xl border-2 border-primary animate-bounce">
+										<UploadCloud class="w-8 h-8 text-primary" />
+									</div>
+									<p class="mt-4 text-xs font-black text-primary uppercase tracking-widest bg-background/80 px-4 py-1.5 rounded-full border border-primary/20 shadow-sm">Dosyayı Buraya Bırakın</p>
+								</div>
+							{/if}
 						</div>
-						{#if isBulk}
-                            <div class="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
-                                <!-- Format Suggestion Card -->
-                                <div class="p-3 bg-primary/5 border-dashed border-primary/20 rounded-xl flex gap-3">
-                                    <div class="mt-0.5 text-primary">
-                                        <Info class="w-3.5 h-3.5" />
-                                    </div>
-                                    <div class="space-y-1.5 min-w-0">
-                                        <p class="text-[10px] font-bold text-primary/80 uppercase tracking-wide">Dosya Yükleme & Şablon Formatı</p>
-                                        <p class="text-[10px] text-muted-foreground leading-tight">
-                                            Excel/CSV dosyası yükleyebilir <b>(sütunlar otomatik algılanır)</b> veya manuel listede şu formatı kullanabilirsiniz:
-                                        </p>
-                                        <code class="block p-1.5 bg-background/50 border rounded text-[9px] font-mono text-foreground break-all">
-                                            905XXXXXXXXX; Merhaba Mesajı; C:\dosyanyolu.png
-                                        </code>
-                                        <p class="text-[9px] text-primary/70 italic italic">
-                                            * Excel'de 1. Sütun: Numara, 2. Sütun: Mesaj, 3. Sütun: Dosya Yolu olarak okunur. Manuel girişte ayırıcı ";" olmalıdır.
-                                        </p>
-                                    </div>
-                                </div>
+						<Collapsible.Root bind:open={isInfoOpen} class="space-y-3">
+							<div class="flex flex-wrap items-center justify-between gap-1.5">
+								<div class="flex items-center gap-2">
+									<Collapsible.Trigger asChild>
+										<Button variant="ghost" size="sm" class="h-7 px-2 text-[10px] text-muted-foreground hover:text-primary transition-colors flex items-center gap-1.5">
+											{#if isInfoOpen}
+												<ChevronDown class="w-3 h-3" />
+											{:else}
+												<ChevronRight class="w-3 h-3" />
+											{/if}
+											<Info class="w-3 h-3" /> Şablon Formatını Gör
+										</Button>
+									</Collapsible.Trigger>
+								</div>
 
-                                <div class="flex flex-wrap items-center justify-end gap-1.5">
-                                    <input type="file" id="csv" bind:this={fileInput} accept=".csv,.xlsx,.xls" class="hidden" onchange={handleFileSelect} />
-                                    
-                                    {#if isPersonalized}
-                                        <Badge variant="outline" class="h-7 border-primary/40 text-primary bg-primary/5">
-                                            Özel Mod: {personalizedRecipients.length} Satır
-                                        </Badge>
-                                    {/if}
+								<div class="flex items-center gap-1.5 ml-auto">
+									<input type="file" id="csv" bind:this={fileInput} accept=".csv,.xlsx,.xls" class="hidden" onchange={handleFileSelect} />
+									
+									{#if phoneNumberText.length > 0}
+										<Button variant="ghost" size="sm" class="h-7 text-[10px] text-destructive hover:bg-destructive/5" onclick={() => { phoneNumberText = ""; personalizedRecipients = []; isPersonalized = false; if (fileInput) fileInput.value = ""; }}>
+											<Trash2 class="w-3 h-3 mr-1" /> Temizle
+										</Button>
+									{/if}
 
-                                    <Button variant="outline" size="sm" class="h-7 text-[10px] bg-background shadow-xs hover:bg-muted" onclick={() => document.getElementById('csv')?.click()}>
-                                        <UploadCloud class="w-3 h-3 mr-1" /> {isPersonalized ? "Dosya Değiştir" : "Dosya Yükle"}
-                                    </Button>
+									{#if isPersonalized}
+										<Badge variant="outline" class="h-7 border-primary/40 text-primary bg-primary/5">
+											Özel Mod: {personalizedRecipients.length} Satır
+										</Badge>
+									{/if}
 
-                                    {#if isPersonalized}
-                                        <Button variant="destructive" size="sm" class="h-7 text-[10px] shadow-xs" onclick={() => { isPersonalized = false; personalizedRecipients = []; phoneNumberText = ""; isBulk = false; if (fileInput) fileInput.value = ""; }}>
-                                            <Trash2 class="w-3 h-3 mr-1" /> Temizle
-                                        </Button>
-                                    {/if}
-                                </div>
-                            </div>
-						{/if}
+									<Button variant="outline" size="sm" class="h-7 text-[10px] bg-background shadow-xs hover:bg-muted font-bold text-primary border-primary/20" onclick={() => document.getElementById('csv')?.click()}>
+										<UploadCloud class="w-3 h-3 mr-1" /> {isPersonalized ? "Dosya Değiştir" : "Dosya Yükle"}
+									</Button>
+								</div>
+							</div>
+
+							<Collapsible.Content class="animate-in slide-in-from-top-2 duration-300">
+								<!-- Format Suggestion Card -->
+								<div class="p-4 bg-primary/5 border-dashed border-primary/20 rounded-xl flex gap-3 shadow-inner-sm">
+									<div class="mt-0.5 text-primary">
+										<Info class="w-3.5 h-3.5" />
+									</div>
+									<div class="space-y-2 min-w-0">
+										<div class="text-[10px] font-bold text-primary/80 uppercase tracking-widest flex items-center gap-2">
+											Dosya Yükleme & Şablon Formatı
+											<div class="h-px flex-1 bg-primary/10"></div>
+										</div>
+										<p class="text-[10px] text-muted-foreground leading-tight">
+											Excel/CSV dosyası yükleyebilir <b>(sütunlar otomatik algılanır)</b> veya manuel listede şu formatı kullanabilirsiniz:
+										</p>
+										<div class="relative group/code">
+											<code class="block p-2 bg-background/80 border rounded-lg text-[10px] font-mono text-foreground break-all shadow-sm">
+												905XXXXXXXXX; Merhaba Mesajı; C:\resim.png
+											</code>
+										</div>
+										<p class="text-[9px] text-primary/70 italic bg-primary/2 p-2 rounded-md">
+											* Excel okuyucu ilk sütunu telefon, ikinciyi mesaj, üçüncüyü dosya yolu olarak kabul eder. Manuel girişte ayırıcı ";" olmalıdır.
+										</p>
+									</div>
+								</div>
+							</Collapsible.Content>
+						</Collapsible.Root>
 					</div>
 
 					<!-- Action Button / Progress -->
@@ -761,13 +1069,31 @@
 								
 								<Progress value={((sentCount + errorCount) / totalCount) * 100} class="h-2 bg-muted transition-all" />
 								
-								<div class="flex gap-2">
-									<Badge variant="outline" class="flex-1 justify-center py-1.5 bg-green-500/5 text-green-600 border-green-500/20 rounded-md">
-										<CheckCircle2 class="w-3 h-3 mr-1.5" /> {sentCount} Başarılı
-									</Badge>
-									<Badge variant="outline" class="flex-1 justify-center py-1.5 bg-destructive/5 text-destructive border-destructive/20 rounded-md">
-										<XCircle class="w-3 h-3 mr-1.5" /> {errorCount} Hatalı
-									</Badge>
+								<div class="flex items-center gap-2">
+									<div class="flex flex-1 gap-2">
+										<Badge variant="outline" class="flex-1 justify-center py-1.5 bg-green-500/5 text-green-600 border-green-500/20 rounded-md">
+											<CheckCircle2 class="w-3 h-3 mr-1.5" /> {sentCount} Başarılı
+										</Badge>
+										<Badge variant="outline" class="flex-1 justify-center py-1.5 bg-destructive/5 text-destructive border-destructive/20 rounded-md">
+											<XCircle class="w-3 h-3 mr-1.5" /> {errorCount} Hatalı
+										</Badge>
+									</div>
+
+									{#if sendStatus === "finished"}
+										<Tooltip.Root>
+											<Tooltip.Trigger>
+												<Button 
+													variant="outline" 
+													size="icon" 
+													class="h-9 w-9 shrink-0 rounded-md border-primary/20 bg-primary/5 text-primary hover:bg-primary/10 transition-all"
+													onclick={exportReport}
+												>
+													<Download class="w-4 h-4" />
+												</Button>
+											</Tooltip.Trigger>
+											<Tooltip.Content>Raporu Dışarı Aktar (.xlsx)</Tooltip.Content>
+										</Tooltip.Root>
+									{/if}
 								</div>
 
 								{#if currentRecipient && sendStatus === "sending"}
@@ -779,21 +1105,34 @@
 						{/if}
 
 						{#if sendStatus === "idle"}
-							<Button 
-								onclick={startSending} 
-								class="w-full h-11 rounded-xl shadow-lg shadow-primary/20 transition-all hover:-translate-y-px active:translate-y-0 font-semibold text-sm" 
-								disabled={!selectedAccountId || !phoneNumberText || ((!isPersonalized && !messageBody) && (!useFileMedia && !mediaData)) || ( (isPersonalized || useFileMedia) && personalizedRecipients.length === 0)}
-							>
-								<Send class="w-4 h-4 mr-2" /> Gönderimi Başlat
-							</Button>
+							<div class="mt-6">
+								<Button 
+									onclick={startSending} 
+									class="w-full h-11 rounded-xl shadow-lg shadow-primary/20 transition-all hover:-translate-y-px active:translate-y-0 font-semibold text-sm" 
+									disabled={!selectedAccountId || !phoneNumberText || ((!isPersonalized && !messageBody) && (!useFileMedia && !mediaData)) || ( (isPersonalized || useFileMedia) && personalizedRecipients.length === 0)}
+								>
+									<Send class="w-4 h-4 mr-2" /> Gönderimi Başlat
+								</Button>
+							</div>
 						{:else if sendStatus === "sending"}
-							<Button disabled class="w-full h-11 rounded-xl bg-primary/20 text-primary border-primary/20 pointer-events-none">
-								<Loader2 class="w-4 h-4 mr-2 animate-spin" /> Durdurmak İçin Sayfayı Yenileyin
-							</Button>
+							<div class="mt-6">
+								<Button 
+									onclick={() => sendStatus = "idle"} 
+									variant="destructive"
+									class="w-full h-11 rounded-xl shadow-lg shadow-destructive/20 font-bold animate-in zoom-in-95 duration-300"
+								>
+									<div class="flex items-center gap-2">
+										<Loader2 class="w-4 h-4 animate-spin" /> 
+										Gönderimi Durdur
+									</div>
+								</Button>
+							</div>
 						{:else}
-							<Button onclick={resetForm} variant="secondary" class="w-full h-11 rounded-xl">
-								Yeni Kampanya Başlat
-							</Button>
+							<div class="pt-6">
+								<Button onclick={resetForm} variant="secondary" class="w-full h-11 rounded-xl shadow-sm border border-border/50 hover:bg-secondary/80 transition-all">
+									Yeni Kampanya Başlat
+								</Button>
+							</div>
 						{/if}
 					</div>
 				</Card.Content>
@@ -981,6 +1320,118 @@
 					Listeye Ekle
 				</Button>
 			</div>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
+
+<!-- Template Selection Dialog -->
+<Dialog.Root bind:open={isTemplateModalOpen}>
+	<Dialog.Content class="max-w-md max-h-[85vh] flex flex-col p-0 overflow-hidden border-none shadow-2xl rounded-xl">
+		<Dialog.Header class="p-5 border-b bg-muted/30">
+			<div class="flex items-center gap-3">
+				<div class="p-2 bg-primary/10 text-primary rounded-lg">
+					<LayoutTemplate class="w-5 h-5" />
+				</div>
+				<div>
+					<Dialog.Title class="text-xl font-bold">Mesaj Şablonları</Dialog.Title>
+					<Dialog.Description class="text-xs">
+						Kaydedilmiş şablonlarınızdan birini seçin.
+					</Dialog.Description>
+				</div>
+			</div>
+		</Dialog.Header>
+
+		<div class="flex-1 overflow-y-auto p-4 space-y-3 min-h-[300px]">
+			{#if templates.length === 0}
+				<div class="flex flex-col items-center justify-center py-12 text-center space-y-4">
+					<div class="p-4 bg-muted/20 rounded-full text-muted-foreground/30">
+						<BookTemplate class="w-10 h-10" />
+					</div>
+					<div class="space-y-1">
+						<p class="text-sm font-medium text-muted-foreground">Henüz kaydedilmiş şablonunuz yok.</p>
+						<p class="text-xs text-muted-foreground/60">Sık kullandığınız mesajları şablon olarak kaydedebilirsiniz.</p>
+					</div>
+				</div>
+			{:else}
+				{#each templates as template (template.id)}
+					<button 
+						class="w-full text-left group relative bg-muted/20 hover:bg-primary/5 border border-transparent hover:border-primary/20 rounded-xl p-4 transition-all" 
+						onclick={() => useTemplate(template.content)}
+					>
+						<div class="flex justify-between items-start mb-2">
+							<h4 class="font-bold text-sm text-foreground group-hover:text-primary transition-colors">{template.name}</h4>
+							<Button 
+								variant="ghost" 
+								size="icon" 
+								class="w-7 h-7 rounded-lg text-destructive opacity-0 group-hover:opacity-100 transition-opacity bg-destructive/5 hover:bg-destructive/10" 
+								onclick={(e) => { e.stopPropagation(); deleteTemplate(template.id); }}
+							>
+								<Trash2 class="w-3.5 h-3.5" />
+							</Button>
+						</div>
+						<p class="text-[11px] text-muted-foreground line-clamp-3 leading-relaxed whitespace-pre-wrap">
+							{template.content}
+						</p>
+					</button>
+				{/each}
+			{/if}
+		</div>
+
+		<Dialog.Footer class="p-5 border-t bg-muted/30">
+			<Button variant="ghost" onclick={() => isTemplateModalOpen = false} class="w-full h-11 rounded-md font-bold bg-background shadow-xs">Kapat</Button>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
+
+<!-- Save Template Dialog -->
+<Dialog.Root bind:open={isSaveTemplateModalOpen}>
+	<Dialog.Content class="max-w-sm rounded-xl border-none shadow-3xl p-0 overflow-hidden">
+		<Dialog.Header class="p-7 pb-4 bg-muted/20 border-b">
+			<div class="flex items-center gap-4">
+				<div class="p-3 bg-green-500/10 text-green-600 rounded-lg shadow-inner-sm">
+					<Save class="w-6 h-6" />
+				</div>
+				<div class="space-y-0.5">
+					<Dialog.Title class="text-xl font-bold tracking-tight">Şablon Olarak Kaydet</Dialog.Title>
+					<Dialog.Description class="text-xs font-medium text-muted-foreground/80">
+						Bu mesajı daha sonra kullanmak için isimlendirin.
+					</Dialog.Description>
+				</div>
+			</div>
+		</Dialog.Header>
+
+		<div class="p-7 space-y-6">
+			<div class="space-y-2.5">
+				<Label for="template-name" class="text-[10px] font-extrabold uppercase tracking-widest text-muted-foreground ml-1">Şablon Adı</Label>
+				<Input 
+					id="template-name" 
+					placeholder="Örn: Kampanya Duyurusu" 
+					bind:value={newTemplateName} 
+					class="h-12 bg-muted/30 border-none transition-all focus:ring-2 focus:ring-primary/20 rounded-lg font-bold text-sm px-5"
+				/>
+			</div>
+
+			<div class="space-y-2.5">
+				<Label class="text-[10px] font-extrabold uppercase tracking-widest text-muted-foreground ml-1">İçerik Önizleme</Label>
+				<div class="p-4 bg-muted/10 rounded-lg border border-dashed border-muted-foreground/20 text-[11px] text-muted-foreground line-clamp-3 italic leading-relaxed">
+					{messageBody}
+				</div>
+			</div>
+		</div>
+
+		<Dialog.Footer class="p-7 pt-2 flex gap-3">
+			<Button variant="ghost" onclick={() => isSaveTemplateModalOpen = false} class="flex-1 h-12 rounded-lg font-bold bg-muted/20 hover:bg-muted/40 transition-all">Vazgeç</Button>
+			<Button 
+				onclick={saveTemplate} 
+				disabled={!newTemplateName || isSavingTemplate} 
+				class="flex-1 h-12 rounded-lg shadow-xl shadow-primary/25 font-extrabold transition-all hover:scale-[1.02] active:scale-[0.98]"
+			>
+				{#if isSavingTemplate}
+					<Loader2 class="w-4 h-4 mr-2 animate-spin" /> İşleniyor
+				{:else}
+					Kaydet
+				{/if}
+			</Button>
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
