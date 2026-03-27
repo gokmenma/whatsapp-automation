@@ -27,6 +27,7 @@ sqlite.db-wal
 # WhatsApp session and cache
 .wwebjs_auth
 .wwebjs_cache
+.baileys_auth/
 accounts.json
 
 # Vite

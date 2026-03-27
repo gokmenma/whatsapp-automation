@@ -13,6 +13,7 @@ export default defineConfig({
 				'**/accounts.json',
 				'**/.wwebjs_auth/**',
 				'**/.wwebjs_cache/**',
+				'**/.baileys_auth/**',
 				'**/node_modules/**',
 			]
 		}

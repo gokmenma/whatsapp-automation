@@ -296,28 +296,30 @@
 	<div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
         {#each accounts as acc (acc.id)}
             <Card.Root class="overflow-hidden border-none shadow-md ring-1 ring-border/50 flex flex-col group">
-                <Card.Header class="flex flex-row items-center justify-between space-y-0 bg-muted/30 pb-4">
-                    <div class="space-y-1">
-                        <div class="flex items-center gap-2">
-                            <Card.Title class="text-lg">{acc.name || acc.id}</Card.Title>
+                <Card.Header class="flex flex-row items-start justify-between bg-muted/30 pb-4">
+                    <div class="space-y-1 min-w-0 pr-2">
+                        <div class="flex items-center gap-1.5">
+                            <Card.Title class="text-lg truncate">{acc.name || acc.id}</Card.Title>
                             <Button variant="ghost" size="icon" class="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity" onclick={() => openEditDialog(acc)}>
                                 <Edit2 class="w-3.5 h-3.5" />
                             </Button>
                         </div>
-                        <Card.Description class="text-[10px] font-mono uppercase">ID: {acc.id}</Card.Description>
+                        <Card.Description class="text-[10px] font-mono uppercase truncate opacity-70">ID: {acc.id}</Card.Description>
                     </div>
-                    {#if acc.isDefault}
-                        <Badge variant="outline" class="border-primary text-primary bg-primary/5">Varsayılan</Badge>
-                    {/if}
-                    {#if acc.status === 'ready'}
-                        <Badge class="bg-green-500 hover:bg-green-600 shadow-[0_0_10px_rgba(34,197,94,0.3)]">Aktif</Badge>
-                    {:else if acc.status === 'connecting'}
-                        <Badge class="bg-blue-500 hover:bg-blue-600 animate-pulse">QR Bekleniyor</Badge>
-                    {:else if acc.status === 'loading'}
-                        <Badge variant="outline" class="animate-pulse bg-background">Yükleniyor...</Badge>
-                    {:else}
-                        <Badge variant="secondary">Kapalı</Badge>
-                    {/if}
+                    <div class="flex flex-col items-end gap-1.5 shrink-0 ml-auto pt-1">
+                        {#if acc.isDefault}
+                            <Badge variant="outline" class="border-primary text-primary bg-primary/5 text-[10px] py-0 h-4 px-1">Varsayılan</Badge>
+                        {/if}
+                        {#if acc.status === 'ready'}
+                            <Badge class="bg-green-500 hover:bg-green-600 shadow-[0_0_10px_rgba(34,197,94,0.3)] text-[10px] py-0 h-4 px-1">Aktif</Badge>
+                        {:else if acc.status === 'connecting'}
+                            <Badge class="bg-blue-500 hover:bg-blue-600 animate-pulse text-[10px] py-0 h-4 px-1">QR Bekleniyor</Badge>
+                        {:else if acc.status === 'loading'}
+                            <Badge variant="outline" class="animate-pulse bg-background text-[10px] py-0 h-4 px-1">Yükleniyor...</Badge>
+                        {:else}
+                            <Badge variant="secondary" class="text-[10px] py-0 h-4 px-1">Kapalı</Badge>
+                        {/if}
+                    </div>
                 </Card.Header>
                 <Card.Content class="flex-1 flex flex-col items-center justify-center py-8 min-h-[220px]">
                     {#if acc.status === "ready"}
@@ -374,15 +376,15 @@
                             </div>
                             <div class="text-center space-y-1 px-4">
                                 <p class="text-sm font-medium">Bu hesap şu an çevrimdışı</p>
-                                <p class="text-[11px] text-muted-foreground leading-relaxed">Sistemi başlatarak WhatsApp bağlantısını kurabilirsiniz.</p>
+                                <p class="text-[11px] text-muted-foreground leading-relaxed">Sistemi başlatarak (Aktif Et butonu ile) WhatsApp bağlantısını kurabilirsiniz.</p>
                             </div>
                         </div>
                     {/if}
                 </Card.Content>
                 <Card.Footer class="bg-muted/10 p-4 gap-2">
-                    {#if acc.status === "disconnected"}
-                        <Button variant="default" size="sm" class="flex-1 h-9 gap-2" onclick={() => startAccount(acc.id)}>
-                            <Power class="w-4 h-4" /> Sistemi Başlat
+                    {#if acc.status === "disconnected" || (!["ready", "connecting", "loading"].includes(acc.status))}
+                        <Button variant="default" size="sm" class="flex-1 h-9 gap-2 shadow-lg shadow-primary/20" onclick={() => startAccount(acc.id)}>
+                            <Power class="w-4 h-4" /> Aktif Et
                         </Button>
                     {:else if acc.status === "ready"}
                         <Button variant="outline" size="sm" class="flex-1 h-9 text-xs" onclick={() => stopAccount(acc.id)}>

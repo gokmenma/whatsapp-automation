@@ -15,7 +15,8 @@
 		ImagePlus, 
 		Users, 
 		User, 
-		CheckCircle2, 
+		Check,
+		CheckCircle2,
 		XCircle, 
 		FileText, 
 		UploadCloud,
@@ -23,7 +24,8 @@
 		Loader2,
 		Plus,
 		Search,
-		UserPlus
+		UserPlus,
+		X
 	} from "@lucide/svelte";
 	import * as Dialog from "$lib/components/ui/dialog";
 
@@ -59,6 +61,8 @@
 	let searchQuery = $state("");
 	let isLoadingContacts = $state(false);
 	let selectedContacts: Set<string> = $state(new Set());
+	let selectedLetter = $state("");
+	const alphabet = "ABCÇDEFGĞHIİJKLMNOÖPRSŞTUÜVYZ".split("");
     
     // Input references for resetting
     let mediaInput: HTMLInputElement | undefined = $state();
@@ -79,10 +83,20 @@
 		}
 	}
 
+	let lastLoadedAccountId = "";
 	async function openContactModal() {
 		if (!selectedAccountId) return alert("Önce bir hesap seçmelisiniz");
 		
 		isContactModalOpen = true;
+		
+		// If account changed since last fetch, clear the cache
+		if (lastLoadedAccountId !== selectedAccountId) {
+			allContacts = [];
+			filteredContacts = [];
+			searchQuery = "";
+			selectedContacts.clear();
+		}
+
 		if (allContacts.length > 0) {
 			filterContacts();
 			return;
@@ -90,10 +104,12 @@
 		
 		isLoadingContacts = true;
 		try {
+			console.log(`[Frontend] Fetching contacts for account: ${selectedAccountId}`);
 			const res = await fetch(`/api/whatsapp/contacts?accountId=${selectedAccountId}`);
 			const data = await res.json();
 			if (data.success) {
 				allContacts = data.contacts;
+				lastLoadedAccountId = selectedAccountId;
 				filterContacts();
 			} else {
 				alert(data.error || "Rehber alınamadı");
@@ -106,8 +122,13 @@
 	}
 
 	function filterContacts() {
-		if (!searchQuery) {
-			// Initially show first 20 contacts to be snappy, or empty if user prefers
+		if (selectedLetter) {
+			const q = selectedLetter.toLowerCase();
+			filteredContacts = allContacts.filter(c => 
+				(c.name || '').toLowerCase().startsWith(q)
+			);
+		} else if (!searchQuery) {
+			// Initially show first 20 contacts to be snappy
 			filteredContacts = allContacts.slice(0, 20);
 		} else if (searchQuery.length < 3) {
 			filteredContacts = []; // Empty until 3 chars
@@ -118,6 +139,16 @@
 				(c.number || '').includes(q)
 			);
 		}
+	}
+
+	function selectLetter(letter: string) {
+		if (selectedLetter === letter) {
+			selectedLetter = "";
+		} else {
+			selectedLetter = letter;
+			searchQuery = ""; // Clear search when using letter filter
+		}
+		filterContacts();
 	}
 
 	function toggleContactSelection(id: string) {
@@ -143,7 +174,7 @@
 		
 		isBulk = final.length > 1;
 		isContactModalOpen = false;
-		selectedContacts.clear();
+		// Seçimler silinmez, hesap değişene kadar kalıcıdır.
 	}
 
     function handleFileSelect(event: Event) {
@@ -341,6 +372,8 @@
         personalizedRecipients = [];
         if (mediaInput) mediaInput.value = "";
         if (fileInput) fileInput.value = "";
+		selectedContacts = new Set();
+		searchQuery = "";
 	}
 
 	onMount(() => {
@@ -349,7 +382,10 @@
 	});
 
 	$effect(() => {
-		if (searchQuery !== undefined) {
+		if (searchQuery !== undefined && searchQuery.length > 0) {
+			selectedLetter = "";
+			filterContacts();
+		} else if (searchQuery === "") {
 			filterContacts();
 		}
 	});
@@ -358,6 +394,13 @@
 		if (!isBulk) {
 			isPersonalized = false;
 			useFileMedia = false;
+		}
+	});
+
+	// Automatically clear modal selection when number list is emptied
+	$effect(() => {
+		if (phoneNumberText.trim() === "") {
+			selectedContacts = new Set();
 		}
 	});
 </script>
@@ -533,7 +576,13 @@
 								{/if}
 							</h3>
 							<p class="text-xs text-muted-foreground font-medium opacity-80 truncate pl-8">
-								{selectedAccountId ? `Bağlı hesap üzerinden gönderime hazır (ID: ${selectedAccountId.substring(0, 8)}...)` : "Mesaj gönderimi için aktif bir WhatsApp hesabı seçin."}
+								{#if selectedAccountId}
+									Bağlı hesap üzerinden gönderime hazır (ID: {selectedAccountId.substring(0, 8)}...)
+								{:else if accounts.length === 0}
+									<span class="text-destructive font-bold">Aktif hesap bulunamadı!</span> <a href="/hesaplar" class="underline text-primary">Hesaplar</a> sayfasından bir hesap aktif edin.
+								{:else}
+									Mesaj gönderimi için aktif bir WhatsApp hesabı seçin.
+								{/if}
 							</p>
 						</div>
 
@@ -693,7 +742,9 @@
 				</div>
 				<div>
 					<Dialog.Title class="text-xl font-bold">WhatsApp Rehberi</Dialog.Title>
-					<Dialog.Description class="text-xs">Mesaj gönderilecek kişileri seçin.</Dialog.Description>
+					<Dialog.Description class="text-xs">
+						<span class="font-bold text-primary">{accounts.find(a => a.id === selectedAccountId)?.name || "Bilinmeyen Hesap"}</span> rehberinden kişi seçin ({allContacts.length} kişi).
+					</Dialog.Description>
 				</div>
 			</div>
 		</Dialog.Header>
@@ -709,108 +760,127 @@
 			</div>
 		</div>
 
-		<div class="flex-1 overflow-y-auto min-h-[350px] max-h-[450px] p-2 space-y-1">
-			{#if isLoadingContacts}
-				<div class="flex flex-col items-center justify-center h-full py-24 gap-4">
-					<div class="relative">
-						<Loader2 class="w-10 h-10 animate-spin text-primary" />
-						<div class="absolute inset-0 blur-xl bg-primary/20 rounded-full animate-pulse"></div>
+		<div class="flex-1 flex overflow-hidden min-h-[450px]">
+			<!-- Contacts List -->
+			<div class="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-thin">
+				{#if isLoadingContacts}
+					<div class="flex flex-col items-center justify-center h-full py-24 gap-4">
+						<div class="relative">
+							<Loader2 class="w-10 h-10 animate-spin text-primary" />
+							<div class="absolute inset-0 blur-xl bg-primary/20 rounded-full animate-pulse"></div>
+						</div>
+						<p class="text-sm font-medium text-muted-foreground">Kişileriniz yükleniyor...</p>
 					</div>
-					<p class="text-sm font-medium text-muted-foreground">Kişileriniz yükleniyor...</p>
-				</div>
-			{:else if !searchQuery && allContacts.length > 0}
-				<div class="p-4 mb-2 bg-primary/5 rounded-xl border border-primary/10">
-					<p class="text-xs font-semibold text-primary mb-1">Hızlı Erişim</p>
-					<p class="text-[10px] text-muted-foreground leading-relaxed">İlk 20 kişi gösteriliyor. İstediğiniz kişiyi bulmak için en az 3 harf yazarak aramaya başlayın.</p>
-				</div>
-				<div class="grid gap-1 px-2">
-					{#each filteredContacts as contact}
-						<button 
-							type="button"
-							class="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-muted/50 transition-all text-left group relative {selectedContacts.has(contact.id) ? 'bg-primary/10 ring-1 ring-primary/30 z-10' : ''}"
-							onclick={() => toggleContactSelection(contact.id)}
-						>
-							<div class="relative shrink-0">
-								<div class="w-11 h-11 rounded-xl bg-linear-to-br from-primary/10 to-primary/5 border border-primary/10 flex items-center justify-center text-primary font-bold uppercase shadow-sm">
-									{contact.name.charAt(0)}
-								</div>
-								{#if selectedContacts.has(contact.id)}
-									<div class="absolute -right-1.5 -top-1.5 bg-primary text-white rounded-full p-1 border-2 border-background animate-in zoom-in duration-300 shadow-md">
-										<CheckCircle2 class="w-2.5 h-2.5" />
+				{:else if !searchQuery && !selectedLetter && allContacts.length > 0}
+					<div class="p-4 mb-2 bg-primary/5 rounded-xl border border-primary/10">
+						<p class="text-xs font-semibold text-primary mb-1">Hızlı Erişim</p>
+						<p class="text-[10px] text-muted-foreground leading-relaxed">İlk 20 kişi gösteriliyor. İstediğiniz harfe tıklayarak veya arayarak filtreleyin.</p>
+					</div>
+					<div class="grid gap-1 px-2">
+						{#each filteredContacts as contact (contact.id)}
+							<button 
+								type="button"
+								class="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-muted/50 transition-all text-left group relative {selectedContacts.has(contact.id) ? 'bg-primary/10 ring-1 ring-primary/30 z-10' : ''}"
+								onclick={() => toggleContactSelection(contact.id)}
+							>
+								<div class="relative shrink-0">
+									<div class="w-11 h-11 rounded-xl bg-linear-to-br from-primary/10 to-primary/5 border border-primary/10 flex items-center justify-center text-primary font-bold uppercase shadow-sm">
+										{contact.name.charAt(0)}
 									</div>
-								{/if}
-							</div>
-							<div class="flex-1 min-w-0">
-								<p class="text-sm font-bold truncate transition-colors {selectedContacts.has(contact.id) ? 'text-primary' : 'text-foreground/80'}">
-									{contact.name}
-								</p>
-								<p class="text-[11px] text-muted-foreground font-mono opacity-80 group-hover:opacity-100 transition-opacity">
-									{contact.number}
-								</p>
-							</div>
-						</button>
-					{/each}
-				</div>
-			{:else if searchQuery.length > 0 && searchQuery.length < 3}
-				<div class="flex flex-col items-center justify-center py-24 text-muted-foreground/40">
-					<div class="p-4 bg-muted/10 rounded-full mb-4">
-						<Search class="w-8 h-8 opacity-20" />
-					</div>
-					<p class="text-sm font-medium">Aramaya başlamak için en az 3 harf yazın...</p>
-				</div>
-			{:else if filteredContacts.length === 0}
-				<div class="flex flex-col items-center justify-center py-24 text-muted-foreground/40">
-					<div class="p-4 bg-muted/10 rounded-full mb-4">
-						<Search class="w-8 h-8 opacity-20" />
-					</div>
-					<p class="text-sm font-medium">Aradığınız kriterde kişi bulunamadı.</p>
-				</div>
-			{:else}
-				<div class="grid gap-1 px-2">
-					{#each filteredContacts as contact}
-						<button 
-							type="button"
-							class="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-muted/50 transition-all text-left group relative {selectedContacts.has(contact.id) ? 'bg-primary/10 ring-1 ring-primary/30 z-10' : ''}"
-							onclick={() => toggleContactSelection(contact.id)}
-						>
-							<div class="relative shrink-0">
-								<div class="w-11 h-11 rounded-xl bg-linear-to-br from-primary/10 to-primary/5 border border-primary/10 flex items-center justify-center text-primary font-bold uppercase shadow-sm">
-									{contact.name.charAt(0)}
+									{#if selectedContacts.has(contact.id)}
+										<div class="absolute -right-1.5 -top-1.5 bg-green-500 text-white rounded-full p-1 border-2 border-background animate-in zoom-in duration-300 shadow-md">
+											<Check class="w-3 h-3 stroke-3" />
+										</div>
+									{/if}
 								</div>
-								{#if selectedContacts.has(contact.id)}
-									<div class="absolute -right-1.5 -top-1.5 bg-primary text-white rounded-full p-1 border-2 border-background animate-in zoom-in duration-300 shadow-md">
-										<CheckCircle2 class="w-2.5 h-2.5" />
+								<div class="flex-1 min-w-0">
+									<p class="text-sm font-bold truncate transition-colors {selectedContacts.has(contact.id) ? 'text-primary' : 'text-foreground/80'}">
+										{contact.name}
+									</p>
+									<p class="text-[11px] text-muted-foreground font-mono opacity-80 group-hover:opacity-100 transition-opacity">
+										{contact.number}
+									</p>
+								</div>
+							</button>
+						{/each}
+					</div>
+				{:else if (searchQuery.length > 0 && searchQuery.length < 3) && !selectedLetter}
+					<div class="flex flex-col items-center justify-center py-24 text-muted-foreground/40">
+						<div class="p-4 bg-muted/10 rounded-full mb-4">
+							<Search class="w-8 h-8 opacity-20" />
+						</div>
+						<p class="text-sm font-medium">Aramaya başlamak için en az 3 harf yazın...</p>
+					</div>
+				{:else if filteredContacts.length === 0}
+					<div class="flex flex-col items-center justify-center py-24 text-muted-foreground/40">
+						<div class="p-4 bg-muted/10 rounded-full mb-4">
+							<Search class="w-8 h-8 opacity-20" />
+						</div>
+						<p class="text-sm font-medium">Aradığınız kriterde kişi bulunamadı.</p>
+					</div>
+				{:else}
+					<div class="grid gap-1 px-2">
+						{#each filteredContacts as contact (contact.id)}
+							<button 
+								type="button"
+								class="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-muted/50 transition-all text-left group relative {selectedContacts.has(contact.id) ? 'bg-primary/10 ring-1 ring-primary/30 z-10' : ''}"
+								onclick={() => toggleContactSelection(contact.id)}
+							>
+								<div class="relative shrink-0">
+									<div class="w-11 h-11 rounded-xl bg-linear-to-br from-primary/10 to-primary/5 border border-primary/10 flex items-center justify-center text-primary font-bold uppercase shadow-sm">
+										{contact.name.charAt(0)}
 									</div>
-								{/if}
-							</div>
-							<div class="flex-1 min-w-0">
-								<p class="text-sm font-bold truncate transition-colors {selectedContacts.has(contact.id) ? 'text-primary' : 'text-foreground/80'}">
-									{contact.name}
-								</p>
-								<p class="text-[11px] text-muted-foreground font-mono opacity-80 group-hover:opacity-100 transition-opacity">
-									{contact.number}
-								</p>
-							</div>
-							{#if contact.isMyContact}
-								<Badge variant="outline" class="text-[9px] h-4 px-1.5 border-primary/20 text-primary/70 bg-primary/5 font-medium whitespace-nowrap">REHBER</Badge>
-							{/if}
-							{#if selectedContacts.has(contact.id)}
-								<div class="w-1.5 h-1.5 rounded-full bg-primary mx-1 shadow-sm shadow-primary/50"></div>
-							{/if}
-						</button>
-					{/each}
-				</div>
-			{/if}
+									{#if selectedContacts.has(contact.id)}
+										<div class="absolute -right-1.5 -top-1.5 bg-green-500 text-white rounded-full p-1 border-2 border-background animate-in zoom-in duration-300 shadow-md">
+											<Check class="w-3 h-3 stroke-3" />
+										</div>
+									{/if}
+								</div>
+								<div class="flex-1 min-w-0">
+									<p class="text-sm font-bold truncate transition-colors {selectedContacts.has(contact.id) ? 'text-primary' : 'text-foreground/80'}">
+										{contact.name}
+									</p>
+									<p class="text-[11px] text-muted-foreground font-mono opacity-80 group-hover:opacity-100 transition-opacity">
+										{contact.number}
+									</p>
+								</div>
+							</button>
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+			<!-- Alphabet Bar -->
+			<div class="w-8 flex flex-col items-center justify-center bg-muted/10 border-l py-2 overflow-y-auto no-scrollbar gap-0">
+				{#each alphabet as letter}
+					<button 
+						type="button"
+						class="text-[9px] font-bold w-full py-1.5 transition-all hover:bg-primary/10 h-6 flex items-center justify-center {selectedLetter === letter ? 'bg-primary text-white scale-110 shadow-sm' : 'text-muted-foreground'}"
+						onclick={() => selectLetter(letter)}
+					>
+						{letter}
+					</button>
+				{/each}
+			</div>
 		</div>
 
 		<Dialog.Footer class="p-6 border-t bg-muted/30 flex items-center justify-between gap-4 mt-auto">
 			<div class="flex-1 min-w-0 md:block hidden">
 				{#if selectedContacts.size > 0}
-					<div class="flex items-center gap-2 animate-in slide-in-from-left-2">
+					<div class="flex items-center gap-2 animate-in slide-in-from-left-2 group">
 						<div class="h-2 w-2 rounded-full bg-primary animate-pulse"></div>
 						<span class="text-xs font-bold text-primary truncate">
 							{selectedContacts.size} Kişi Seçildi
 						</span>
+						<Button 
+							variant="ghost" 
+							size="sm" 
+							class="h-6 w-6 p-0 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg group-hover:scale-110 transition-all border border-transparent hover:border-red-100"
+							onclick={() => { selectedContacts = new Set(); }}
+                            title="Seçimleri Temizle"
+						>
+							<X class="w-3.5 h-3.5 stroke-[2.5]" />
+						</Button>
 					</div>
 				{:else}
 					<span class="text-[10px] text-muted-foreground uppercase tracking-wide font-bold">Gönderim Listesi Boş</span>
