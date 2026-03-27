@@ -29,6 +29,7 @@ sqlite.db-wal
 .wwebjs_cache
 .baileys_auth/
 accounts.json
+*.log
 
 # Vite
 vite.config.js.timestamp-*

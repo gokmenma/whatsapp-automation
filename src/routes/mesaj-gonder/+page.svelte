@@ -25,9 +25,12 @@
 		Plus,
 		Search,
 		UserPlus,
-		X
+		X,
+		HelpCircle,
+		Info
 	} from "@lucide/svelte";
 	import * as Dialog from "$lib/components/ui/dialog";
+	import * as Tooltip from "$lib/components/ui/tooltip";
 
 
 	import * as XLSX from 'xlsx';
@@ -67,6 +70,7 @@
     // Input references for resetting
     let mediaInput: HTMLInputElement | undefined = $state();
     let fileInput: HTMLInputElement | undefined = $state();
+    let isDraggingMedia = $state(false);
 
 	async function fetchAccounts() {
 		try {
@@ -177,11 +181,7 @@
 		// Seçimler silinmez, hesap değişene kadar kalıcıdır.
 	}
 
-    function handleFileSelect(event: Event) {
-        const target = event.target as HTMLInputElement;
-        const file = target.files?.[0];
-        if (!file) return;
-
+    function processFile(file: File) {
         if (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type === 'application/pdf') {
             const mediaReader = new FileReader();
             mediaReader.onload = (e) => {
@@ -252,26 +252,48 @@
                     const fPath = foundPathIdx !== -1 ? String(row[foundPathIdx] || '').trim() : '';
                     
                     tempNumbers.push(phone);
-                    if (message.length > 0 || fPath.length > 0) {
-                        tempRecipients.push({ to: phone, message, filePath: fPath });
-                    }
+                    tempRecipients.push({ to: phone, message, filePath: fPath });
                 });
 
-                phoneNumberText = Array.from(new Set(tempNumbers)).join('\n');
+                const hasMessages = tempRecipients.some(r => r.message.length > 0);
+                const hasPaths = tempRecipients.some(r => r.filePath && r.filePath.length > 0);
+
                 isBulk = tempNumbers.length > 1;
-                
-                if (tempRecipients.length > 0) {
-                    personalizedRecipients = tempRecipients;
-                    isPersonalized = true;
-                } else {
-                    personalizedRecipients = [];
-                    isPersonalized = false;
-                }
+                personalizedRecipients = tempRecipients;
+                isPersonalized = hasMessages;
+                useFileMedia = hasPaths;
+
             } catch (err) {
                 console.error("File parse error:", err);
             }
         };
         reader.readAsArrayBuffer(file);
+    }
+
+    function handleFileSelect(event: Event) {
+        const target = event.target as HTMLInputElement;
+        const file = target.files?.[0];
+        if (!file) return;
+        processFile(file);
+    }
+
+    function handleMediaDrop(event: DragEvent) {
+        event.preventDefault();
+        isDraggingMedia = false;
+        
+        const file = event.dataTransfer?.files?.[0];
+        if (!file) return;
+        processFile(file);
+    }
+
+    function handleDragOver(event: DragEvent) {
+        event.preventDefault();
+        isDraggingMedia = true;
+    }
+
+    function handleDragLeave(event: DragEvent) {
+        event.preventDefault();
+        isDraggingMedia = false;
     }
 
 	let userSettings = $state({
@@ -291,11 +313,32 @@
 	}
 
 	async function startSending() {
-		const recipientsInTextarea = phoneNumberText.split(/[\n,;\t]+/)
-			.map(n => n.trim().replace(/[^\d+]/g, ''))
-			.filter(n => n.length > 5);
+		const finalRecipients = phoneNumberText.split(/\r?\n/)
+			.filter(line => line.trim().length > 0)
+			.map(line => {
+				const parts = line.split(';').map(p => p.trim());
+				const to = parts[0].replace(/[^\d+]/g, '');
+				
+				let msg = messageBody;
+				let path = undefined;
 
-		totalCount = recipientsInTextarea.length;
+				if (isPersonalized && parts.length > 1) {
+					msg = parts[1];
+				}
+
+				if (useFileMedia) {
+					if (isPersonalized && parts.length > 2) {
+						path = parts[2];
+					} else if (!isPersonalized && parts.length > 1) {
+						path = parts[1];
+					}
+				}
+
+				return { to, message: msg, filePath: path };
+			})
+			.filter(item => item.to.length > 5);
+
+		totalCount = finalRecipients.length;
 
 		if (totalCount === 0) return alert("Hatalı veya eksik numaralar");
 		if (userCredits <= 0) return alert("Krediniz tükenmiş! Lütfen yükleme yapın.");
@@ -303,16 +346,6 @@
 		sentCount = 0;
 		errorCount = 0;
 		sendStatus = "sending";
-
-		const finalRecipients = recipientsInTextarea.map(phone => {
-            // Find if this phone has a personalized data from file
-            const personalized = (isPersonalized || useFileMedia) ? personalizedRecipients.find(r => r.to === phone) : null;
-            return {
-                to: phone,
-                message: (isPersonalized && personalized) ? personalized.message : messageBody,
-                filePath: (useFileMedia && personalized) ? personalized.filePath : undefined
-            };
-        });
 
         const batchId = finalRecipients.length > 1 ? Math.random().toString(36).substr(2, 9) : undefined;
 
@@ -403,6 +436,28 @@
 			selectedContacts = new Set();
 		}
 	});
+
+	function updatePhoneNumberText() {
+		if (personalizedRecipients.length === 0) return;
+		
+		const lines = personalizedRecipients.map(r => {
+			let line = r.to;
+			if (isPersonalized && r.message) {
+				line += `; ${r.message}`;
+			}
+			if (useFileMedia && r.filePath) {
+				line += `; ${r.filePath}`;
+			}
+			return line;
+		});
+		phoneNumberText = lines.join('\n');
+	}
+
+	$effect(() => {
+		if (personalizedRecipients.length > 0) {
+			updatePhoneNumberText();
+		}
+	});
 </script>
 
 <div class="flex-1 w-full max-w-6xl mx-auto p-4 md:p-8 space-y-8 animate-in fade-in duration-500">
@@ -484,13 +539,21 @@
 								</div>
 							{:else}
 								<input type="file" id="media" bind:this={mediaInput} class="hidden" onchange={handleFileSelect} />
-								<Label for="media" class="flex flex-col items-center justify-center h-44 rounded-xl border-2 border-dashed border-muted-foreground/20 bg-muted/5 transition-all duration-300 hover:border-primary/50 hover:bg-primary/2 cursor-pointer group">
-									<div class="flex flex-col items-center gap-3 transition-transform duration-300 group-hover:-translate-y-1">
-										<div class="p-3 bg-background rounded-full shadow-sm border group-hover:border-primary/50">
-											<ImagePlus class="w-6 h-6 text-muted-foreground group-hover:text-primary transition-colors" />
+								<Label 
+                                    for="media" 
+                                    class="flex flex-col items-center justify-center h-44 rounded-xl border-2 border-dashed transition-all duration-300 cursor-pointer group {isDraggingMedia ? 'border-primary bg-primary/10' : 'border-muted-foreground/20 bg-muted/5 hover:border-primary/50 hover:bg-primary/2'}"
+                                    ondragover={handleDragOver}
+                                    ondragleave={handleDragLeave}
+                                    ondrop={handleMediaDrop}
+                                >
+									<div class="flex flex-col items-center gap-3 transition-transform duration-300 {isDraggingMedia ? 'scale-110' : 'group-hover:-translate-y-1'}">
+										<div class="p-3 bg-background rounded-full shadow-sm border {isDraggingMedia ? 'border-primary ring-4 ring-primary/10' : 'group-hover:border-primary/50'}">
+											<ImagePlus class="w-6 h-6 {isDraggingMedia ? 'text-primary' : 'text-muted-foreground group-hover:text-primary'} transition-colors" />
 										</div>
 										<div class="text-center">
-											<p class="text-sm font-medium">Resim veya Video Sürükleyin</p>
+											<p class="text-sm font-medium {isDraggingMedia ? 'text-primary' : ''}">
+                                                {isDraggingMedia ? 'Hemen Bırakın' : 'Resim veya Video Sürükleyin'}
+                                            </p>
 											<p class="text-[11px] text-muted-foreground mt-1">Veya tıklayarak dosya seçin</p>
 										</div>
 									</div>
@@ -623,7 +686,7 @@
 								</Button>
 								<div class="flex items-center gap-1.5 ml-1">
 									<Checkbox id="bulk" bind:checked={isBulk} class="h-3.5 w-3.5 rounded" />
-									<Label for="bulk" class="text-[10px] font-medium cursor-pointer select-none">Toplu Mod</Label>
+									<Label for="bulk" class="text-[10px] font-medium cursor-pointer select-none">Dosya Yükle</Label>
 								</div>
 							</div>
 						</div>
@@ -633,30 +696,52 @@
 								id="numbers" 
 								bind:value={phoneNumberText} 
 								placeholder={isBulk ? "Örn: 905321112233\n     905334445566" : "905XXXXXXXXX"} 
-								class="min-h-[120px] text-sm font-mono border-none bg-muted/10 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-lg shadow-inner-sm" 
+								wrap="off"
+								class="min-h-[120px] text-sm font-mono border-none bg-muted/10 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-lg shadow-inner-sm overflow-x-auto whitespace-pre" 
 							/>
-							{#if isBulk}
-								<div class="absolute bottom-2 right-2 flex flex-wrap justify-end gap-1.5 backdrop-blur-sm p-1 rounded-lg">
-									<input type="file" id="csv" bind:this={fileInput} accept=".csv,.xlsx,.xls" class="hidden" onchange={handleFileSelect} />
-									
+						</div>
+						{#if isBulk}
+                            <div class="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
+                                <!-- Format Suggestion Card -->
+                                <div class="p-3 bg-primary/5 border-dashed border-primary/20 rounded-xl flex gap-3">
+                                    <div class="mt-0.5 text-primary">
+                                        <Info class="w-3.5 h-3.5" />
+                                    </div>
+                                    <div class="space-y-1.5 min-w-0">
+                                        <p class="text-[10px] font-bold text-primary/80 uppercase tracking-wide">Dosya Yükleme & Şablon Formatı</p>
+                                        <p class="text-[10px] text-muted-foreground leading-tight">
+                                            Excel/CSV dosyası yükleyebilir <b>(sütunlar otomatik algılanır)</b> veya manuel listede şu formatı kullanabilirsiniz:
+                                        </p>
+                                        <code class="block p-1.5 bg-background/50 border rounded text-[9px] font-mono text-foreground break-all">
+                                            905XXXXXXXXX; Merhaba Mesajı; C:\dosyanyolu.png
+                                        </code>
+                                        <p class="text-[9px] text-primary/70 italic italic">
+                                            * Excel'de 1. Sütun: Numara, 2. Sütun: Mesaj, 3. Sütun: Dosya Yolu olarak okunur. Manuel girişte ayırıcı ";" olmalıdır.
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div class="flex flex-wrap items-center justify-end gap-1.5">
+                                    <input type="file" id="csv" bind:this={fileInput} accept=".csv,.xlsx,.xls" class="hidden" onchange={handleFileSelect} />
+                                    
                                     {#if isPersonalized}
-                                        <Badge variant="outline" class="h-7 border-primary/40 text-primary bg-primary/5 animate-in fade-in zoom-in-95">
+                                        <Badge variant="outline" class="h-7 border-primary/40 text-primary bg-primary/5">
                                             Özel Mod: {personalizedRecipients.length} Satır
                                         </Badge>
                                     {/if}
 
-                                    <Button variant="outline" size="sm" class="h-7 text-[10px] bg-background/90 shadow-sm" onclick={() => document.getElementById('csv')?.click()}>
-										<UploadCloud class="w-3 h-3 mr-1" /> {isPersonalized ? "Dosya Değiştir" : "Dosya Yükle"}
-									</Button>
+                                    <Button variant="outline" size="sm" class="h-7 text-[10px] bg-background shadow-xs hover:bg-muted" onclick={() => document.getElementById('csv')?.click()}>
+                                        <UploadCloud class="w-3 h-3 mr-1" /> {isPersonalized ? "Dosya Değiştir" : "Dosya Yükle"}
+                                    </Button>
 
-									{#if isPersonalized}
-										<Button variant="destructive" size="sm" class="h-7 text-[10px] shadow-sm" onclick={() => { isPersonalized = false; personalizedRecipients = []; phoneNumberText = ""; isBulk = false; if (fileInput) fileInput.value = ""; }}>
-											<Trash2 class="w-3 h-3 mr-1" /> Temizle
-										</Button>
-									{/if}
-								</div>
-							{/if}
-						</div>
+                                    {#if isPersonalized}
+                                        <Button variant="destructive" size="sm" class="h-7 text-[10px] shadow-xs" onclick={() => { isPersonalized = false; personalizedRecipients = []; phoneNumberText = ""; isBulk = false; if (fileInput) fileInput.value = ""; }}>
+                                            <Trash2 class="w-3 h-3 mr-1" /> Temizle
+                                        </Button>
+                                    {/if}
+                                </div>
+                            </div>
+						{/if}
 					</div>
 
 					<!-- Action Button / Progress -->
@@ -851,11 +936,11 @@
 			</div>
 
 			<!-- Alphabet Bar -->
-			<div class="w-8 flex flex-col items-center justify-center bg-muted/10 border-l py-2 overflow-y-auto no-scrollbar gap-0">
+			<div class="w-8 flex flex-col items-center justify-start bg-muted/10 border-l py-2 overflow-y-auto no-scrollbar gap-0">
 				{#each alphabet as letter}
 					<button 
 						type="button"
-						class="text-[9px] font-bold w-full py-1.5 transition-all hover:bg-primary/10 h-6 flex items-center justify-center {selectedLetter === letter ? 'bg-primary text-white scale-110 shadow-sm' : 'text-muted-foreground'}"
+						class="text-[8px] font-bold w-full flex-1 transition-all hover:bg-primary/10 flex items-center justify-center {selectedLetter === letter ? 'bg-primary text-white scale-110 shadow-sm' : 'text-muted-foreground'}"
 						onclick={() => selectLetter(letter)}
 					>
 						{letter}
