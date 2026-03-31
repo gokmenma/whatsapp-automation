@@ -7,6 +7,7 @@
 	import FrameIcon from "@lucide/svelte/icons/frame";
 	import GalleryVerticalEndIcon from "@lucide/svelte/icons/gallery-vertical-end";
 	import MapIcon from "@lucide/svelte/icons/map";
+	import MessageSquareIcon from "@lucide/svelte/icons/message-square";
 	import Settings2Icon from "@lucide/svelte/icons/settings-2";
 	import SquareTerminalIcon from "@lucide/svelte/icons/square-terminal";
 
@@ -36,6 +37,11 @@
 				icon: BotIcon,
 			},
 			{
+				title: "Mesajlar",
+				url: "/mesajlar",
+				icon: MessageSquareIcon,
+			},
+			{
 				title: "Hesaplar",
 				url: "/hesaplar",
 				icon: Settings2Icon,
@@ -60,13 +66,14 @@
 		ref = $bindable(null),
 		collapsible = "icon",
 		user = data.user,
+		accounts = [],
 		...restProps
-	}: ComponentProps<typeof Sidebar.Root> & { user?: any } = $props();
+	}: ComponentProps<typeof Sidebar.Root> & { user?: any, accounts?: any[] } = $props();
 </script>
 
 <Sidebar.Root bind:ref {collapsible} {...restProps}>
 	<Sidebar.Header>
-		<TeamSwitcher teams={data.teams} />
+		<TeamSwitcher {accounts} />
 	</Sidebar.Header>
 	<Sidebar.Content>
 		<NavMain items={data.navMain} />

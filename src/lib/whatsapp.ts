@@ -5,10 +5,11 @@ import makeWASocket, {
     makeCacheableSignalKeyStore,
     Browsers,
     type AnyMessageContent,
-    type proto,
+    proto,
     WAMessageStubType,
     delay,
-    jidDecode
+    jidDecode,
+    downloadMediaMessage
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode from 'qrcode';
@@ -20,6 +21,7 @@ const logger = pino({ level: 'silent' });
 const USER_DATA_PATH = process.env.USER_DATA_PATH;
 const ACCOUNTS_FILE = USER_DATA_PATH ? path.join(USER_DATA_PATH, 'accounts.json') : './accounts.json';
 const AUTH_PATH = USER_DATA_PATH ? path.join(USER_DATA_PATH, '.baileys_auth') : '.baileys_auth';
+const MEDIA_PATH = USER_DATA_PATH ? path.join(USER_DATA_PATH, 'media') : './media';
 
 // Ensure the auth path exists
 if (!fs.existsSync(AUTH_PATH)) {
@@ -260,10 +262,63 @@ export async function initializeWhatsApp(accountId: string) {
         }
     });
 
-    // Messaging Upsert - Auto Reply Logic + Contact Harvesting
+    async function markMessageAsDeleted(targetId?: string, source: string = 'unknown', remoteJid?: string) {
+        if (!targetId) {
+            console.warn(`[${accountId}] Revoke ignored: missing targetId (source=${source})`);
+            return;
+        }
+        try {
+            const { db: dbInst } = await import('./server/db');
+            const { sql } = await import('drizzle-orm');
+            const prefixedId = `${accountId}:${targetId}`;
+            await dbInst.run(sql`
+                UPDATE messages
+                SET body = 'Bu mesaj silindi',
+                    media_type = NULL,
+                    status = 'deleted_everyone'
+                WHERE account_id = ${accountId}
+                  AND (
+                    id = ${prefixedId}
+                    OR id = ${targetId}
+                    OR id LIKE ${`%:${targetId}`}
+                  )
+            `);
+            const changesRow = await dbInst.get(sql`SELECT changes() as n`);
+            const changed = Number((changesRow as any)?.n || 0);
+            if (changed > 0) {
+                console.log(`[${accountId}] Revoke applied (${source}) targetId=${targetId} remoteJid=${remoteJid || '-'} rows=${changed}`);
+            } else {
+                console.warn(`[${accountId}] Revoke no-match (${source}) targetId=${targetId} remoteJid=${remoteJid || '-'} prefixed=${prefixedId}`);
+            }
+        } catch (e: any) {
+            console.error(`[${accountId}] Revoke update error:`, e.message);
+        }
+    }
+
+    // Some devices send revoke events via messages.update (not messages.upsert)
+    sock.ev.on('messages.update', async (updates) => {
+        for (const u of updates || []) {
+            const nested =
+                (u as any)?.update?.message?.ephemeralMessage?.message ||
+                (u as any)?.update?.message?.viewOnceMessage?.message ||
+                (u as any)?.update?.message?.viewOnceMessageV2?.message ||
+                (u as any)?.update?.message ||
+                (u as any)?.update;
+
+            const protocolMessage = (nested as any)?.protocolMessage;
+            const revokedKeyId = protocolMessage?.key?.id as string | undefined;
+            if (protocolMessage && revokedKeyId) {
+                await markMessageAsDeleted(revokedKeyId, 'messages.update', (u as any)?.key?.remoteJid);
+            } else if (protocolMessage) {
+                console.warn(`[${accountId}] Revoke event without key.id (messages.update) remoteJid=${(u as any)?.key?.remoteJid || '-'}`);
+            }
+        }
+    });
+
+    // Messaging Upsert - Auto Reply Logic + Contact Harvesting + Message Persistence
     sock.ev.on('messages.upsert', async (m) => {
-        if (m.type !== 'notify') return;
-        
+        const isNotify = m.type === 'notify';
+
         for (const msg of m.messages) {
             // Harvesting contact info from pushnames (very useful for newcomers)
             if (msg.key.remoteJid && msg.pushName) {
@@ -277,6 +332,142 @@ export async function initializeWhatsApp(accountId: string) {
                     });
                 }
             }
+
+            // Save all messages (incoming + outgoing) to DB for chat history
+            const jidForSave = msg.key.remoteJid;
+            const content =
+                msg.message?.ephemeralMessage?.message ||
+                msg.message?.viewOnceMessage?.message ||
+                (msg.message as any)?.viewOnceMessageV2?.message ||
+                msg.message;
+
+            const rawTs: any = msg.messageTimestamp;
+            const tsValue =
+                typeof rawTs === 'number'
+                    ? rawTs
+                    : typeof rawTs === 'string'
+                        ? Number(rawTs)
+                        : typeof rawTs?.toNumber === 'function'
+                            ? rawTs.toNumber()
+                            : Number(rawTs);
+            const safeTimestamp = Number.isFinite(tsValue)
+                ? new Date(tsValue < 1e12 ? tsValue * 1000 : tsValue)
+                : new Date();
+
+            if (jidForSave && !jidForSave.includes('@g.us') && content) {
+                try {
+                    const { db: dbInst } = await import('./server/db');
+                    const { messages: messagesTable } = await import('./server/db/schema');
+
+                    // Handle revoke events: update existing message as deleted instead of inserting a new one.
+                    const protocolMessage = (content as any)?.protocolMessage;
+                    const revokedKeyId = protocolMessage?.key?.id as string | undefined;
+                    if (revokedKeyId) {
+                        await markMessageAsDeleted(revokedKeyId, 'messages.upsert', jidForSave || undefined);
+                        continue;
+                    } else if (protocolMessage) {
+                        console.warn(`[${accountId}] Revoke event without key.id (messages.upsert) remoteJid=${jidForSave || '-'}`);
+                        continue;
+                    }
+
+                    let body = (content as any)?.conversation ||
+                        (content as any)?.extendedTextMessage?.text ||
+                        (content as any)?.imageMessage?.caption ||
+                        (content as any)?.videoMessage?.caption ||
+                        (content as any)?.documentMessage?.caption || '';
+                    // Remove zero-width characters produced by protocol events.
+                    body = String(body).replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+                    if (!body && (content as any)?.audioMessage) body = '[Ses mesajı]';
+                    if (!body && (content as any)?.stickerMessage) body = '[Çıkartma]';
+                    if (!body && (content as any)?.reactionMessage) body = '[Tepki]';
+
+                    const mediaType = (content as any)?.imageMessage ? 'image' :
+                        (content as any)?.videoMessage ? 'video' :
+                        (content as any)?.audioMessage ? 'audio' :
+                        (content as any)?.documentMessage ? 'document' : null;
+
+                    // Ignore protocol/system messages (e.g. revoke/delete notifications)
+                    // and skip empty payloads that would render as blank bubbles.
+                    const isProtocolMessage = Boolean((content as any)?.protocolMessage);
+                    if (isProtocolMessage || (!body && !mediaType)) {
+                        continue;
+                    }
+
+                    const messageId = msg.key.id
+                        ? `${accountId}:${msg.key.id}`
+                        : `${accountId}:fallback:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+
+                    // Normalize JID to digits-only base number (removes device suffixes like :12)
+                    const phoneNumber = jidForSave.split('@')[0].replace(/\D/g, '');
+                    const selfNumber = String(status?.user?.id || sock.user?.id || '')
+                        .split('@')[0]
+                        .split(':')[0]
+                        .replace(/\D/g, '');
+
+                    // Ignore self-thread writes to prevent creating a fake conversation under account name.
+                    if (selfNumber && phoneNumber === selfNumber) {
+                        continue;
+                    }
+
+                    const normalizedJid = `${phoneNumber}@s.whatsapp.net`;
+
+                    await dbInst.insert(messagesTable).values({
+                        id: messageId,
+                        accountId,
+                        contactJid: normalizedJid,
+                        fromMe: msg.key.fromMe ?? false,
+                        body,
+                        mediaType,
+                        timestamp: safeTimestamp,
+                        status: msg.key.fromMe ? 'sent' : 'received'
+                    }).onConflictDoNothing();
+
+                    // Save raw proto bytes so we can lazy-download later
+                    if (mediaType && msg.key.id) {
+                        try {
+                            const rawMsgId = msg.key.id;
+                            const rawDir = path.join(MEDIA_PATH, accountId, 'raw');
+                            if (!fs.existsSync(rawDir)) fs.mkdirSync(rawDir, { recursive: true });
+                            const rawPath = path.join(rawDir, `${rawMsgId}.bin`);
+                            if (!fs.existsSync(rawPath)) {
+                                const bytes = proto.WebMessageInfo.encode(msg as any).finish();
+                                fs.writeFileSync(rawPath, Buffer.from(bytes));
+                            }
+                        } catch (protoErr: any) {
+                            console.error(`[${accountId}] Proto save error:`, protoErr.message);
+                        }
+                    }
+
+                    // Download and save media file immediately
+                    if (mediaType && (content as any)?.[`${mediaType}Message`]) {
+                        try {
+                            const rawMsgId = msg.key.id!;
+                            const mediaDir = path.join(MEDIA_PATH, accountId);
+                            if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
+
+                            const mimetype: string =
+                                (content as any)?.imageMessage?.mimetype ||
+                                (content as any)?.videoMessage?.mimetype ||
+                                (content as any)?.audioMessage?.mimetype ||
+                                (content as any)?.documentMessage?.mimetype || 'application/octet-stream';
+                            const extPart = mimetype.split('/')[1]?.split(';')[0]?.split('+')[0] || 'bin';
+                            const ext = extPart === 'jpeg' ? 'jpg' : extPart;
+                            const filePath = path.join(mediaDir, `${rawMsgId}.${ext}`);
+
+                            if (!fs.existsSync(filePath)) {
+                                const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                                fs.writeFileSync(filePath, buffer as Buffer);
+                            }
+                        } catch (dlErr: any) {
+                            console.error(`[${accountId}] Media download error:`, dlErr.message);
+                        }
+                    }
+                } catch (e: any) {
+                    console.error(`[${accountId}] Message save error:`, e.message);
+                }
+            }
+
+            if (!isNotify) continue; // Auto-reply only for real-time notifications
 
             if (!msg.message || msg.key.fromMe) continue;
             
@@ -471,6 +662,31 @@ export async function sendWhatsAppMessage(accountId: string, to: string, message
             message: message.substring(0, 100)
         });
 
+        // Save to messages table for chat history
+        if (sentMsg?.key?.id) {
+            const { messages: messagesTable } = await import('./server/db/schema');
+            const mediaType = media ? (
+                media.mimetype.startsWith('image/') ? 'image' :
+                media.mimetype.startsWith('video/') ? 'video' :
+                media.mimetype.startsWith('audio/') ? 'audio' : 'document'
+            ) : null;
+            
+            // Normalize JID to digits-only base number (removes device suffixes like :12)
+            const phoneNumber = jid.split('@')[0].replace(/\D/g, '');
+            const normalizedJid = `${phoneNumber}@s.whatsapp.net`;
+            
+            await db.insert(messagesTable).values({
+                id: `${accountId}:${sentMsg.key.id}`,
+                accountId,
+                contactJid: normalizedJid,
+                fromMe: true,
+                body: message,
+                mediaType,
+                timestamp: new Date(),
+                status: 'sent'
+            }).onConflictDoNothing();
+        }
+
         return { success: true, messageId: sentMsg.key.id, remainingCredits: result[0].updatedCredits };
     } catch (e: any) {
         await db.update(users).set({ credits: sql`${users.credits} + 1` }).where(eq(users.id, account.userId));
@@ -488,6 +704,28 @@ export async function sendWhatsAppMessage(accountId: string, to: string, message
     }
 }
 
+export async function deleteWhatsAppMessageForEveryone(accountId: string, remoteJid: string, rawMessageId: string) {
+    const client = clients.get(accountId);
+    const status = statuses.get(accountId);
+
+    if (!client || status?.status !== 'ready') {
+        return { success: false, error: 'Hesap bağlı değil' };
+    }
+
+    try {
+        await client.sendMessage(remoteJid, {
+            delete: {
+                remoteJid,
+                fromMe: true,
+                id: rawMessageId
+            }
+        });
+        return { success: true };
+    } catch (e: any) {
+        return { success: false, error: e?.message || 'Herkesten silme başarısız' };
+    }
+}
+
 export async function getWhatsAppContacts(accountId: string) {
     const storePath = getStorePath(accountId);
     console.log(`[Backend-API] getWhatsAppContacts called for ID: ${accountId}. Reading from: ${storePath}`);
@@ -497,29 +735,59 @@ export async function getWhatsAppContacts(accountId: string) {
         return [];
     }
     
-    // Merge contacts and people from chats for a better list
-    const combined = new Map(store.contacts);
+    // Merge contacts and chats for richer labels, including lid<->phone mapping.
+    const combined = new Map<string, any>(store.contacts as Map<string, any>);
     store.chats.forEach((chat, jid) => {
-        if (jid.endsWith('@s.whatsapp.net') && !combined.has(jid)) {
-            combined.set(jid, { 
-                id: jid, 
-                name: chat.name || jid.split('@')[0] 
+        if (!combined.has(jid)) {
+            combined.set(jid, {
+                id: jid,
+                name: chat.name,
+                pushName: chat.pushName,
+                notify: chat.notify
             });
         }
     });
 
-    const contactsArray = Array.from(combined.values());
+    const normalizeDigits = (value: string | undefined) =>
+        String(value || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+
+    const byIdDigits = new Map<string, any>();
+    const byLidDigits = new Map<string, any>();
+    for (const c of combined.values()) {
+        const idDigits = normalizeDigits(c?.id);
+        const lidDigits = normalizeDigits(c?.lid);
+        if (idDigits && !byIdDigits.has(idDigits)) byIdDigits.set(idDigits, c);
+        if (lidDigits && !byLidDigits.has(lidDigits)) byLidDigits.set(lidDigits, c);
+    }
+
+    const pickBestName = (c: any) =>
+        c?.name || c?.verifiedName || c?.notify || c?.pushName || '';
+
+    const contactsArray = Array.from(combined.values())
+        .filter((c: any) => String(c?.id || '').endsWith('@s.whatsapp.net'))
+        .map((c: any) => {
+            const number = normalizeDigits(c.id);
+
+            // If this phone contact has no visible name, try related lid record.
+            const maybeViaLid = byLidDigits.get(number);
+            const maybeViaId = byIdDigits.get(number);
+            const resolvedName =
+                pickBestName(c) ||
+                pickBestName(maybeViaLid) ||
+                pickBestName(maybeViaId) ||
+                number;
+
+            return {
+                id: c.id,
+                name: resolvedName,
+                number,
+                isMyContact: Boolean(c?.name)
+            };
+        });
+
     console.log(`[${accountId}] getWhatsAppContacts: Returning ${contactsArray.length} contacts.`);
-    
-    return contactsArray
-        .filter((c: any) => c.id.endsWith('@s.whatsapp.net'))
-        .map((c: any) => ({
-            id: c.id,
-            name: c.name || c.verifiedName || c.pushName || c.id.split('@')[0],
-            number: c.id.split('@')[0],
-            isMyContact: !!c.name
-        }))
-        .sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
+
+    return contactsArray.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
 }
 
 export async function getWhatsAppConversations(accountId: string) {
@@ -607,8 +875,84 @@ export async function getLogs() {
     }
 }
 
+export function getContactName(accountId: string, jid: string): string {
+    const store = stores.get(accountId);
+    if (store) {
+        const contact = store.contacts.get(jid);
+        if (contact) return contact.name || contact.verifiedName || contact.pushName || jid.split('@')[0];
+
+        // Resolve LID identity back to a phone contact if available.
+        if (jid.endsWith('@lid')) {
+            for (const c of store.contacts.values()) {
+                if ((c as any)?.lid === jid && (c as any)?.id) {
+                    const resolvedJid = (c as any).id as string;
+                    return (c as any).name || (c as any).verifiedName || (c as any).pushName || resolvedJid.split('@')[0];
+                }
+            }
+        }
+    }
+    return jid.split('@')[0];
+}
+
+export function getCanonicalContactNumber(accountId: string, jidOrNumber: string): string {
+    const input = (jidOrNumber || '').trim();
+    if (!input) return '';
+
+    const normalizeUser = (value: string) => value.split('@')[0].split(':')[0].replace(/\D/g, '');
+
+    const resolveViaStore = (userDigits: string) => {
+        const store = stores.get(accountId);
+        if (!store || !userDigits) return '';
+
+        // First map via LID alias (covers @lid and lid-style @s.whatsapp.net senders).
+        for (const c of store.contacts.values()) {
+            const lid = (c as any)?.lid as string | undefined;
+            const id = (c as any)?.id as string | undefined;
+            if (!id || !lid) continue;
+            if (normalizeUser(lid) === userDigits) {
+                return normalizeUser(id);
+            }
+        }
+
+        // Then try direct phone id match (but ignore pure @lid ids here).
+        for (const c of store.contacts.values()) {
+            const id = (c as any)?.id as string | undefined;
+            if (!id || id.endsWith('@lid')) continue;
+            if (normalizeUser(id) === userDigits) {
+                return normalizeUser(id);
+            }
+        }
+
+        return '';
+    };
+
+    // Already a plain number.
+    if (!input.includes('@')) {
+        const digits = input.replace(/\D/g, '');
+        return resolveViaStore(digits) || digits;
+    }
+
+    const [user, domain] = input.split('@');
+    if (!user) return '';
+    const userDigits = normalizeUser(user);
+
+    const mapped = resolveViaStore(userDigits);
+    if (mapped) return mapped;
+
+    // Normal phone JIDs.
+    if (domain === 's.whatsapp.net' || domain === 'c.us' || domain === 'g.us') {
+        return userDigits;
+    }
+
+    // LID identity: map through store.contacts[*].lid -> contacts[*].id phone JID.
+    if (domain === 'lid') {
+        return userDigits;
+    }
+
+    return userDigits;
+}
+
 export async function initAllAccounts() {
-    if (globalRef.baileysInitialized) return;
     globalRef.baileysInitialized = true;
     
     try {

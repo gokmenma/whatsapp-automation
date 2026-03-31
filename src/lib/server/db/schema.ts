@@ -96,3 +96,17 @@ export const messageTemplates = sqliteTable('message_templates', {
 }, (t) => ({
     userIdIdx: index('message_templates_user_id_idx').on(t.userId)
 }));
+
+export const messages = sqliteTable('messages', {
+    id: text('id').primaryKey(),
+    accountId: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+    contactJid: text('contact_jid').notNull(),
+    fromMe: integer('from_me', { mode: 'boolean' }).notNull().default(false),
+    body: text('body').notNull().default(''),
+    mediaType: text('media_type'), // null | 'image' | 'video' | 'audio' | 'document'
+    timestamp: integer('timestamp', { mode: 'timestamp' }).notNull(),
+    status: text('status').notNull().default('sent') // 'sent' | 'failed' | 'received'
+}, (t) => ({
+    accountContactIdx: index('messages_account_contact_idx').on(t.accountId, t.contactJid),
+    timestampIdx: index('messages_timestamp_idx').on(t.timestamp)
+}));
