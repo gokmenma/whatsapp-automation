@@ -64,6 +64,23 @@
 	};
 
 	const GREETINGS = ["Merhaba", "Selam", "İyi günler", "İyi çalışmalar", "Merhabalar", "Selamlar"];
+	const ZW_ZERO = '\u200B';
+	const ZW_ONE = '\u200C';
+	const ZW_SEPARATOR = '\u200D';
+
+	function encodeHiddenNumber(value: number): string {
+		const digits = String(value);
+		return digits
+			.split('')
+			.map((digit) =>
+				Number(digit)
+					.toString(2)
+					.padStart(4, '0')
+					.replace(/0/g, ZW_ZERO)
+					.replace(/1/g, ZW_ONE) + ZW_SEPARATOR
+			)
+			.join('');
+	}
 
 	let phoneNumberText = $state("");
 	let messageBody = $state("");
@@ -502,7 +519,7 @@
 				// Gizli karakterler (opsiyonel seçime bağlı)
 				if (antiBan.addRandomSuffix) {
 					const secretNum = Math.floor(Math.random() * 9000000) + 1000000;
-					finalMessage = finalMessage + '\u200B' + secretNum;
+					finalMessage = finalMessage + encodeHiddenNumber(secretNum);
 				}
 			}
 
