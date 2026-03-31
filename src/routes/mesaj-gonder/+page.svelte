@@ -497,13 +497,9 @@
 				finalMessage = greeting + ",\n" + finalMessage;
 			}
 
-			// Mesaj sonuna gizli veya görünür benzersiz kod ekle
+			// Mesaj sonuna sadece gizli benzersiz kod ekle
 			if (finalMessage) {
-				const randomNum = Math.floor(Math.random() * 900000) + 100000;
-				// Görünür kod (Kullanıcı talebi: seçime bağlı olmayacak)
-				finalMessage = finalMessage + "\n\n" + `[Kod: ${randomNum}]`;
-				
-				// Gizli karakterler (Opsiyonel seçime bağlı)
+				// Gizli karakterler (opsiyonel seçime bağlı)
 				if (antiBan.addRandomSuffix) {
 					const secretNum = Math.floor(Math.random() * 9000000) + 1000000;
 					finalMessage = finalMessage + '\u200B' + secretNum;
