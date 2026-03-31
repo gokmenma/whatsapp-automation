@@ -15,6 +15,9 @@
 	import { invalidateAll } from "$app/navigation";
 	import './layout.css';
 
+	let lastMessageTime = 0;
+	let notificationAudio: HTMLAudioElement | null = null;
+
 	let { children, data } = $props();
 
 	const accounts = $derived(data.accounts || []);
@@ -71,6 +74,10 @@
 		window.addEventListener('error', errorHandler);
 		window.addEventListener('unhandledrejection', rejectionHandler);
 
+		// Initialize notification sound
+		notificationAudio = new Audio('/notification.wav');
+		notificationAudio.load();
+
 		// console.error ve console.warn'ı yakalayıp kullanıcıya toast ile göster
 		const originalConsoleError = console.error;
 		const originalConsoleWarn = console.warn;
@@ -92,6 +99,37 @@
 			console.error = originalConsoleError;
 			console.warn = originalConsoleWarn;
 		};
+	});
+
+	async function checkNotifications() {
+		if (!selectedAccountId || isAuthPage) return;
+		try {
+			const res = await fetch(`/api/messages?accountId=${encodeURIComponent(selectedAccountId)}&fast=true`);
+			if (res.ok) {
+				const data = await res.json();
+				const latest = data.latest;
+				if (latest) {
+					const ts = new Date(latest.timestamp).getTime();
+					// If we have a newer incoming message
+					if (lastMessageTime > 0 && ts > lastMessageTime) {
+						if (notificationAudio && !latest.isMuted) {
+							notificationAudio.play().catch(e => console.warn("Ses çalınamadı (Etkileşim gerekebilir):", e));
+						}
+					}
+					lastMessageTime = Math.max(lastMessageTime, ts);
+				}
+			}
+		} catch (e) {
+			// Fail silently for background polling
+		}
+	}
+
+	$effect(() => {
+		if (selectedAccountId && !isAuthPage) {
+			const interval = setInterval(checkNotifications, 5000);
+			checkNotifications(); // Run immediately
+			return () => clearInterval(interval);
+		}
 	});
 </script>
 

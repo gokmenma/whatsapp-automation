@@ -83,27 +83,8 @@
 	let accounts = $derived(data.accounts || []);
 	let selectedAccountId = $derived(accounts.find((a: any) => a.isDefault)?.id || (accounts[0]?.id || ""));
 	let userCredits = $derived(data.credits || 0);
+	let activeAcc = $derived(accounts.find((a: any) => a.id === selectedAccountId));
 
-	async function handleAccountChange(val: string) {
-		if (!val) return;
-		try {
-			const res = await fetch('/api/whatsapp/update-settings', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ accountId: val, isDefault: true })
-			});
-			const result = await res.json();
-			if (result.success) {
-				toast.success("Varsayılan hesap değiştirildi.");
-				invalidateAll();
-			} else {
-				toast.error(result.error || "Hesap seçimi başarısız.");
-			}
-		} catch (e) {
-			toast.error("Bir hata oluştu.");
-		}
-	}
-	
 	let isBulk = $state(false);
 	
 	let sendStatus = $state("idle"); // idle, sending, finished, error
@@ -494,20 +475,24 @@
 			let finalMessage = item.message;
 			if (antiBan.addRandomGreeting && finalMessage) {
 				const greeting = GREETINGS[Math.floor(Math.random() * GREETINGS.length)];
-				finalMessage = greeting + ",\n" + finalMessage;
+				finalMessage = greeting + ",\n\n" + finalMessage;
 			}
 
-			// Mesaj sonuna gizli veya görünür benzersiz kod ekle
+			// Mesaj sonuna gizli görünmez karakterler ekle (Ban koruması için)
 			if (finalMessage) {
-				const randomNum = Math.floor(Math.random() * 900000) + 100000;
-				// Görünür kod (Kullanıcı talebi: seçime bağlı olmayacak)
-				finalMessage = finalMessage + "\n\n" + `[Kod: ${randomNum}]`;
-				
-				// Gizli karakterler (Opsiyonel seçime bağlı)
-				if (antiBan.addRandomSuffix) {
-					const secretNum = Math.floor(Math.random() * 9000000) + 1000000;
-					finalMessage = finalMessage + '\u200B' + secretNum;
+				const invisibleChars = ['\u200B', '\u200C', '\u200D', '\uFEFF'];
+				let hiddenCode = "";
+				// Temel benzersizlik için 10 karakter
+				for (let k = 0; k < 10; k++) {
+					hiddenCode += invisibleChars[Math.floor(Math.random() * invisibleChars.length)];
 				}
+				// Ayar seçiliyse fazladan 10 karakter daha ekle
+				if (antiBan.addRandomSuffix) {
+					for (let k = 0; k < 10; k++) {
+						hiddenCode += invisibleChars[Math.floor(Math.random() * invisibleChars.length)];
+					}
+				}
+				finalMessage = finalMessage + hiddenCode;
 			}
 
 			currentRecipient = item.to;
@@ -789,48 +774,18 @@
 			</p>
 		</div>
 		<div class="flex items-center gap-3">
-			<Select.Root type="single" value={selectedAccountId} onValueChange={handleAccountChange}>
-				<Select.Trigger class="h-10 px-4 min-w-[200px] max-w-[280px] flex items-center gap-2 rounded-xl border shadow-xs font-bold text-sm bg-background transition-all hover:bg-muted group border-primary/20">
-					<div class="flex items-center gap-2 max-w-full truncate">
-						<div class="shrink-0 p-1 bg-primary/10 rounded-md group-hover:bg-primary/20 transition-colors">
-							<User class="w-3.5 h-3.5 text-primary" />
-						</div>
-						<div class="flex items-center gap-1.5 truncate">
-							<span class="truncate">
-								{accounts.find(a => a.id === selectedAccountId)?.name || "Hesap Seç"}
-							</span>
-							<Badge variant="outline" class="text-[9px] h-4 bg-muted/50 border-none font-bold opacity-80 shrink-0">
-								({userCredits})
-							</Badge>
-						</div>
+			<div class="px-3 py-1.5 flex items-center gap-2.5 rounded-xl border border-primary/20 bg-muted/30 shadow-xs font-bold text-sm">
+				<div class="w-2 h-2 rounded-full {activeAcc?.status === 'ready' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}"></div>
+				<div class="flex flex-col truncate">
+					<span class="text-[9px] text-muted-foreground uppercase tracking-tighter leading-none mb-1">WhatsApp Hesabı</span>
+					<div class="flex items-center gap-2">
+						<span class="text-foreground truncate leading-none">{activeAcc?.name || 'Hesap seçilmedi'}</span>
+						<Badge variant="outline" class="text-[9px] h-4 bg-primary/10 border-none font-bold opacity-80 shrink-0 px-1.5">
+							{userCredits} Kredi
+						</Badge>
 					</div>
-				</Select.Trigger>
-				<Select.Content class="rounded-xl shadow-2xl border-primary/10 min-w-[220px]">
-					{#if accounts.length === 0}
-						<div class="p-4 text-xs text-muted-foreground text-center italic">Aktif bağlı hesap bulunamadı...</div>
-					{:else}
-						{#each accounts as acc}
-							<Select.Item value={acc.id} label={acc.name} class="py-3 px-4 rounded-lg focus:bg-primary/5 mb-1 last:mb-0 transition-colors">
-								<div class="flex items-center gap-3 w-full">
-									<div class="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-muted-foreground font-bold shrink-0">
-										{acc.name.charAt(0)}
-									</div>
-									<div class="flex flex-col">
-										<span class="font-bold text-sm tracking-tight">{acc.name}</span>
-										<span class="text-[10px] text-muted-foreground font-mono">{acc.id.substring(0, 12)}...</span>
-									</div>
-									{#if acc.status === 'ready'}
-										<div class="ml-auto w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]"></div>
-									{:else}
-										<div class="ml-auto w-2 h-2 rounded-full bg-red-400"></div>
-									{/if}
-								</div>
-							</Select.Item>
-						{/each}
-					{/if}
-				</Select.Content>
-			</Select.Root>
-
+				</div>
+			</div>
 			{#if sendStatus === "finished"}
 				<Button variant="outline" size="sm" onclick={resetForm} class="h-10 rounded-full px-4 border shadow-sm transition-all hover:bg-muted active:scale-95">
 					<Plus class="w-4 h-4 mr-2" /> Yeni Mesaj

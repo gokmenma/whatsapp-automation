@@ -13,6 +13,7 @@
     import ImageIcon from '@lucide/svelte/icons/image';
     import FileIcon from '@lucide/svelte/icons/file';
     import MicIcon from '@lucide/svelte/icons/mic';
+    import BellOffIcon from '@lucide/svelte/icons/bell-off';
     import TrashIcon from '@lucide/svelte/icons/trash-2';
     import BoldIcon from '@lucide/svelte/icons/bold';
     import ItalicIcon from '@lucide/svelte/icons/italic';
@@ -23,13 +24,17 @@
     import QuoteIcon from '@lucide/svelte/icons/quote';
     import SmileIcon from '@lucide/svelte/icons/smile';
     import PlusIcon from '@lucide/svelte/icons/plus';
+    import Loader2Icon from '@lucide/svelte/icons/loader-2';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as Dialog from '$lib/components/ui/dialog';
+    import { Label } from '$lib/components/ui/label';
+    import { Button } from '$lib/components/ui/button';
 
     let { data } = $props();
 
     // State
-    let selectedAccountId = $state('');
+    const activeAcc = $derived(data.accounts.find((a: any) => a.isDefault) || data.accounts[0]);
+    const selectedAccountId = $derived(activeAcc?.id || "");
     let selectedContact = $state<{ jid: string; name: string; number: string } | null>(null);
     let conversations = $state<any[]>([]);
     let messages = $state<any[]>([]);
@@ -57,9 +62,16 @@
     let lastLoadedContactsAccountId = $state('');
     let messageTextareaEl = $state<HTMLTextAreaElement | null>(null);
     let showFormattingToolbar = $state(false);
+    
+    let muteDialogOpen = $state(false);
+    let muteDuration = $state('480'); // string for radio group value
+    let convToMute = $state<any>(null);
+    let muteLoading = $state(false);
+    let messagesCache = $state<Record<string, any[]>>({});
 
     let isImageAttachment = $derived(Boolean(attachedMedia?.mimetype?.startsWith('image/')));
     let isVideoAttachment = $derived(Boolean(attachedMedia?.mimetype?.startsWith('video/')));
+    let isGroup = $derived(selectedContact?.jid?.endsWith('@g.us'));
 
     // Derived
     let readyAccounts = $derived(data.accounts.filter((a: any) => a.status === 'ready'));
@@ -102,7 +114,9 @@
 
     async function loadMessages(scrollToBottom = false) {
         if (!selectedContact || !selectedAccountId) return;
-        loadingMessages = true;
+        if (messages.length === 0) {
+            loadingMessages = true;
+        }
         try {
             const jid = encodeURIComponent(selectedContact.jid);
             const res = await fetch(`/api/messages/${jid}?accountId=${encodeURIComponent(selectedAccountId)}`);
@@ -123,6 +137,9 @@
 
                 if (changed) {
                     messages = incoming;
+                    if (selectedContact) {
+                        messagesCache[selectedContact.jid] = incoming;
+                    }
                 }
 
                 if (scrollToBottom || changed) {
@@ -137,8 +154,15 @@
     }
 
     async function selectConversation(conv: any) {
-        selectedContact = { jid: conv.contactJid, name: conv.name, number: conv.number };
-        messages = [];
+        selectedContact = { 
+            jid: conv.contactJid, 
+            name: conv.name, 
+            number: conv.number,
+            isMuted: conv.isMuted 
+        };
+        // Restore from cache if available
+        messages = messagesCache[conv.contactJid] || [];
+        
         stopPolling();
         contextMenu = null;
 
@@ -163,6 +187,67 @@
         messageMenu = { x: e.clientX, y: e.clientY, msg };
     }
 
+    function handleMuteClick(conv: any) {
+        if (conv.isMuted) {
+            executeMute(conv, false);
+        } else {
+            convToMute = conv;
+            muteDuration = '480';
+            muteDialogOpen = true;
+        }
+        contextMenu = null;
+    }
+
+    async function confirmMute() {
+        if (!convToMute) return;
+        muteLoading = true;
+        try {
+            const dur = parseInt(muteDuration);
+            await executeMute(convToMute, dur);
+            muteDialogOpen = false;
+        } finally {
+            muteLoading = false;
+        }
+    }
+
+    async function executeMute(conv: any, durationOrMute: number | boolean) {
+        if (!selectedAccountId) return;
+        
+        // Optimistic UI update
+        const isNowMuted = durationOrMute !== false && durationOrMute !== 0;
+        const prevConversations = [...conversations];
+        const prevSelectedContact = selectedContact ? { ...selectedContact } : null;
+
+        conversations = conversations.map(c => c.contactJid === conv.contactJid ? { ...c, isMuted: isNowMuted } : c);
+        if (selectedContact?.jid === conv.contactJid) {
+            selectedContact = { ...selectedContact, isMuted: isNowMuted };
+        }
+        
+        muteDialogOpen = false;
+        toast.success(isNowMuted ? 'Sohbet sessize alındı' : 'Sessizden çıkarıldı');
+
+        try {
+            const jid = encodeURIComponent(conv.contactJid);
+            const res = await fetch(`/api/messages/${jid}?accountId=${encodeURIComponent(selectedAccountId)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'mute', isMuted: durationOrMute })
+            });
+
+            if (!res.ok) {
+                // Rollback if failed
+                conversations = prevConversations;
+                selectedContact = prevSelectedContact;
+                toast.error('Sessize alma işlemi başarısız oldu');
+            }
+        } catch (e) {
+            // Rollback on network error
+            conversations = prevConversations;
+            selectedContact = prevSelectedContact;
+            toast.error('Bağlantı hatası');
+        }
+    }
+
     async function deleteConversation(conv: any) {
         // Just open the dialog, actual deletion happens in the dialog action
         convToDelete = conv;
@@ -180,6 +265,7 @@
             );
             if (res.ok) {
                 conversations = conversations.filter(c => c.contactJid !== convToDelete.contactJid);
+                delete messagesCache[convToDelete.contactJid];
                 if (selectedContact?.jid === convToDelete.contactJid) {
                     selectedContact = null;
                     messages = [];
@@ -252,9 +338,6 @@
     }
 
     async function openNewChatDialog() {
-        if (!selectedAccountId) {
-            selectedAccountId = data.accounts.find((a: any) => a.status === 'ready')?.id || data.accounts[0]?.id || '';
-        }
         if (!selectedAccountId) {
             toast.error('Önce bir hesap seçin');
             return;
@@ -601,21 +684,16 @@
         if (selectedAccountId) {
             selectedContact = null;
             messages = [];
+            messagesCache = {}; // Explicitly wipe cache on account switch
+            loadConversations();
         }
     });
 
     onMount(async () => {
-        // Set default account
-        if (!selectedAccountId) {
-            selectedAccountId = data.accounts.find((a: any) => a.status === 'ready')?.id || data.accounts[0]?.id || '';
-        }
         // Restore from URL params
         const urlParams = new URLSearchParams(window.location.search);
-        const urlAccount = urlParams.get('account');
         const urlContact = urlParams.get('contact');
-        if (urlAccount && data.accounts.some((a: any) => a.id === urlAccount)) {
-            selectedAccountId = urlAccount;
-        }
+        
         await loadConversations();
         if (urlContact) {
             const conv = conversations.find(c => c.contactJid === urlContact);
@@ -660,20 +738,12 @@
                 </div>
             </div>
             <!-- Account selector -->
-            {#if data.accounts.length > 1}
-            <select
-                bind:value={selectedAccountId}
-                class="text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-            >
-                {#each data.accounts as acc}
-                    <option value={acc.id} disabled={acc.status !== 'ready'}>
-                        {acc.name}{acc.status !== 'ready' ? ' (bağlı değil)' : ''}
-                    </option>
-                {/each}
-            </select>
-            {:else if data.accounts.length === 1}
-                <span class="text-xs text-muted-foreground font-medium">{data.accounts[0].name}</span>
-            {/if}
+            <div class="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted/50 border border-border max-w-[150px]">
+                <div class="w-1.5 h-1.5 rounded-full {activeAcc?.status === 'ready' ? 'bg-emerald-500' : 'bg-rose-500'}"></div>
+                <span class="text-[11px] font-semibold text-foreground truncate">
+                    {activeAcc?.name || 'Hesap seçilmedi'}
+                </span>
+            </div>
         </div>
 
         <!-- Search -->
@@ -734,18 +804,23 @@
                             {getInitials(conv.name)}
                         </div>
                         <!-- Info -->
-                        <div class="flex-1 min-w-0">
-                            <div class="flex items-baseline justify-between gap-1">
-                                <span class="font-medium text-sm truncate">{conv.name}</span>
-                                <span class="text-xs text-muted-foreground shrink-0">{formatConvTime(conv.lastMessageAt)}</span>
+                        <div class="flex-1 min-w-0 relative">
+                            <div class="flex flex-col min-w-0">
+                                <span class="font-bold text-sm truncate pr-16">{conv.name}</span>
+                                <div class="flex items-center gap-1 mt-0.5 min-w-0">
+                                    {#if conv.lastMessageFromMe}
+                                        <span class="text-xs text-muted-foreground">✓</span>
+                                    {/if}
+                                    <span class="text-xs text-muted-foreground truncate">
+                                        {conv.lastMessageMediaType ? mediaIcon(conv.lastMessageMediaType) : (conv.lastMessage || '')}
+                                    </span>
+                                </div>
                             </div>
-                            <div class="flex items-center gap-1 mt-0.5">
-                                {#if conv.lastMessageFromMe}
-                                    <span class="text-xs text-muted-foreground">✓</span>
+                            <div class="absolute top-3 right-3 flex flex-col items-end gap-1.5">
+                                <span class="text-[10px] text-muted-foreground tabular-nums">{formatConvTime(conv.lastMessageAt)}</span>
+                                {#if conv.isMuted}
+                                    <BellOffIcon class="w-3.5 h-3.5 text-muted-foreground/50" />
                                 {/if}
-                                <span class="text-xs text-muted-foreground truncate">
-                                    {conv.lastMessageMediaType ? mediaIcon(conv.lastMessageMediaType) : (conv.lastMessage || '')}
-                                </span>
                             </div>
                         </div>
                     </button>
@@ -762,6 +837,19 @@
                 role="menu"
                 tabindex="0"
             >
+                <button
+                    class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50 transition-colors"
+                    onclick={() => handleMuteClick(contextMenu!.conv)}
+                    role="menuitem"
+                >
+                    {#if contextMenu.conv.isMuted}
+                        <MicIcon class="w-4 h-4" />
+                        <span>Sesi Aç</span>
+                    {:else}
+                        <BellOffIcon class="w-4 h-4" />
+                        <span>Sessize Al</span>
+                    {/if}
+                </button>
                 <button
                     class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50 transition-colors text-destructive"
                     onclick={() => {
@@ -792,6 +880,42 @@
                 </AlertDialog.Footer>
             </AlertDialog.Content>
         </AlertDialog.Root>
+        
+        <Dialog.Root bind:open={muteDialogOpen}>
+            <Dialog.Content class="sm:max-w-[400px]">
+                <Dialog.Header>
+                    <Dialog.Title>{convToMute?.name || 'Sessize Al'}</Dialog.Title>
+                    <Dialog.Description>
+                        Diğer katılımcılar bu sohbeti sessize aldığınızı görmez. Yeni mesajlar için bildirim almazsınız.
+                    </Dialog.Description>
+                </Dialog.Header>
+                <div class="py-6 space-y-4">
+                    <label class="flex items-center space-x-3 cursor-pointer group">
+                        <input type="radio" bind:group={muteDuration} value="480" class="w-4 h-4 text-emerald-600 border-gray-300 focus:ring-emerald-500 cursor-pointer" />
+                        <span class="text-sm font-medium text-foreground group-hover:text-emerald-600 transition-colors">8 Saat</span>
+                    </label>
+                    <label class="flex items-center space-x-3 cursor-pointer group">
+                        <input type="radio" bind:group={muteDuration} value="10080" class="w-4 h-4 text-emerald-600 border-gray-300 focus:ring-emerald-500 cursor-pointer" />
+                        <span class="text-sm font-medium text-foreground group-hover:text-emerald-600 transition-colors">1 Hafta</span>
+                    </label>
+                    <label class="flex items-center space-x-3 cursor-pointer group">
+                        <input type="radio" bind:group={muteDuration} value="-1" class="w-4 h-4 text-emerald-600 border-gray-300 focus:ring-emerald-500 cursor-pointer" />
+                        <span class="text-sm font-medium text-foreground group-hover:text-emerald-600 transition-colors">Her Zaman</span>
+                    </label>
+                </div>
+                <Dialog.Footer>
+                    <Button variant="ghost" onclick={() => muteDialogOpen = false} disabled={muteLoading}>İptal</Button>
+                    <Button onclick={confirmMute} disabled={muteLoading} class="bg-emerald-600 hover:bg-emerald-700 text-white min-w-[100px]">
+                        {#if muteLoading}
+                            <Loader2Icon class="w-4 h-4 animate-spin mr-2" />
+                            İşleniyor...
+                        {:else}
+                            Tamam
+                        {/if}
+                    </Button>
+                </Dialog.Footer>
+            </Dialog.Content>
+        </Dialog.Root>
 
         <Dialog.Root bind:open={newChatDialogOpen}>
             <Dialog.Content class="sm:max-w-130 max-h-[80vh] flex flex-col">
@@ -872,7 +996,12 @@
                     {getInitials(selectedContact.name)}
                 </div>
                 <div class="flex-1 min-w-0">
-                    <p class="font-semibold text-sm truncate">{selectedContact.name}</p>
+                    <div class="flex items-center gap-2 overflow-hidden">
+                        <p class="font-bold text-sm truncate">{selectedContact.name}</p>
+                        {#if selectedContact.isMuted}
+                            <BellOffIcon class="w-4 h-4 text-muted-foreground/60 shrink-0" />
+                        {/if}
+                    </div>
                     <p class="text-xs text-muted-foreground">+{selectedContact.number}</p>
                 </div>
             </div>
@@ -914,12 +1043,27 @@
                         {/if}
 
                         <!-- Message bubble -->
-                        <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} {prevIsFromMe === isFromMe ? 'mt-0.5' : 'mt-2'}">
+                        <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} {prevIsFromMe === isFromMe ? 'mt-0.5' : 'mt-2'} group relative">
+                            {#if !isFromMe && isGroup}
+                                {@const showSenderInfo = i === 0 || messages[i-1].senderJid !== msg.senderJid || prevIsFromMe}
+                                <div class="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white shadow-sm mt-auto mb-1 mr-2 {showSenderInfo ? 'opacity-100' : 'opacity-0'}" style="background-color: {avatarColor(msg.senderName || msg.senderJid)}">
+                                    {getInitials(msg.senderName || msg.senderJid)}
+                                </div>
+                            {/if}
+
                             <!-- svelte-ignore a11y_no_static_element_interactions -->
                             <div
                                 class="max-w-[75%] rounded-2xl text-sm shadow-sm overflow-hidden {isDeleted ? 'bg-muted/70 text-muted-foreground rounded-xl opacity-80' : (isFromMe ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted text-foreground rounded-bl-sm')}"
                                 oncontextmenu={(e) => handleMessageContextMenu(e, msg)}
                             >
+                                {#if !isFromMe && isGroup}
+                                    {@const showName = i === 0 || messages[i-1].senderJid !== msg.senderJid || prevIsFromMe}
+                                    {#if showName}
+                                        <div class="px-3 pt-1.5 pb-0.5 font-bold text-[11px] filter brightness-90 truncate" style="color: {avatarColor(msg.senderName || msg.senderJid)}">
+                                            {msg.senderName || msg.senderJid?.split('@')[0]}
+                                        </div>
+                                    {/if}
+                                {/if}
 
                                 <!-- Media content -->
                                 {#if !isDeleted && mediaKind === 'image'}
