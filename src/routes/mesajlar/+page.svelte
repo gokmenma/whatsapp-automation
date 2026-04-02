@@ -58,6 +58,7 @@
     let locallyEditedMessageIds = $state<Set<string>>(new Set());
     let deleteDialogOpen = $state(false);
     let convToDelete = $state<any>(null);
+    let deletingConversation = $state(false);
     let messageDeleteDialogOpen = $state(false);
     let msgToDelete = $state<any>(null);
     let newChatDialogOpen = $state(false);
@@ -447,10 +448,11 @@
 
         try {
             const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accountId)}`);
-            if (requestId !== conversationsRequestSeq) return;
+            if (requestId !== conversationsRequestSeq || accountId !== selectedAccountId) return;
 
             if (res.ok) {
                 const responseData = await res.json();
+                if (requestId !== conversationsRequestSeq || accountId !== selectedAccountId) return;
                 const nextConversations = responseData.conversations || [];
                 const trackedConversations = trackConversationChanges(nextConversations);
                 conversations = trackedConversations;
@@ -469,13 +471,14 @@
                 conversations = [];
             }
         } catch (e) {
-            if (requestId === conversationsRequestSeq) {
+            if (requestId === conversationsRequestSeq && accountId === selectedAccountId) {
                 conversations = [];
             }
         } finally {
             conversationsFetchInFlight = false;
-            if (requestId === conversationsRequestSeq) {
+            if (requestId === conversationsRequestSeq && accountId === selectedAccountId) {
                 loadingConversations = false;
+                startConversationsPolling(); // restart 3s timer only after load completes
             }
 
             if (conversationsReloadQueued) {
@@ -960,9 +963,10 @@
     }
 
     async function confirmDelete() {
-        if (!convToDelete) return;
+        if (!convToDelete || deletingConversation) return;
         
         try {
+            deletingConversation = true;
             const ok = await deleteConversationDirect(convToDelete, true);
             if (ok) {
                 toast.success('Konuşma silindi');
@@ -974,6 +978,7 @@
         } finally {
             deleteDialogOpen = false;
             convToDelete = null;
+            deletingConversation = false;
         }
     }
 
@@ -1426,12 +1431,9 @@
     });
 
     $effect(() => {
-        if (selectedAccountId) {
-            startConversationsPolling();
-        } else {
+        if (!selectedAccountId) {
             stopConversationsPolling();
         }
-
         return () => stopConversationsPolling();
     });
 
@@ -1560,6 +1562,10 @@
             return;
         }
 
+        // Invalidate any in-flight request and reset fetch gate so new request starts immediately.
+        conversationsRequestSeq += 1;
+        conversationsFetchInFlight = false;
+        conversationsReloadQueued = false;
         conversations = [];
         loadingConversations = true;
         selectedContact = null;
@@ -1573,7 +1579,6 @@
         messageMenu = null;
         topActionsMenuOpen = false;
         void loadConversations();
-        void prefetchContacts(selectedAccountId);
 
         if (typeof window !== 'undefined') {
             const url = new URL(window.location.href);
@@ -1605,6 +1610,24 @@
             const conv = conversations.find(c => c.contactJid === urlContact);
             if (conv) await selectConversation(conv);
         }
+    });
+
+    onMount(() => {
+        if (typeof window === 'undefined') return;
+
+        const onAccountSelected = (event: Event) => {
+            const customEvent = event as CustomEvent<{ accountId?: string }>;
+            const nextAccountId = String(customEvent.detail?.accountId || '').trim();
+            if (!nextAccountId || nextAccountId === selectedAccountId) return;
+
+            const exists = data.accounts.some((a: any) => a.id === nextAccountId);
+            if (!exists) return;
+
+            selectedAccountId = nextAccountId;
+        };
+
+        window.addEventListener('account:selected', onAccountSelected as EventListener);
+        return () => window.removeEventListener('account:selected', onAccountSelected as EventListener);
     });
 
     onDestroy(() => {
@@ -2043,9 +2066,21 @@
                     </AlertDialog.Description>
                 </AlertDialog.Header>
                 <AlertDialog.Footer>
-                    <AlertDialog.Cancel disabled={false}>Vazgeç</AlertDialog.Cancel>
-                    <AlertDialog.Action onclick={confirmDelete} class="bg-destructive text-white hover:bg-destructive/90">
-                        Sil
+                    <AlertDialog.Cancel disabled={deletingConversation}>Vazgeç</AlertDialog.Cancel>
+                    <AlertDialog.Action
+                        onclick={confirmDelete}
+                        disabled={deletingConversation}
+                        aria-busy={deletingConversation}
+                        class="bg-destructive text-white hover:bg-destructive/90"
+                    >
+                        {#if deletingConversation}
+                            <span class="inline-flex items-center gap-2">
+                                <span class="w-3.5 h-3.5 border-2 border-white/90 border-t-transparent rounded-full animate-spin"></span>
+                                Siliniyor...
+                            </span>
+                        {:else}
+                            Sil
+                        {/if}
                     </AlertDialog.Action>
                 </AlertDialog.Footer>
             </AlertDialog.Content>
