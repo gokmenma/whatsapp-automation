@@ -1,20 +1,28 @@
 <script lang="ts">
 	import Sun from "@lucide/svelte/icons/sun";
 	import Moon from "@lucide/svelte/icons/moon";
-	import { toggleMode, mode, setMode } from "mode-watcher";
+	import { mode, setMode } from "mode-watcher";
 	import * as Button from "$lib/components/ui/button/index.js";
+
+	async function persistDarkMode(isDark: boolean) {
+		try {
+			await fetch('/api/settings', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ darkMode: isDark })
+			});
+		} catch (e) {
+			console.error('Theme settings save error:', e);
+		}
+	}
 
 	function handleToggle(e: MouseEvent) {
 		e.preventDefault();
 		e.stopPropagation();
-		
-		console.log("Toggle clicked. Current mode:", mode.current);
-		
-		if (mode.current === "light") {
-			setMode("dark");
-		} else {
-			setMode("light");
-		}
+
+		const nextIsDark = mode.current === 'light';
+		setMode(nextIsDark ? 'dark' : 'light');
+		void persistDarkMode(nextIsDark);
 	}
 </script>
 
