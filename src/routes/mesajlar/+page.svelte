@@ -279,6 +279,27 @@
                     }
                 }
 
+                if (selectedContact?.jid) {
+                    conversations = conversations.map((conv) => {
+                        if (conv.contactJid !== selectedContact?.jid) return conv;
+                        const latest = incoming[incoming.length - 1];
+                        if (!latest) {
+                            return { ...conv, unreadCount: 0 };
+                        }
+
+                        const latestBody = String(latest.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+                        return {
+                            ...conv,
+                            lastMessage: latestBody,
+                            lastMessageFromMe: Boolean(latest.fromMe || latest.from_me),
+                            lastMessageStatus: String(latest.status || ''),
+                            lastMessageMediaType: latest.mediaType || latest.media_type || null,
+                            lastMessageAt: latest.timestamp,
+                            unreadCount: 0
+                        };
+                    });
+                }
+
                 if (scrollToBottom || changed) {
                     const behavior: ScrollBehavior = scrollToBottom ? initialScrollBehavior : 'smooth';
                     await scrollMessagesToBottom(behavior);
@@ -296,6 +317,10 @@
             toggleConversationSelection(conv.contactJid);
             return;
         }
+
+        conversations = conversations.map((item) =>
+            item.contactJid === conv.contactJid ? { ...item, unreadCount: 0 } : item
+        );
 
         selectedContact = { jid: conv.contactJid, name: conv.name, number: conv.number };
         messages = [];
@@ -1564,6 +1589,7 @@
                 {#each visibleConversations as conv (conv.contactJid)}
                     {@const isActive = selectedContact?.jid === conv.contactJid}
                     {@const isSelected = selectedConversationJids.has(conv.contactJid)}
+                    {@const unreadCount = Math.max(0, Number(conv.unreadCount || 0))}
                     <button
                         class="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors text-left border-b border-border/50 cursor-pointer {selectionMode && isSelected ? 'bg-primary/8 border-l-2 border-l-primary' : ''} {(!selectionMode && isActive) ? 'bg-primary/10 border-l-2 border-l-primary' : ''}"
                         onclick={() => selectConversation(conv)}
@@ -1599,25 +1625,32 @@
                                         <span class="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Sessizde</span>
                                     {/if}
                                 </div>
-                                <span class="text-xs text-muted-foreground shrink-0">{formatConvTime(conv.lastMessageAt)}</span>
+                                <span class="text-xs shrink-0 {unreadCount > 0 ? 'text-emerald-600 font-semibold' : 'text-muted-foreground'}">{formatConvTime(conv.lastMessageAt)}</span>
                             </div>
-                            <div class="flex items-center gap-1 mt-0.5">
-                                {#if conv.lastMessageFromMe}
-                                    <span class={"message-status text-xs " + statusTickClass(conv.lastMessageStatus)} aria-hidden="true">
-                                        {#if isDoubleTickStatus(conv.lastMessageStatus)}
-                                            <span class="message-status-double">
-                                                <span>✓</span><span>✓</span>
-                                            </span>
-                                        {:else if isFailedStatus(conv.lastMessageStatus)}
-                                            !
-                                        {:else}
-                                            ✓
-                                        {/if}
+                            <div class="flex items-center gap-2 mt-0.5">
+                                <div class="flex items-center gap-1 min-w-0 flex-1">
+                                    {#if conv.lastMessageFromMe}
+                                        <span class={"message-status text-xs " + statusTickClass(conv.lastMessageStatus)} aria-hidden="true">
+                                            {#if isDoubleTickStatus(conv.lastMessageStatus)}
+                                                <span class="message-status-double">
+                                                    <span>✓</span><span>✓</span>
+                                                </span>
+                                            {:else if isFailedStatus(conv.lastMessageStatus)}
+                                                !
+                                            {:else}
+                                                ✓
+                                            {/if}
+                                        </span>
+                                    {/if}
+                                    <span class="text-xs truncate {unreadCount > 0 ? 'text-emerald-600 font-medium' : 'text-muted-foreground'}">
+                                        {conv.lastMessageMediaType ? mediaIcon(conv.lastMessageMediaType) : (conv.lastMessage || '')}
+                                    </span>
+                                </div>
+                                {#if unreadCount > 0}
+                                    <span class="shrink-0 inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[11px] font-semibold text-white">
+                                        {unreadCount > 99 ? '99+' : unreadCount}
                                     </span>
                                 {/if}
-                                <span class="text-xs text-muted-foreground truncate">
-                                    {conv.lastMessageMediaType ? mediaIcon(conv.lastMessageMediaType) : (conv.lastMessage || '')}
-                                </span>
                             </div>
                         </div>
                     </button>

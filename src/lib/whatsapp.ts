@@ -1574,6 +1574,7 @@ export async function getLogs() {
 export function getContactName(accountId: string, jid: string): string {
     const normalizeJid = (value: string | undefined | null) => String(value || '').trim().toLowerCase();
     const fallbackName = jid.split('@')[0];
+    const isGroupJid = normalizeJid(jid).endsWith('@g.us');
     const selfNames = new Set<string>();
     const liveUser = statuses.get(accountId)?.user;
     [liveUser?.name, liveUser?.verifiedName, liveUser?.notify, liveUser?.pushName]
@@ -1596,6 +1597,19 @@ export function getContactName(accountId: string, jid: string): string {
     const normalizedQueryJid = normalizeJid(jid);
     const directContact = currentStore?.contacts.get(normalizedQueryJid) || currentStore?.contacts.get(jid);
     const directChat = currentStore?.chats.get(normalizedQueryJid) || currentStore?.chats.get(jid);
+
+    if (isGroupJid) {
+        const groupResolved = chooseCandidate([
+            directChat?.subject,
+            directChat?.name,
+            directContact?.name,
+            directChat?.notify,
+            directContact?.notify,
+            directContact?.verifiedName,
+            directContact?.pushName
+        ]);
+        return groupResolved || fallbackName;
+    }
 
     let linkedLidContact: any = null;
     let sameNumberChat: any = null;

@@ -40,6 +40,41 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
         .get();
     if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
 
+    // Mark incoming messages in this conversation as read in local DB so unread badge clears after opening.
+    if (isGroupChat) {
+        await db.run(sql`
+            UPDATE messages
+            SET status = 'read'
+            WHERE account_id = ${accountId}
+              AND contact_jid = ${contactParam}
+              AND from_me = 0
+              AND status NOT IN ('read', 'played', 'deleted_me', 'deleted_everyone')
+        `);
+    } else {
+        const rows = await db.all(sql`
+            SELECT DISTINCT contact_jid
+            FROM messages
+            WHERE account_id = ${accountId}
+        `);
+
+        const targetJids = Array.from(new Set(
+            (rows as any[])
+                .map((r) => String(r.contact_jid || ''))
+                .filter((jid) => getCanonicalContactNumber(accountId, jid) === contactNumber)
+        ));
+
+        for (const jid of targetJids) {
+            await db.run(sql`
+                UPDATE messages
+                SET status = 'read'
+                WHERE account_id = ${accountId}
+                  AND contact_jid = ${jid}
+                  AND from_me = 0
+                  AND status NOT IN ('read', 'played', 'deleted_me', 'deleted_everyone')
+            `);
+        }
+    }
+
     const allMsgs = await db.all(sql`
         SELECT
             m.id,

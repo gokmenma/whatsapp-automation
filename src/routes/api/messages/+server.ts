@@ -51,6 +51,7 @@ export const GET: RequestHandler = async ({ url, locals }) => {
     const rows = await db.all(sql`
         SELECT
             m.contact_jid,
+            m.sender_name,
             m.body,
             m.from_me,
             m.media_type,
@@ -63,6 +64,21 @@ export const GET: RequestHandler = async ({ url, locals }) => {
     `);
 
     const byCanonical = new Map<string, any>();
+    const unreadByConversation = new Map<string, number>();
+    const unreadPreviewByConversation = new Map<string, any>();
+
+    function buildPreviewText(row: any, isGroup: boolean) {
+        const body = String(row.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+        if (!body) return '';
+
+        if (isGroup && !Boolean(row.from_me)) {
+            const sender = String(row.sender_name || '').trim();
+            if (sender) return `${sender}: ${body}`;
+        }
+
+        return body;
+    }
+
     for (const row of rows as any[]) {
         const jid = String(row.contact_jid || '');
         const isGroup = jid.endsWith('@g.us');
@@ -73,19 +89,45 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         const isGhostRow = !row.media_type && !rowBody && row.status !== 'deleted_me' && row.status !== 'deleted_everyone';
         if (isGhostRow) continue;
         const conversationKey = isGroup ? jid : number;
+
+        const isUnread =
+            !Boolean(row.from_me) &&
+            row.status !== 'read' &&
+            row.status !== 'played' &&
+            row.status !== 'deleted_me' &&
+            row.status !== 'deleted_everyone';
+        if (isUnread) {
+            unreadByConversation.set(conversationKey, (unreadByConversation.get(conversationKey) || 0) + 1);
+            if (!unreadPreviewByConversation.has(conversationKey)) {
+                unreadPreviewByConversation.set(conversationKey, {
+                    body: buildPreviewText(row, isGroup),
+                    fromMe: Boolean(row.from_me),
+                    status: String(row.status || ''),
+                    mediaType: row.media_type,
+                    timestamp: row.timestamp
+                });
+            }
+        }
+
         if (byCanonical.has(conversationKey)) continue; // already have latest due to DESC order
 
         const prefs = preferenceMap.get(conversationKey);
+        const resolvedName = isGroup
+            ? getContactName(accountId, jid)
+            : (getContactName(accountId, jid) || getContactName(accountId, `${number}@s.whatsapp.net`));
+        const unreadPreview = unreadPreviewByConversation.get(conversationKey);
+        const basePreviewText = buildPreviewText(row, isGroup);
 
         byCanonical.set(conversationKey, {
             contactJid: isGroup ? jid : `${number}@s.whatsapp.net`,
-            name: getContactName(accountId, jid) || getContactName(accountId, `${number}@s.whatsapp.net`),
+            name: resolvedName,
             number,
-            lastMessage: rowBody,
-            lastMessageFromMe: Boolean(row.from_me),
-            lastMessageStatus: String(row.status || ''),
-            lastMessageMediaType: row.media_type,
-            lastMessageAt: row.timestamp,
+            lastMessage: unreadPreview?.body || basePreviewText || rowBody,
+            lastMessageFromMe: unreadPreview ? Boolean(unreadPreview.fromMe) : Boolean(row.from_me),
+            lastMessageStatus: unreadPreview ? String(unreadPreview.status || '') : String(row.status || ''),
+            lastMessageMediaType: unreadPreview ? unreadPreview.mediaType : row.media_type,
+            lastMessageAt: unreadPreview ? unreadPreview.timestamp : row.timestamp,
+            unreadCount: unreadByConversation.get(conversationKey) || 0,
             muted: Boolean(prefs?.muted),
             archived: Boolean(prefs?.archived)
         });
