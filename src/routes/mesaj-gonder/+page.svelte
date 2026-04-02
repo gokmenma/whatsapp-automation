@@ -53,11 +53,11 @@
 
 	type AntiBanSettings = {
 		addRandomSuffix: boolean;
-		minDelaySec: number;
-		maxDelaySec: number;
+		minDelayMs: number;
+		maxDelayMs: number;
 		batchPauseEnabled: boolean;
 		batchSize: number;
-		batchPauseSeconds: number;
+		batchPauseMs: number;
 		randomGreetings: string[];
 	};
 
@@ -368,11 +368,11 @@
 	// Anti-ban settings
 	let antiBan = $state<AntiBanSettings>({
 		addRandomSuffix: true,       // Mesaj sonuna gizli rastgele sayı ekle
-		minDelaySec: 3,
-		maxDelaySec: 7,
+		minDelayMs: 3000,
+		maxDelayMs: 7000,
 		batchPauseEnabled: true,     // Her N mesajdan sonra uzun bekleme
 		batchSize: 30,               // Kaç mesajda bir uzun bekleme yapılsın
-		batchPauseSeconds: 180,      // Uzun bekleme süresi (saniye)
+		batchPauseMs: 180000,        // Uzun bekleme süresi (milisaniye)
 		randomGreetings: []
 	});
 
@@ -388,25 +388,37 @@
 	function normalizeAntiBanSettings(input?: Partial<AntiBanSettings>): AntiBanSettings {
 		const base: AntiBanSettings = {
 			addRandomSuffix: true,
-			minDelaySec: 3,
-			maxDelaySec: 7,
+			minDelayMs: 3000,
+			maxDelayMs: 7000,
 			batchPauseEnabled: true,
 			batchSize: 30,
-			batchPauseSeconds: 180,
+			batchPauseMs: 180000,
 			randomGreetings: []
 		};
 
-		const minDelaySec = Math.max(1, Math.min(60, Number(input?.minDelaySec ?? base.minDelaySec)));
-		const maxDelaySecRaw = Math.max(1, Math.min(120, Number(input?.maxDelaySec ?? base.maxDelaySec)));
-		const maxDelaySec = Math.max(minDelaySec, maxDelaySecRaw);
+		const legacyMinDelaySec = Number((input as any)?.minDelaySec);
+		const legacyMaxDelaySec = Number((input as any)?.maxDelaySec);
+		const legacyBatchPauseSeconds = Number((input as any)?.batchPauseSeconds);
+		const minDelayMs = Math.max(
+			1000,
+			Math.min(60000, Number(input?.minDelayMs ?? (Number.isFinite(legacyMinDelaySec) ? legacyMinDelaySec * 1000 : base.minDelayMs)))
+		);
+		const maxDelayMsRaw = Math.max(
+			1000,
+			Math.min(120000, Number(input?.maxDelayMs ?? (Number.isFinite(legacyMaxDelaySec) ? legacyMaxDelaySec * 1000 : base.maxDelayMs)))
+		);
+		const maxDelayMs = Math.max(minDelayMs, maxDelayMsRaw);
 
 		return {
 			addRandomSuffix: input?.addRandomSuffix ?? base.addRandomSuffix,
-			minDelaySec,
-			maxDelaySec,
+			minDelayMs,
+			maxDelayMs,
 			batchPauseEnabled: input?.batchPauseEnabled ?? base.batchPauseEnabled,
 			batchSize: Math.max(5, Math.min(200, Number(input?.batchSize ?? base.batchSize))),
-			batchPauseSeconds: Math.max(30, Math.min(3600, Number(input?.batchPauseSeconds ?? base.batchPauseSeconds))),
+			batchPauseMs: Math.max(
+				30000,
+				Math.min(3600000, Number(input?.batchPauseMs ?? (Number.isFinite(legacyBatchPauseSeconds) ? legacyBatchPauseSeconds * 1000 : base.batchPauseMs)))
+			),
 			randomGreetings: parseRandomGreetings((input as any)?.randomGreetings ?? (input as any)?.randomGreetingsText)
 		};
 	}
@@ -483,8 +495,8 @@
         const batchId = finalRecipients.length > 1 ? Math.random().toString(36).substr(2, 9) : undefined;
 
 		antiBan = normalizeAntiBanSettings(antiBan);
-		const minDelayMs = antiBan.minDelaySec * 1000;
-		const maxDelayMs = antiBan.maxDelaySec * 1000;
+		const minDelayMs = antiBan.minDelayMs;
+		const maxDelayMs = antiBan.maxDelayMs;
 
 		for (let i = 0; i < finalRecipients.length; i++) {
 			const item = finalRecipients[i];
@@ -496,10 +508,10 @@
 
 			// Her batchSize mesajdan sonra uzun bekleme (ilk mesaj öncesi değil)
 			if (antiBan.batchPauseEnabled && i > 0 && i % antiBan.batchSize === 0) {
-				const pauseMs = antiBan.batchPauseSeconds * 1000;
+				const pauseMs = antiBan.batchPauseMs;
 				const variation = pauseMs * 0.2;
 				const actualPause = Math.round(pauseMs + (Math.random() * variation * 2 - variation));
-				currentRecipient = `⏸ ${i} mesaj gönderildi — ban koruması: ${Math.round(actualPause / 1000)} sn. bekleniyor...`;
+				currentRecipient = `⏸ ${i} mesaj gönderildi - ban koruması: ${actualPause} ms bekleniyor...`;
 				await new Promise(r => setTimeout(r, actualPause));
 				if (sendStatus !== "sending") break;
 			}
@@ -1242,12 +1254,12 @@
 						<p class="text-xs font-semibold text-primary/80 uppercase tracking-wide">İpucu</p>
 						<p class="text-[11px] text-muted-foreground leading-relaxed">
 							Toplu mesajlarda hesap güvenliği için mesajlar arası
-							<span class="font-bold text-primary"> {antiBan.minDelaySec}-{antiBan.maxDelaySec} sn </span>
+							<span class="font-bold text-primary"> {antiBan.minDelayMs}-{antiBan.maxDelayMs} ms </span>
 							rastgele bekleme uygulanır.
 							{#if antiBan.batchPauseEnabled}
 								Ayrica her <span class="font-bold text-primary">{antiBan.batchSize}</span>
 								mesajda yaklaşık
-								<span class="font-bold text-primary"> {antiBan.batchPauseSeconds} sn </span>
+								<span class="font-bold text-primary"> {antiBan.batchPauseMs} ms </span>
 								mola verilir.
 							{/if}
 							<span class="font-semibold">Ban Koruma Ayarları</span> bölümünden özelleştirebilirsiniz.
