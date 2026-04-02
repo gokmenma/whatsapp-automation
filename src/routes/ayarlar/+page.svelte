@@ -134,6 +134,29 @@
 		closingPool: string[];
 	};
 
+	const DEFAULT_VARIATION_POOLS = {
+		greeting: [
+			"Merhaba, iyi günler dilerim.",
+			"Merhaba, müsait olduğunuzda kısaca bilgi paylaşmak isterim.",
+			"İyi günler, rahatsız etmiyorumdur umarım.",
+			"Merhabalar, size kısa bir konuda ulaşmak istedim."
+		],
+		intro: [
+			"Kısaca bilgilendirme yapmak için yazıyorum.",
+			"Sizin için faydalı olabileceğini düşündüğüm bir konu hakkında ulaşmak istedim.",
+			"Hizmetimiz hakkında kısa bir bilgi paylaşmak isterim.",
+			"Yoğunluğunuzu biliyorum, kısaca bilgi ileteceğim.",
+			"Yanlış zamanda yazdıysam kusura bakmayın, kısa bir bilgi paylaşacağım."
+		],
+		closing: [
+			"Uygun olursanız detay paylaşabilirim.",
+			"İlginiz olursa memnuniyetle yardımcı olurum.",
+			"Dönüş yapmanız durumunda bilgi verebilirim.",
+			"Rahatsızlık verdiysem kusura bakmayın, iyi günler dilerim.",
+			"İyi çalışmalar dilerim."
+		]
+	};
+
 	let antiBan = $state<AntiBanSettings>({
 		addRandomSuffix: true,
 		minDelayMs: 3000,
@@ -141,26 +164,9 @@
 		useGreetingVariations: true,
 		useIntroVariations: true,
 		useClosingVariations: true,
-		greetingPool: [
-			"Merhaba, iyi günler dilerim.",
-			"Merhaba, müsait olduğunuzda kısaca bilgi paylaşmak isterim.",
-			"İyi günler, rahatsız etmiyorumdur umarım.",
-			"Merhabalar, size kısa bir konuda ulaşmak istedim."
-		],
-		introPool: [
-			"Kısaca bilgilendirme yapmak için yazıyorum.",
-			"Sizin için faydalı olabileceğini düşündüğüm bir konu hakkında ulaşmak istedim.",
-			"Hizmetimiz hakkında kısa bir bilgi paylaşmak isterim.",
-			"Yoğunluğunuzu biliyorum, kısaca bilgi ileteceğim.",
-			"Yanlış zamanda yazdıysam kusura bakmayın, kısa bir bilgi paylaşacağım."
-		],
-		closingPool: [
-			"Uygun olursanız detay paylaşabilirim.",
-			"İlginiz olursa memnuniyetle yardımcı olurum.",
-			"Dönüş yapmanız durumunda bilgi verebilirim.",
-			"Rahatsızlık verdiysem kusura bakmayın, iyi günler dilerim.",
-			"İyi çalışmalar dilerim."
-		]
+		greetingPool: [...DEFAULT_VARIATION_POOLS.greeting],
+		introPool: [...DEFAULT_VARIATION_POOLS.intro],
+		closingPool: [...DEFAULT_VARIATION_POOLS.closing]
 	});
 
 	function parseVariationPool(input?: string[] | string): string[] {
@@ -202,26 +208,9 @@
 			useGreetingVariations: true,
 			useIntroVariations: true,
 			useClosingVariations: true,
-			greetingPool: [
-				"Merhaba, iyi günler dilerim.",
-				"Merhaba, müsait olduğunuzda kısaca bilgi paylaşmak isterim.",
-				"İyi günler, rahatsız etmiyorumdur umarım.",
-				"Merhabalar, size kısa bir konuda ulaşmak istedim."
-			],
-			introPool: [
-				"Kısaca bilgilendirme yapmak için yazıyorum.",
-				"Sizin için faydalı olabileceğini düşündüğüm bir konu hakkında ulaşmak istedim.",
-				"Hizmetimiz hakkında kısa bir bilgi paylaşmak isterim.",
-				"Yoğunluğunuzu biliyorum, kısaca bilgi ileteceğim.",
-				"Yanlış zamanda yazdıysam kusura bakmayın, kısa bir bilgi paylaşacağım."
-			],
-			closingPool: [
-				"Uygun olursanız detay paylaşabilirim.",
-				"İlginiz olursa memnuniyetle yardımcı olurum.",
-				"Dönüş yapmanız durumunda bilgi verebilirim.",
-				"Rahatsızlık verdiysem kusura bakmayın, iyi günler dilerim.",
-				"İyi çalışmalar dilerim."
-			]
+			greetingPool: [...DEFAULT_VARIATION_POOLS.greeting],
+			introPool: [...DEFAULT_VARIATION_POOLS.intro],
+			closingPool: [...DEFAULT_VARIATION_POOLS.closing]
 		};
 		const legacyMinDelaySec = Number((input as any)?.minDelaySec);
 		const legacyMaxDelaySec = Number((input as any)?.maxDelaySec);
@@ -286,6 +275,16 @@
 			console.error("Anti-ban settings save error:", e);
 			if (showToast) toast.error("Ayarlar kaydedilemedi.");
 		}
+	}
+
+	function resetVariationPoolsToDefault() {
+		const confirmed = window.confirm('Selamlama, Giriş ve Kapanış Havuzlarını Varsayılan Değerlere Döndürmek İstiyor musunuz?');
+		if (!confirmed) return;
+
+		greetingPoolText = formatVariationPool([...DEFAULT_VARIATION_POOLS.greeting]);
+		introPoolText = formatVariationPool([...DEFAULT_VARIATION_POOLS.intro]);
+		closingPoolText = formatVariationPool([...DEFAULT_VARIATION_POOLS.closing]);
+		saveAntiBanSettings(true);
 	}
 
 	function saveAntiBanFlagsToServer(showToast = false) {
@@ -579,6 +578,12 @@
 								bind:value={closingPoolText}
 								class="text-sm"
 							/>
+						</div>
+
+						<div class="flex justify-end">
+							<Button variant="outline" size="sm" onclick={resetVariationPoolsToDefault}>
+								Varsayılan Havuzları Yükle
+							</Button>
 						</div>
 
 					</Card.Content>
