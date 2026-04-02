@@ -17,12 +17,36 @@
 	let { accounts = [], teams = [] }: { accounts?: any[]; teams?: any[] } = $props();
 	const sidebar = useSidebar();
 	const availableAccounts = $derived(accounts.length > 0 ? accounts : teams);
+	let switchingAccountId = $state('');
+	let optimisticActiveAccountId = $state('');
 
 	// Active account is the default one, or the first one if none is default
-	const activeAccount = $derived(availableAccounts.find((a: any) => a.isDefault) || availableAccounts[0]);
+	const serverActiveAccount = $derived(availableAccounts.find((a: any) => a.isDefault) || availableAccounts[0]);
+	const activeAccount = $derived(
+		(optimisticActiveAccountId
+			? availableAccounts.find((a: any) => a.id === optimisticActiveAccountId)
+			: null) || serverActiveAccount
+	);
+
+	$effect(() => {
+		if (!optimisticActiveAccountId) return;
+		const synced = availableAccounts.some((a: any) => a.id === optimisticActiveAccountId && a.isDefault);
+		if (synced) {
+			optimisticActiveAccountId = '';
+			switchingAccountId = '';
+		}
+	});
 
 	async function selectAccount(acc: any) {
-		if (acc.isDefault) return;
+		if (acc.isDefault || switchingAccountId) return;
+		const previousAccountId = String(activeAccount?.id || '').trim();
+		optimisticActiveAccountId = acc.id;
+		switchingAccountId = acc.id;
+		if (typeof window !== 'undefined') {
+			window.dispatchEvent(new CustomEvent('account:selected', {
+				detail: { accountId: acc.id }
+			}));
+		}
 		
 		try {
 			const res = await fetch('/api/whatsapp/update-settings', {
@@ -33,11 +57,27 @@
 			const data = await res.json();
 			if (data.success) {
 				toast.success(`${acc.name} varsayılan olarak ayarlandı.`);
-				invalidateAll(); // Refresh data from server
+				await invalidateAll(); // Refresh data from server
+				switchingAccountId = '';
+				optimisticActiveAccountId = '';
 			} else {
+				if (typeof window !== 'undefined' && previousAccountId) {
+					window.dispatchEvent(new CustomEvent('account:selected', {
+						detail: { accountId: previousAccountId }
+					}));
+				}
+				switchingAccountId = '';
+				optimisticActiveAccountId = '';
 				toast.error(data.error || "Hesap seçilemedi.");
 			}
 		} catch (e) {
+			if (typeof window !== 'undefined' && previousAccountId) {
+				window.dispatchEvent(new CustomEvent('account:selected', {
+					detail: { accountId: previousAccountId }
+				}));
+			}
+			switchingAccountId = '';
+			optimisticActiveAccountId = '';
 			toast.error("Bir hata oluştu.");
 		}
 	}
@@ -63,7 +103,9 @@
 								{activeAccount?.name || 'Hesap Seç'}
 							</span>
 							<span class="truncate text-[10px] uppercase font-bold opacity-70">
-								{#if activeAccount}
+								{#if switchingAccountId}
+									Geçiliyor...
+								{:else if activeAccount}
 									{activeAccount.status === 'ready' ? 'Bağlı' : 'Bağlı Değil'}
 								{:else}
 									Hesap Bağlı Değil
@@ -82,7 +124,7 @@
 			>
 				<DropdownMenu.Label class="text-muted-foreground text-xs uppercase tracking-widest font-bold px-2 py-1.5">Hesaplar</DropdownMenu.Label>
 				{#each availableAccounts as acc, index (acc.id)}
-					<DropdownMenu.Item onSelect={() => selectAccount(acc)} class="gap-3 p-2 cursor-pointer transition-colors hover:bg-primary/5">
+					<DropdownMenu.Item onSelect={() => selectAccount(acc)} disabled={Boolean(switchingAccountId)} class="gap-3 p-2 cursor-pointer transition-colors hover:bg-primary/5 disabled:opacity-60 disabled:cursor-not-allowed">
 						<div class="flex size-7 items-center justify-center rounded-md border bg-muted group-hover:border-primary/50 font-bold text-xs">
 							{acc.name.charAt(0)}
 						</div>
@@ -90,7 +132,9 @@
 							<span class="font-bold text-sm">{acc.name}</span>
 							<span class="text-[10px] text-muted-foreground">ID: {acc.id.substring(0, 8)}...</span>
 						</div>
-						{#if acc.isDefault}
+						{#if switchingAccountId === acc.id}
+							<div class="w-4 h-4 border-2 border-primary/70 border-t-transparent rounded-full animate-spin"></div>
+						{:else if acc.isDefault}
 							<div class="w-1.5 h-1.5 rounded-full bg-primary ring-4 ring-primary/10"></div>
 						{/if}
 						<DropdownMenu.Shortcut class="text-[10px]">⌘{index + 1}</DropdownMenu.Shortcut>
