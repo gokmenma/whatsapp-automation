@@ -1,10 +1,11 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import AppSidebar from "$lib/components/app-sidebar.svelte";
 	import * as Breadcrumb from "$lib/components/ui/breadcrumb";
 	import { Separator } from "$lib/components/ui/separator";
 	import * as Sidebar from "$lib/components/ui/sidebar";
 	import { page } from "$app/state";
-	import { ModeWatcher } from "mode-watcher";
+	import { ModeWatcher, setMode } from "mode-watcher";
 	import ThemeToggle from "$lib/components/theme-toggle.svelte";
 	import { Toaster } from "svelte-sonner";
 	import './layout.css';
@@ -26,6 +27,12 @@
 	}
 
 	const currentTitle = $derived(getRouteTitle(page.url.pathname));
+
+	onMount(() => {
+		if (typeof data.darkMode === 'boolean') {
+			setMode(data.darkMode ? 'dark' : 'light');
+		}
+	});
 </script>
 
 <ModeWatcher />
