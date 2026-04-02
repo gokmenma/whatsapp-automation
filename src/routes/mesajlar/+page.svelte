@@ -67,6 +67,8 @@
     let filteredContacts = $state<any[]>([]);
     let lastLoadedContactsAccountId = $state('');
     let conversationsRequestSeq = 0;
+    let conversationsFetchInFlight = false;
+    let conversationsReloadQueued = false;
     let messageTextareaEl = $state<HTMLTextAreaElement | null>(null);
     let showFormattingToolbar = $state(false);
     let isEmojiPickerOpen = $state(false);
@@ -89,6 +91,8 @@
     const quickEmojis = ['😀', '😄', '😂', '🤣', '😊', '😉', '😍', '😘', '😎', '🤝', '🙏', '💪', '🔥', '✅', '🎉', '❤️', '👍', '👋', '😅', '😇', '🤔', '😢', '😡', '👏'];
 
     let notificationAudio: HTMLAudioElement | null = null;
+    let browserNotificationPermission = $state<NotificationPermission | 'unsupported'>('unsupported');
+    let desktopNotificationsEnabled = $state(true);
     let conversationsSnapshotInitialized = false;
     let conversationSnapshots = new Map<string, string>();
 
@@ -134,8 +138,20 @@
             String(conv.lastMessage || ''),
             String(conv.lastMessageMediaType || ''),
             String(conv.lastMessageStatus || ''),
-            conv.lastMessageFromMe ? '1' : '0'
+            conv.lastMessageFromMe ? '1' : '0',
+            String(conv.unreadCount || 0)
         ].join('|');
+    }
+
+    function toBool(value: unknown) {
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'number') return value !== 0;
+        if (typeof value === 'string') {
+            const normalized = value.trim().toLowerCase();
+            if (!normalized) return false;
+            return normalized === 'true' || normalized === '1' || normalized === 'yes';
+        }
+        return false;
     }
 
     function resetConversationTracking() {
@@ -158,21 +174,228 @@
         }
     }
 
+    function syncBrowserNotificationPermission() {
+        if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+            browserNotificationPermission = 'unsupported';
+            return;
+        }
+
+        browserNotificationPermission = Notification.permission;
+    }
+
+    async function requestBrowserNotificationPermission() {
+        if (typeof window === 'undefined' || typeof Notification === 'undefined') return;
+        if (Notification.permission !== 'default') {
+            browserNotificationPermission = Notification.permission;
+            return;
+        }
+
+        try {
+            browserNotificationPermission = await Notification.requestPermission();
+        } catch {
+            browserNotificationPermission = Notification.permission;
+        }
+    }
+
+    function loadDesktopNotificationPreference() {
+        if (typeof window === 'undefined') return;
+        const saved = window.localStorage.getItem('desktopNotificationsEnabled');
+        if (saved === 'true') desktopNotificationsEnabled = true;
+        else if (saved === 'false') desktopNotificationsEnabled = false;
+    }
+
+    function persistDesktopNotificationPreference() {
+        if (typeof window === 'undefined') return;
+        window.localStorage.setItem('desktopNotificationsEnabled', desktopNotificationsEnabled ? 'true' : 'false');
+    }
+
+    async function toggleDesktopNotifications() {
+        const next = !desktopNotificationsEnabled;
+        desktopNotificationsEnabled = next;
+        persistDesktopNotificationPreference();
+
+        if (!next) {
+            toast.success('Masaustu bildirimi kapatildi');
+            topActionsMenuOpen = false;
+            return;
+        }
+
+        syncBrowserNotificationPermission();
+        await requestBrowserNotificationPermission();
+        if (browserNotificationPermission === 'granted') {
+            toast.success('Masaustu bildirimi acildi');
+        } else if (browserNotificationPermission === 'unsupported') {
+            toast.error('Tarayici bildirimleri desteklemiyor');
+        } else if (browserNotificationPermission === 'denied') {
+            toast.error('Bildirim izni engelli. Tarayici ayarlarindan acabilirsiniz.');
+        }
+
+        topActionsMenuOpen = false;
+    }
+
+    function notificationPreviewForConversation(conv: any) {
+        const mediaType = String(conv?.lastMessageMediaType || '').trim();
+        const lastMessage = String(conv?.lastMessage || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+
+        if (lastMessage) return lastMessage;
+        if (mediaType === 'image') return '📷 Fotoğraf gönderdi';
+        if (mediaType === 'video') return '🎥 Video gönderdi';
+        if (mediaType === 'audio') return '🎵 Ses gönderdi';
+        if (mediaType === 'document') return '📄 Belge gönderdi';
+        return 'Yeni mesaj';
+    }
+
+    function notifyIncomingConversation(conv: any): boolean {
+        if (typeof window === 'undefined') return false;
+        if (typeof Notification === 'undefined') return false;
+        if (!desktopNotificationsEnabled) return false;
+        syncBrowserNotificationPermission();
+        if (browserNotificationPermission !== 'granted') return false;
+
+        const contactJid = String(conv?.contactJid || '').trim();
+        if (!contactJid) return false;
+
+        const title = String(conv?.name || conv?.number || 'Yeni mesaj').trim() || 'Yeni mesaj';
+        const body = notificationPreviewForConversation(conv);
+        let notification: Notification;
+        try {
+            notification = new Notification(title, {
+                body,
+                requireInteraction: true
+            });
+        } catch {
+            // Some browser/OS combinations can still block display even with granted permission.
+            return false;
+        }
+
+        notification.onclick = () => {
+            window.focus();
+            const targetConv = conversations.find((item) => String(item?.contactJid || '') === contactJid) || conv;
+            void selectConversation(targetConv);
+            notification.close();
+        };
+
+        return true;
+    }
+
+    function showIncomingToastFallback(incomingConversations: any[]) {
+        if (incomingConversations.length === 0) return;
+
+        const first = incomingConversations[0];
+        const title = String(first?.name || first?.number || 'Yeni mesaj').trim() || 'Yeni mesaj';
+        const preview = notificationPreviewForConversation(first);
+        const extra = incomingConversations.length > 1 ? ` (+${incomingConversations.length - 1} sohbet daha)` : '';
+
+        toast.info(`${title}: ${preview}${extra}`);
+    }
+
+    async function sendTestDesktopNotification() {
+        if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+            toast.error('Tarayici bildirimleri desteklemiyor');
+            return;
+        }
+
+        if (!desktopNotificationsEnabled) {
+            toast.error('Masaustu bildirimi kapali');
+            return;
+        }
+
+        syncBrowserNotificationPermission();
+        if (browserNotificationPermission !== 'granted') {
+            await requestBrowserNotificationPermission();
+            syncBrowserNotificationPermission();
+        }
+
+        if (browserNotificationPermission !== 'granted') {
+            toast.error('Bildirim izni verilmedi');
+            return;
+        }
+
+        try {
+            const notification = new Notification('Test bildirimi', {
+                body: 'Bildirim sistemi aktif calisiyor.',
+                requireInteraction: true
+            });
+            notification.onclick = () => {
+                window.focus();
+                notification.close();
+            };
+            toast.success('Test bildirimi gonderildi');
+        } catch {
+            toast.error('Tarayici bildirimi olusturulamadi');
+        } finally {
+            topActionsMenuOpen = false;
+        }
+    }
+
     function trackConversationChanges(nextConversations: any[]) {
         const nextSnapshots = new Map<string, string>();
         let shouldPlayNotification = false;
+        const incomingConversationsToNotify: any[] = [];
+        const previousByJid = new Map<string, any>(
+            conversations.map((conv) => [String(conv?.contactJid || ''), conv])
+        );
+        const normalizedConversations: any[] = [];
 
-        for (const conv of nextConversations) {
+        for (const originalConv of nextConversations) {
+            const conv = { ...originalConv };
             const key = String(conv.contactJid || '');
+            const prevConv = previousByJid.get(key);
+            const prevUnread = Math.max(0, Number(prevConv?.unreadCount || 0));
+            const nextUnreadRaw = Math.max(0, Number(conv?.unreadCount || 0));
+            const isIncomingByDirection = !toBool(conv?.lastMessageFromMe);
+            const isActiveConversation = selectedContact?.jid === key;
+
+            let effectiveUnread = nextUnreadRaw;
+            if (isActiveConversation) {
+                effectiveUnread = 0;
+            } else if (conversationsSnapshotInitialized) {
+                const previousSnapshot = conversationSnapshots.get(key);
+                const currentWithoutUnread = [
+                    String(conv.contactJid || ''),
+                    String(conv.lastMessageAt || ''),
+                    String(conv.lastMessage || ''),
+                    String(conv.lastMessageMediaType || ''),
+                    String(conv.lastMessageStatus || ''),
+                    conv.lastMessageFromMe ? '1' : '0'
+                ].join('|');
+                const previousWithoutUnread = previousSnapshot
+                    ? previousSnapshot.split('|').slice(0, 6).join('|')
+                    : '';
+                const messageChanged = !previousSnapshot || currentWithoutUnread !== previousWithoutUnread;
+
+                // Keep a local unread fallback so incoming messages still show badge
+                // even when backend unread state lags behind for closed conversations.
+                if (messageChanged && isIncomingByDirection && nextUnreadRaw === 0) {
+                    effectiveUnread = Math.max(prevUnread + 1, 1);
+                }
+            }
+
+            conv.unreadCount = effectiveUnread;
+            if (effectiveUnread > 0 && !String(conv.unreadPreview || '').trim()) {
+                conv.unreadPreview = String(conv.lastMessage || '').trim();
+                conv.unreadPreviewFromMe = false;
+                conv.unreadPreviewStatus = String(conv.lastMessageStatus || '');
+                conv.unreadPreviewMediaType = conv.lastMessageMediaType || null;
+                conv.unreadPreviewAt = conv.lastMessageAt || null;
+            }
+
             const snapshot = buildConversationSnapshot(conv);
             nextSnapshots.set(key, snapshot);
+            normalizedConversations.push(conv);
 
             if (!conversationsSnapshotInitialized) continue;
 
             const previous = conversationSnapshots.get(key);
             const changed = !previous || previous !== snapshot;
-            if (changed && !conv.lastMessageFromMe && !conv.muted && !conv.archived) {
+            const unreadIncreased = effectiveUnread > prevUnread;
+            const isMuted = toBool(conv?.muted);
+            const isArchived = toBool(conv?.archived);
+            const shouldNotifyForConversation = changed && (isIncomingByDirection || unreadIncreased) && !isMuted && !isArchived;
+
+            if (shouldNotifyForConversation) {
                 shouldPlayNotification = true;
+                incomingConversationsToNotify.push(conv);
             }
         }
 
@@ -181,7 +404,19 @@
 
         if (shouldPlayNotification) {
             void playNotificationSound();
+            let desktopNotificationCount = 0;
+            for (const conv of incomingConversationsToNotify) {
+                if (notifyIncomingConversation(conv)) {
+                    desktopNotificationCount += 1;
+                }
+            }
+
+            if (desktopNotificationCount === 0) {
+                showIncomingToastFallback(incomingConversationsToNotify);
+            }
         }
+
+        return normalizedConversations;
     }
 
     // Load conversations for selected account
@@ -192,8 +427,14 @@
             return;
         }
 
+        if (conversationsFetchInFlight) {
+            conversationsReloadQueued = true;
+            return;
+        }
+
         const accountId = selectedAccountId;
         const requestId = ++conversationsRequestSeq;
+        conversationsFetchInFlight = true;
         loadingConversations = true;
 
         try {
@@ -203,11 +444,11 @@
             if (res.ok) {
                 const responseData = await res.json();
                 const nextConversations = responseData.conversations || [];
-                trackConversationChanges(nextConversations);
-                conversations = nextConversations;
+                const trackedConversations = trackConversationChanges(nextConversations);
+                conversations = trackedConversations;
 
                 if (selectedContact?.jid) {
-                    const refreshed = nextConversations.find((c: any) => c.contactJid === selectedContact?.jid);
+                    const refreshed = trackedConversations.find((c: any) => c.contactJid === selectedContact?.jid);
                     if (refreshed) {
                         selectedContact = {
                             jid: refreshed.contactJid,
@@ -224,8 +465,14 @@
                 conversations = [];
             }
         } finally {
+            conversationsFetchInFlight = false;
             if (requestId === conversationsRequestSeq) {
                 loadingConversations = false;
+            }
+
+            if (conversationsReloadQueued) {
+                conversationsReloadQueued = false;
+                void loadConversations();
             }
         }
     }
@@ -1329,6 +1576,12 @@
     });
 
     onMount(async () => {
+        loadDesktopNotificationPreference();
+        syncBrowserNotificationPermission();
+        if (desktopNotificationsEnabled) {
+            void requestBrowserNotificationPermission();
+        }
+
         selectedAccountId = resolvePreferredAccountId(data.accounts, selectedAccountId);
         // Restore from URL params
         const urlParams = new URLSearchParams(window.location.search);
@@ -1429,6 +1682,21 @@
                                 </button>
                                 <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem">
                                     <span>Yıldızlı mesajlar</span>
+                                </button>
+                                <button
+                                    class="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm hover:bg-muted/60"
+                                    onclick={toggleDesktopNotifications}
+                                    role="menuitem"
+                                >
+                                    <span>Masaüstü bildirimi</span>
+                                    <span class="text-xs text-muted-foreground">{desktopNotificationsEnabled ? 'Açık' : 'Kapalı'}</span>
+                                </button>
+                                <button
+                                    class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60"
+                                    onclick={sendTestDesktopNotification}
+                                    role="menuitem"
+                                >
+                                    <span>Test bildirimi gönder</span>
                                 </button>
                                 <button
                                     class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60"
@@ -1590,6 +1858,11 @@
                     {@const isActive = selectedContact?.jid === conv.contactJid}
                     {@const isSelected = selectedConversationJids.has(conv.contactJid)}
                     {@const unreadCount = Math.max(0, Number(conv.unreadCount || 0))}
+                    {@const useUnreadPreview = unreadCount > 0 && (String(conv.unreadPreview || '').trim().length > 0 || Boolean(conv.unreadPreviewMediaType))}
+                    {@const previewFromMe = useUnreadPreview ? Boolean(conv.unreadPreviewFromMe) : Boolean(conv.lastMessageFromMe)}
+                    {@const previewStatus = useUnreadPreview ? String(conv.unreadPreviewStatus || '') : String(conv.lastMessageStatus || '')}
+                    {@const previewMediaType = useUnreadPreview ? (conv.unreadPreviewMediaType || null) : (conv.lastMessageMediaType || null)}
+                    {@const previewText = useUnreadPreview ? String(conv.unreadPreview || '').trim() : String(conv.lastMessage || '').trim()}
                     <button
                         class="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors text-left border-b border-border/50 cursor-pointer {selectionMode && isSelected ? 'bg-primary/8 border-l-2 border-l-primary' : ''} {(!selectionMode && isActive) ? 'bg-primary/10 border-l-2 border-l-primary' : ''}"
                         onclick={() => selectConversation(conv)}
@@ -1629,13 +1902,13 @@
                             </div>
                             <div class="flex items-center gap-2 mt-0.5">
                                 <div class="flex items-center gap-1 min-w-0 flex-1">
-                                    {#if conv.lastMessageFromMe}
-                                        <span class={"message-status text-xs " + statusTickClass(conv.lastMessageStatus)} aria-hidden="true">
-                                            {#if isDoubleTickStatus(conv.lastMessageStatus)}
+                                    {#if previewFromMe}
+                                        <span class={"message-status text-xs " + statusTickClass(previewStatus)} aria-hidden="true">
+                                            {#if isDoubleTickStatus(previewStatus)}
                                                 <span class="message-status-double">
                                                     <span>✓</span><span>✓</span>
                                                 </span>
-                                            {:else if isFailedStatus(conv.lastMessageStatus)}
+                                            {:else if isFailedStatus(previewStatus)}
                                                 !
                                             {:else}
                                                 ✓
@@ -1643,7 +1916,7 @@
                                         </span>
                                     {/if}
                                     <span class="text-xs truncate {unreadCount > 0 ? 'text-emerald-600 font-medium' : 'text-muted-foreground'}">
-                                        {conv.lastMessageMediaType ? mediaIcon(conv.lastMessageMediaType) : (conv.lastMessage || '')}
+                                        {previewMediaType ? mediaIcon(previewMediaType) : previewText}
                                     </span>
                                 </div>
                                 {#if unreadCount > 0}

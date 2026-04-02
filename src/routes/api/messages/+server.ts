@@ -5,10 +5,38 @@ import { accounts } from '$lib/server/db/schema';
 import { eq, sql } from 'drizzle-orm';
 import { getAccountStatus, getCanonicalContactNumber, getContactName } from '$lib/whatsapp';
 
+function normalizeDirectKey(value: string) {
+    return String(value || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+}
+
+function resolveDirectConversationNumber(accountId: string, jidOrNumber: string) {
+    const raw = String(jidOrNumber || '').trim();
+    if (!raw) return '';
+
+    if (!raw.includes('@')) {
+        return normalizeDirectKey(raw);
+    }
+
+    const [, domain = ''] = raw.split('@');
+    const digits = normalizeDirectKey(raw);
+
+    // Keep plain phone JIDs strict to avoid accidental merges.
+    if ((domain === 's.whatsapp.net' || domain === 'c.us') && digits) {
+        const mapped = getCanonicalContactNumber(accountId, raw);
+        if (mapped && mapped !== digits) return mapped;
+        return digits;
+    }
+
+    // Fallback to store-aware mapping only for lid-like or non-digit identities.
+    return getCanonicalContactNumber(accountId, raw) || digits;
+}
+
 function getConversationKey(accountId: string, jidOrNumber: string) {
     const raw = String(jidOrNumber || '').trim();
     if (!raw) return '';
     if (raw.endsWith('@g.us')) return raw;
+    const directDigits = normalizeDirectKey(raw);
+    if (directDigits) return directDigits;
     return getCanonicalContactNumber(accountId, raw);
 }
 
@@ -66,6 +94,13 @@ export const GET: RequestHandler = async ({ url, locals }) => {
     const byCanonical = new Map<string, any>();
     const unreadByConversation = new Map<string, number>();
     const unreadPreviewByConversation = new Map<string, any>();
+    const latestOutgoingAtByConversation = new Map<string, number>();
+
+    function normalizeTs(value: unknown) {
+        const n = Number(value || 0);
+        if (!Number.isFinite(n)) return 0;
+        return n;
+    }
 
     function buildPreviewText(row: any, isGroup: boolean) {
         const body = String(row.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
@@ -82,7 +117,20 @@ export const GET: RequestHandler = async ({ url, locals }) => {
     for (const row of rows as any[]) {
         const jid = String(row.contact_jid || '');
         const isGroup = jid.endsWith('@g.us');
-        const number = isGroup ? jid.split('@')[0] : getCanonicalContactNumber(accountId, jid);
+        const conversationKey = isGroup ? jid : resolveDirectConversationNumber(accountId, jid);
+        if (!conversationKey) continue;
+        if (!Boolean(row.from_me)) continue;
+
+        const ts = normalizeTs(row.timestamp);
+        if (ts > (latestOutgoingAtByConversation.get(conversationKey) || 0)) {
+            latestOutgoingAtByConversation.set(conversationKey, ts);
+        }
+    }
+
+    for (const row of rows as any[]) {
+        const jid = String(row.contact_jid || '');
+        const isGroup = jid.endsWith('@g.us');
+        const number = isGroup ? jid.split('@')[0] : resolveDirectConversationNumber(accountId, jid);
         if (!number) continue;
         if (!isGroup && selfNumber && number === selfNumber) continue;
         const rowBody = String(row.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
@@ -95,7 +143,8 @@ export const GET: RequestHandler = async ({ url, locals }) => {
             row.status !== 'read' &&
             row.status !== 'played' &&
             row.status !== 'deleted_me' &&
-            row.status !== 'deleted_everyone';
+            row.status !== 'deleted_everyone' &&
+            normalizeTs(row.timestamp) > (latestOutgoingAtByConversation.get(conversationKey) || 0);
         if (isUnread) {
             unreadByConversation.set(conversationKey, (unreadByConversation.get(conversationKey) || 0) + 1);
             if (!unreadPreviewByConversation.has(conversationKey)) {
@@ -122,11 +171,16 @@ export const GET: RequestHandler = async ({ url, locals }) => {
             contactJid: isGroup ? jid : `${number}@s.whatsapp.net`,
             name: resolvedName,
             number,
-            lastMessage: unreadPreview?.body || basePreviewText || rowBody,
-            lastMessageFromMe: unreadPreview ? Boolean(unreadPreview.fromMe) : Boolean(row.from_me),
-            lastMessageStatus: unreadPreview ? String(unreadPreview.status || '') : String(row.status || ''),
-            lastMessageMediaType: unreadPreview ? unreadPreview.mediaType : row.media_type,
-            lastMessageAt: unreadPreview ? unreadPreview.timestamp : row.timestamp,
+            lastMessage: basePreviewText || rowBody,
+            lastMessageFromMe: Boolean(row.from_me),
+            lastMessageStatus: String(row.status || ''),
+            lastMessageMediaType: row.media_type,
+            lastMessageAt: row.timestamp,
+            unreadPreview: String(unreadPreview?.body || '').trim(),
+            unreadPreviewFromMe: Boolean(unreadPreview?.fromMe),
+            unreadPreviewStatus: String(unreadPreview?.status || ''),
+            unreadPreviewMediaType: unreadPreview?.mediaType || null,
+            unreadPreviewAt: unreadPreview?.timestamp || null,
             unreadCount: unreadByConversation.get(conversationKey) || 0,
             muted: Boolean(prefs?.muted),
             archived: Boolean(prefs?.archived)

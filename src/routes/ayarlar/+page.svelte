@@ -74,21 +74,16 @@
 		}
 	}
 
-	function handleDelayChange(val: number[]) {
-		settings.messageDelay = val[0];
-		saveSettings();
-	}
-
 	// --- Anti-ban settings (localStorage) ---
 	const ANTIBAN_STORAGE_KEY = 'mesajGonder.antiBanSettings.v1';
 
 	type AntiBanSettings = {
 		addRandomSuffix: boolean;
-		minDelaySec: number;
-		maxDelaySec: number;
+		minDelayMs: number;
+		maxDelayMs: number;
 		batchPauseEnabled: boolean;
 		batchSize: number;
-		batchPauseSeconds: number;
+		batchPauseMs: number;
 		randomGreetings: string[];
 	};
 
@@ -96,17 +91,18 @@
 
 	let antiBan = $state<AntiBanSettings>({
 		addRandomSuffix: true,
-		minDelaySec: 3,
-		maxDelaySec: 7,
+		minDelayMs: 3000,
+		maxDelayMs: 7000,
 		batchPauseEnabled: true,
 		batchSize: 30,
-		batchPauseSeconds: 180,
+		batchPauseMs: 180000,
 		randomGreetings: []
 	});
 
 	function parseRandomGreetings(input?: string | string[]): string[] {
 		const raw = Array.isArray(input) ? input.join('\n') : (input ?? "");
-		const list = raw
+		const normalizedRaw = raw.replace(/\\n/g, '\n').replace(/\r/g, '\n');
+		const list = normalizedRaw
 			.split(/[\n,]/)
 			.map((item) => item.trim())
 			.filter((item) => item.length > 0);
@@ -116,26 +112,38 @@
 	function normalizeAntiBanSettings(input?: Partial<AntiBanSettings>): AntiBanSettings {
 		const base: AntiBanSettings = {
 			addRandomSuffix: true,
-			minDelaySec: 3,
-			maxDelaySec: 7,
+			minDelayMs: 3000,
+			maxDelayMs: 7000,
 			batchPauseEnabled: true,
 			batchSize: 30,
-			batchPauseSeconds: 180,
+			batchPauseMs: 180000,
 			randomGreetings: []
 		};
-		const minDelaySec = Math.max(1, Math.min(60, Number(input?.minDelaySec ?? base.minDelaySec)));
-		const maxDelaySecRaw = Math.max(1, Math.min(120, Number(input?.maxDelaySec ?? base.maxDelaySec)));
-		const maxDelaySec = Math.max(minDelaySec, maxDelaySecRaw);
+		const legacyMinDelaySec = Number((input as any)?.minDelaySec);
+		const legacyMaxDelaySec = Number((input as any)?.maxDelaySec);
+		const legacyBatchPauseSeconds = Number((input as any)?.batchPauseSeconds);
+		const minDelayMs = Math.max(
+			600,
+			Math.min(60000, Number(input?.minDelayMs ?? (Number.isFinite(legacyMinDelaySec) ? legacyMinDelaySec * 1000 : base.minDelayMs)))
+		);
+		const maxDelayMsRaw = Math.max(
+			600,
+			Math.min(120000, Number(input?.maxDelayMs ?? (Number.isFinite(legacyMaxDelaySec) ? legacyMaxDelaySec * 1000 : base.maxDelayMs)))
+		);
+		const maxDelayMs = Math.max(minDelayMs, maxDelayMsRaw);
 		const normalizedGreetings = parseRandomGreetings(
 			(input as any)?.randomGreetings ?? (input as any)?.randomGreetingsText
 		);
 		return {
 			addRandomSuffix: input?.addRandomSuffix ?? base.addRandomSuffix,
-			minDelaySec,
-			maxDelaySec,
+			minDelayMs,
+			maxDelayMs,
 			batchPauseEnabled: input?.batchPauseEnabled ?? base.batchPauseEnabled,
 			batchSize: Math.max(5, Math.min(200, Number(input?.batchSize ?? base.batchSize))),
-			batchPauseSeconds: Math.max(30, Math.min(3600, Number(input?.batchPauseSeconds ?? base.batchPauseSeconds))),
+			batchPauseMs: Math.max(
+				30000,
+				Math.min(3600000, Number(input?.batchPauseMs ?? (Number.isFinite(legacyBatchPauseSeconds) ? legacyBatchPauseSeconds * 1000 : base.batchPauseMs)))
+			),
 			randomGreetings: normalizedGreetings
 		};
 	}
@@ -223,52 +231,8 @@
 				</Card.Content>
 			</Card.Root>
 
-			<!-- Sağ Kolon: Mesaj Gönderim & Ban Ayarları -->
+			<!-- Sağ Kolon: Ban Ayarları -->
 			<div class="space-y-6">
-				<!-- Mesaj Gecikmesi -->
-				<Card.Root>
-					<Card.Header>
-						<Card.Title>Mesaj Gönderim Ayarları</Card.Title>
-						<Card.Description>Toplu gönderim davranışını yapılandırın.</Card.Description>
-					</Card.Header>
-					<Card.Content class="space-y-4">
-						<div class="space-y-1.5">
-							<div class="flex items-center justify-between">
-								<Label class="text-base">Toplu Mesaj Gecikmesi</Label>
-								<span class="text-sm font-mono bg-muted px-2 py-0.5 rounded text-primary">{settings.messageDelay} ms</span>
-							</div>
-							<p class="text-sm text-muted-foreground">Mesajlar arasında beklenecek süre (Spam riskini azaltır).</p>
-						</div>
-						<div class="flex items-center gap-4">
-							<input
-								type="range"
-								min="600"
-								max="10000"
-								step="100"
-								value={settings.messageDelay}
-								oninput={(e) => handleDelayChange([parseInt((e.target as HTMLInputElement).value)])}
-								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-							/>
-							<div class="relative w-24">
-								<Input
-									type="number"
-									min="600"
-									max="10000"
-									step="100"
-									value={settings.messageDelay}
-									onchange={(e) => handleDelayChange([parseInt((e.target as HTMLInputElement).value)])}
-									class="h-9 pr-6 text-sm font-mono"
-								/>
-								<span class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground font-semibold">ms</span>
-							</div>
-						</div>
-						<div class="flex justify-between text-[10px] text-muted-foreground uppercase tracking-widest font-bold">
-							<span class="opacity-50">600 ms</span>
-							<span class="opacity-50">10.000 ms</span>
-						</div>
-					</Card.Content>
-				</Card.Root>
-
 				<!-- Ban Koruma Ayarları -->
 				<Card.Root>
 					<Card.Header>
@@ -290,34 +254,53 @@
 
 						<!-- Delay Range -->
 						<div class="space-y-1.5">
-							<Label class="text-sm">Mesajlar Arası Bekleme (saniye)</Label>
-							<div class="grid grid-cols-2 gap-3">
+							<div class="flex items-center justify-between">
+								<Label class="text-sm">Mesajlar Arası Bekleme (ms)</Label>
+								<span class="text-xs font-mono text-primary bg-muted px-2 py-1 rounded">{antiBan.minDelayMs} - {antiBan.maxDelayMs} ms</span>
+							</div>
+							<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 								<div>
-									<span class="block text-xs text-muted-foreground mb-1">Min. Bekleme</span>
-									<Input
-										type="number"
-										min="1"
-										max="60"
-										bind:value={antiBan.minDelaySec}
-										class="h-9 text-sm font-mono"
+									<span class="block text-xs text-muted-foreground mb-1">Min. Bekleme: {antiBan.minDelayMs} ms</span>
+									<input
+										type="range"
+										min="600"
+										max="120000"
+										step="100"
+										bind:value={antiBan.minDelayMs}
+										oninput={() => {
+											if (antiBan.minDelayMs > antiBan.maxDelayMs) {
+												antiBan.maxDelayMs = antiBan.minDelayMs;
+											}
+										}}
+										class="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
 									/>
 								</div>
 								<div>
-									<span class="block text-xs text-muted-foreground mb-1">Max. Bekleme</span>
-									<Input
-										type="number"
-										min="1"
-										max="120"
-										bind:value={antiBan.maxDelaySec}
-										class="h-9 text-sm font-mono"
+									<span class="block text-xs text-muted-foreground mb-1">Max. Bekleme: {antiBan.maxDelayMs} ms</span>
+									<input
+										type="range"
+										min="600"
+										max="120000"
+										step="100"
+										bind:value={antiBan.maxDelayMs}
+										oninput={() => {
+											if (antiBan.maxDelayMs < antiBan.minDelayMs) {
+												antiBan.minDelayMs = antiBan.maxDelayMs;
+											}
+										}}
+										class="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
 									/>
 								</div>
+							</div>
+							<div class="flex justify-between text-[10px] text-muted-foreground uppercase tracking-widest font-bold">
+								<span class="opacity-50">600 ms</span>
+								<span class="opacity-50">120.000 ms</span>
 							</div>
 						</div>
 
 						<div class="space-y-2">
-							<Label class="text-sm">Mesaj Başına Rastgele Hitaplar</Label>
-							<p class="text-xs text-muted-foreground">Her satıra bir hitap yazın. Gönderim sırasında başa rastgele biri eklenir. Ornek: Selamlar, Iyi gunler, Merhaba</p>
+							<Label class="text-sm">Mesaj Başına Eklenecek Hitaplar</Label>
+							<p class="text-xs text-muted-foreground">Her satıra bir hitap yazın. Kayitli \n ifadeleri otomatik olarak satira cevrilir. Ornek satirlar: Selamlar, Iyi gunler, Merhaba</p>
 							<Textarea
 								bind:value={randomGreetingsText}
 								placeholder="Selamlar\nIyi gunler\nMerhaba"
@@ -347,12 +330,13 @@
 									/>
 								</div>
 								<div>
-									<span class="block text-xs text-muted-foreground mb-1">Mola süresi (sn)</span>
+									<span class="block text-xs text-muted-foreground mb-1">Mola süresi (ms)</span>
 									<Input
 										type="number"
-										min="30"
-										max="3600"
-										bind:value={antiBan.batchPauseSeconds}
+										min="30000"
+										max="3600000"
+										step="1000"
+										bind:value={antiBan.batchPauseMs}
 										class="h-9 text-sm font-mono"
 									/>
 								</div>
@@ -360,7 +344,7 @@
 							{/if}
 						</div>
 
-						<div class="pt-1">
+						<div class="pt-1 flex justify-end">
 							<Button
 								type="button"
 								variant="outline"

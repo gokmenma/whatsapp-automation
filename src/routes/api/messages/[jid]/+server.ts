@@ -8,6 +8,29 @@ import { sendWhatsAppMessage } from '$lib/whatsapp';
 import { deleteWhatsAppMessageForEveryone } from '$lib/whatsapp';
 import { editWhatsAppMessage } from '$lib/whatsapp';
 
+function normalizeDirectDigits(value: string) {
+    return String(value || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+}
+
+function resolveDirectConversationNumber(accountId: string, jidOrNumber: string) {
+    const raw = String(jidOrNumber || '').trim();
+    if (!raw) return '';
+
+    if (!raw.includes('@')) {
+        return normalizeDirectDigits(raw);
+    }
+
+    const [, domain = ''] = raw.split('@');
+    const digits = normalizeDirectDigits(raw);
+    if ((domain === 's.whatsapp.net' || domain === 'c.us') && digits) {
+        const mapped = getCanonicalContactNumber(accountId, raw);
+        if (mapped && mapped !== digits) return mapped;
+        return digits;
+    }
+
+    return getCanonicalContactNumber(accountId, raw) || digits;
+}
+
 // GET /api/messages/[jid]?accountId=xxx → messages for a conversation
 export const GET: RequestHandler = async ({ params, url, locals }) => {
     if (!locals.user) throw error(401, 'Unauthorized');
@@ -17,7 +40,7 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
 
     const contactParam = decodeURIComponent(params.jid);
     const isGroupChat = contactParam.endsWith('@g.us');
-    const contactNumber = getCanonicalContactNumber(accountId, contactParam);
+    const contactNumber = isGroupChat ? '' : resolveDirectConversationNumber(accountId, contactParam);
     const statusUser: any = getAccountStatus(accountId)?.user || {};
     const selfDigits = String(getAccountStatus(accountId)?.user?.id || '')
         .split('@')[0]
@@ -60,7 +83,7 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
         const targetJids = Array.from(new Set(
             (rows as any[])
                 .map((r) => String(r.contact_jid || ''))
-                .filter((jid) => getCanonicalContactNumber(accountId, jid) === contactNumber)
+                .filter((jid) => resolveDirectConversationNumber(accountId, jid) === contactNumber)
         ));
 
         for (const jid of targetJids) {
@@ -104,7 +127,7 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
         .filter((m) => {
             const rowJid = String(m.contactJid || '');
             if (isGroupChat) return rowJid === contactParam;
-            return getCanonicalContactNumber(accountId, rowJid) === contactNumber;
+            return resolveDirectConversationNumber(accountId, rowJid) === contactNumber;
         })
         .filter((m) => {
             const body = String(m.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
@@ -174,7 +197,7 @@ export const DELETE: RequestHandler = async ({ params, url, locals }) => {
     if (!accountId) throw error(400, 'accountId gerekli');
 
     const contactParam = decodeURIComponent(params.jid);
-    const contactNumber = getCanonicalContactNumber(accountId, contactParam);
+    const contactNumber = resolveDirectConversationNumber(accountId, contactParam);
 
     // Verify account belongs to user
     const account = await db.select().from(accounts)
@@ -191,7 +214,7 @@ export const DELETE: RequestHandler = async ({ params, url, locals }) => {
     const targetJids = Array.from(new Set(
         (rows as any[])
             .map((r) => String(r.contact_jid || ''))
-            .filter((jid) => getCanonicalContactNumber(accountId, jid) === contactNumber)
+            .filter((jid) => resolveDirectConversationNumber(accountId, jid) === contactNumber)
     ));
 
     for (const jid of targetJids) {
@@ -229,7 +252,7 @@ export const PATCH: RequestHandler = async ({ params, url, request, locals }) =>
     }
 
     const contactParam = decodeURIComponent(params.jid);
-    const contactNumber = getCanonicalContactNumber(accountId, contactParam);
+    const contactNumber = resolveDirectConversationNumber(accountId, contactParam);
 
     const account = await db.select().from(accounts)
         .where(eq(accounts.id, accountId))
@@ -246,7 +269,7 @@ export const PATCH: RequestHandler = async ({ params, url, request, locals }) =>
     const target = (rows as any[])[0];
     if (!target) throw error(404, 'Mesaj bulunamadı');
 
-    const targetNumber = getCanonicalContactNumber(accountId, String(target.contact_jid || ''));
+    const targetNumber = resolveDirectConversationNumber(accountId, String(target.contact_jid || ''));
     if (targetNumber !== contactNumber) throw error(400, 'Mesaj bu konuşmaya ait değil');
 
     if (editMode) {

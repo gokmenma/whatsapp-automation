@@ -997,21 +997,22 @@ export async function initializeWhatsApp(accountId: string) {
                     const senderName = !isFromMe && isGroupJid
                         ? String(msg.pushName || (senderJid ? getContactName(accountId, senderJid) : '') || '').trim() || null
                         : null;
-                    // Normalize JID to digits-only base number for direct chats (removes device suffixes like :12)
-                    const phoneNumber = jidForSave.split('@')[0].replace(/\D/g, '');
+                    // Normalize direct chat JID through canonical resolver to collapse lid/device variants.
+                    const fallbackDigits = jidForSave.split('@')[0].split(':')[0].replace(/\D/g, '');
+                    const canonicalDirectNumber = getCanonicalContactNumber(accountId, jidForSave) || fallbackDigits;
                     const selfNumber = String(status?.user?.id || sock.user?.id || '')
                         .split('@')[0]
                         .split(':')[0]
                         .replace(/\D/g, '');
 
                     // Ignore self-thread writes to prevent creating a fake conversation under account name.
-                    if (!isGroupJid && selfNumber && phoneNumber === selfNumber) {
+                    if (!isGroupJid && selfNumber && canonicalDirectNumber === selfNumber) {
                         continue;
                     }
 
                     const normalizedJid = isGroupJid
                         ? jidForSave
-                        : `${phoneNumber}@s.whatsapp.net`;
+                        : `${canonicalDirectNumber}@s.whatsapp.net`;
 
                     await dbInst.insert(messagesTable).values({
                         id: messageId,
@@ -1185,6 +1186,8 @@ export async function sendWhatsAppMessage(
         throw new Error(`Account ${accountId} is not ready`);
     }
 
+    const shouldPersistLog = Boolean(batchId);
+
     let jid = toJid(to);
     const isGroupTarget = jid.endsWith('@g.us');
     
@@ -1207,6 +1210,25 @@ export async function sendWhatsAppMessage(
                     // Number is definitely NOT on WhatsApp - refund credit and stop
                     console.log(`[${accountId}] ❌ Number NOT on WhatsApp: ${cleanNumber}`);
                     await db.update(users).set({ credits: sql`${users.credits} + 1` }).where(eq(users.id, account.userId));
+                    if (shouldPersistLog) {
+                        await db.insert(logs).values({
+                            id: Math.random().toString(36).substr(2, 9),
+                            batchId,
+                            accountId,
+                            timestamp: new Date(),
+                            recipient: to,
+                            status: "error",
+                            message: message.substring(0, 100),
+                            error: 'Bu numara WhatsApp kullanmıyor.'
+                        });
+                    }
+                    return { success: false, error: 'Bu numara WhatsApp kullanmıyor.', remainingCredits: result[0].updatedCredits + 1 };
+                }
+            } else {
+                // Empty result - number likely not on WhatsApp, refund and stop
+                console.log(`[${accountId}] ❌ No onWhatsApp result for: ${cleanNumber}`);
+                await db.update(users).set({ credits: sql`${users.credits} + 1` }).where(eq(users.id, account.userId));
+                if (shouldPersistLog) {
                     await db.insert(logs).values({
                         id: Math.random().toString(36).substr(2, 9),
                         batchId,
@@ -1217,22 +1239,7 @@ export async function sendWhatsAppMessage(
                         message: message.substring(0, 100),
                         error: 'Bu numara WhatsApp kullanmıyor.'
                     });
-                    return { success: false, error: 'Bu numara WhatsApp kullanmıyor.', remainingCredits: result[0].updatedCredits + 1 };
                 }
-            } else {
-                // Empty result - number likely not on WhatsApp, refund and stop
-                console.log(`[${accountId}] ❌ No onWhatsApp result for: ${cleanNumber}`);
-                await db.update(users).set({ credits: sql`${users.credits} + 1` }).where(eq(users.id, account.userId));
-                await db.insert(logs).values({
-                    id: Math.random().toString(36).substr(2, 9),
-                    batchId,
-                    accountId,
-                    timestamp: new Date(),
-                    recipient: to,
-                    status: "error",
-                    message: message.substring(0, 100),
-                    error: 'Bu numara WhatsApp kullanmıyor.'
-                });
                 return { success: false, error: 'Bu numara WhatsApp kullanmıyor.', remainingCredits: result[0].updatedCredits + 1 };
             }
         } catch (verifyErr: any) {
@@ -1286,15 +1293,17 @@ export async function sendWhatsAppMessage(
             sentMsg = await client.sendMessage(jid, { text: message }, quotedMessage ? { quoted: quotedMessage as any } : undefined);
         }
 
-        await db.insert(logs).values({
-            id: Math.random().toString(36).substr(2, 9),
-            batchId,
-            accountId,
-            timestamp: new Date(),
-            recipient: to,
-            status: "success",
-            message: message.substring(0, 100)
-        });
+        if (shouldPersistLog) {
+            await db.insert(logs).values({
+                id: Math.random().toString(36).substr(2, 9),
+                batchId,
+                accountId,
+                timestamp: new Date(),
+                recipient: to,
+                status: "success",
+                message: message.substring(0, 100)
+            });
+        }
 
         // Save to messages table for chat history
         if (sentMsg?.key?.id) {
@@ -1328,16 +1337,18 @@ export async function sendWhatsAppMessage(
         return { success: true, messageId: sentMsg.key.id, remainingCredits: result[0].updatedCredits };
     } catch (e: any) {
         await db.update(users).set({ credits: sql`${users.credits} + 1` }).where(eq(users.id, account.userId));
-        await db.insert(logs).values({
-            id: Math.random().toString(36).substr(2, 9),
-            batchId,
-            accountId,
-            timestamp: new Date(),
-            recipient: to,
-            status: "error",
-            message: message.substring(0, 100),
-            error: e.message || 'Unknown error'
-        });
+        if (shouldPersistLog) {
+            await db.insert(logs).values({
+                id: Math.random().toString(36).substr(2, 9),
+                batchId,
+                accountId,
+                timestamp: new Date(),
+                recipient: to,
+                status: "error",
+                message: message.substring(0, 100),
+                error: e.message || 'Unknown error'
+            });
+        }
         return { success: false, error: e.message || 'WhatsApp gönderim hatası', remainingCredits: result[0].updatedCredits + 1 };
     }
 }
@@ -1548,7 +1559,7 @@ export async function removeAccount(accountId: string) {
 export async function getLogs() {
     const { db } = await import('./server/db');
     const { logs, accounts } = await import('./server/db/schema');
-    const { desc, eq } = await import('drizzle-orm');
+    const { desc, eq, sql } = await import('drizzle-orm');
     
     try {
         return await db.select({
@@ -1564,6 +1575,7 @@ export async function getLogs() {
         })
         .from(logs)
         .leftJoin(accounts, eq(logs.accountId, accounts.id))
+        .where(sql`${logs.batchId} is not null`)
         .orderBy(desc(logs.timestamp))
         .limit(100);
     } catch (e) {
@@ -1582,14 +1594,15 @@ export function getContactName(accountId: string, jid: string): string {
         .filter(Boolean)
         .forEach((value) => selfNames.add(value));
 
-    const chooseCandidate = (candidates: Array<string | undefined | null>) => {
+    const chooseCandidate = (candidates: Array<string | undefined | null>, fallbackToFirst = true) => {
         const cleaned = candidates
             .map((value) => String(value || '').trim())
             .filter(Boolean);
         if (cleaned.length === 0) return '';
 
         const nonSelf = cleaned.find((value) => !selfNames.has(normalizeNameValue(value)));
-        return nonSelf || cleaned[0];
+        if (nonSelf) return nonSelf;
+        return fallbackToFirst ? cleaned[0] : '';
     };
 
     const targetDigits = normalizeDigits(jid);
@@ -1646,7 +1659,7 @@ export function getContactName(accountId: string, jid: string): string {
                     (contact as any)?.verifiedName,
                     (contact as any)?.notify,
                     (contact as any)?.pushName
-                ]);
+                ], false);
                 if (candidate) {
                     crossStoreName = candidate;
                     break;
@@ -1657,9 +1670,8 @@ export function getContactName(accountId: string, jid: string): string {
         }
     }
 
-    const resolved = chooseCandidate([
+    const localResolved = chooseCandidate([
         directContact?.name,
-        crossStoreName,
         linkedLidContact?.name,
         linkedLidContact?.notify,
         directContact?.notify,
@@ -1673,6 +1685,15 @@ export function getContactName(accountId: string, jid: string): string {
         directContact?.pushName,
         linkedLidContact?.pushName,
         linkedLidContact?.verifiedName
+    ], false);
+    if (localResolved) return localResolved;
+
+    const resolved = chooseCandidate([
+        crossStoreName,
+        directContact?.name,
+        directContact?.notify,
+        directChat?.name,
+        directChat?.subject
     ]);
 
     return resolved || fallbackName;
