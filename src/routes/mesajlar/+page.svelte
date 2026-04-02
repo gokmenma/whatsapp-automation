@@ -93,6 +93,7 @@
     let notificationAudio: HTMLAudioElement | null = null;
     let browserNotificationPermission = $state<NotificationPermission | 'unsupported'>('unsupported');
     let desktopNotificationsEnabled = $state(true);
+    const desktopNotificationAutoCloseMs = 5000;
     let conversationsSnapshotInitialized = false;
     let conversationSnapshots = new Map<string, string>();
 
@@ -152,12 +153,6 @@
             return normalized === 'true' || normalized === '1' || normalized === 'yes';
         }
         return false;
-    }
-
-    function isUnreadStatus(status: unknown) {
-        const normalized = String(status || '').trim().toLowerCase();
-        if (!normalized) return false;
-        return normalized !== 'read' && normalized !== 'played' && normalized !== 'deleted_me' && normalized !== 'deleted_everyone';
     }
 
     function resetConversationTracking() {
@@ -261,7 +256,7 @@
         const contactJid = String(conv?.contactJid || '').trim();
         if (!contactJid) return false;
 
-        const title = String(conv?.name || conv?.number || 'Yeni mesaj').trim() || 'Yeni mesaj';
+        const title = 'WhatsApp Otomasyon';
         const body = notificationPreviewForConversation(conv);
         let notification: Notification;
         try {
@@ -280,6 +275,10 @@
             void selectConversation(targetConv);
             notification.close();
         };
+
+        window.setTimeout(() => {
+            notification.close();
+        }, desktopNotificationAutoCloseMs);
 
         return true;
     }
@@ -318,7 +317,7 @@
         }
 
         try {
-            const notification = new Notification('Test bildirimi', {
+            const notification = new Notification('WhatsApp Otomasyon', {
                 body: 'Bildirim sistemi aktif calisiyor.',
                 requireInteraction: true
             });
@@ -326,6 +325,9 @@
                 window.focus();
                 notification.close();
             };
+            window.setTimeout(() => {
+                notification.close();
+            }, desktopNotificationAutoCloseMs);
             toast.success('Test bildirimi gonderildi');
         } catch {
             toast.error('Tarayici bildirimi olusturulamadi');
@@ -351,17 +353,10 @@
             const nextUnreadRaw = Math.max(0, Number(conv?.unreadCount || 0));
             const isIncomingByDirection = !toBool(conv?.lastMessageFromMe);
             const isActiveConversation = selectedContact?.jid === key;
-            const unreadPreviewExists = String(conv?.unreadPreview || '').trim().length > 0 || Boolean(conv?.unreadPreviewMediaType);
-            const unreadPreviewSignalsUnread = unreadPreviewExists && !toBool(conv?.unreadPreviewFromMe) && isUnreadStatus(conv?.unreadPreviewStatus);
-            const latestSignalsUnread = isIncomingByDirection && isUnreadStatus(conv?.lastMessageStatus);
 
             let effectiveUnread = nextUnreadRaw;
             if (isActiveConversation) {
                 effectiveUnread = 0;
-            } else if (nextUnreadRaw === 0 && (unreadPreviewSignalsUnread || latestSignalsUnread)) {
-                // Defensive fallback: keep badge visible when payload indicates unread,
-                // even if backend unreadCount lags momentarily.
-                effectiveUnread = Math.max(prevUnread, 1);
             } else if (conversationsSnapshotInitialized) {
                 const previousSnapshot = conversationSnapshots.get(key);
                 const currentWithoutUnread = [
@@ -451,9 +446,7 @@
         loadingConversations = true;
 
         try {
-            const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accountId)}&_=${Date.now()}`, {
-                cache: 'no-store'
-            });
+            const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accountId)}`);
             if (requestId !== conversationsRequestSeq) return;
 
             if (res.ok) {
@@ -508,9 +501,7 @@
         loadingMessages = true;
         try {
             const jid = encodeURIComponent(selectedContact.jid);
-            const res = await fetch(`/api/messages/${jid}?accountId=${encodeURIComponent(selectedAccountId)}&_=${Date.now()}`, {
-                cache: 'no-store'
-            });
+            const res = await fetch(`/api/messages/${jid}?accountId=${encodeURIComponent(selectedAccountId)}`);
             if (res.ok) {
                 const d = await res.json();
                 const incoming = d.messages || [];
@@ -1426,7 +1417,7 @@
 
     // Control polling based on selectedContact and messages state
     $effect(() => {
-        if (selectedContact) {
+        if (selectedContact && messages.length > 0) {
             startPolling();
         } else {
             stopPolling();
