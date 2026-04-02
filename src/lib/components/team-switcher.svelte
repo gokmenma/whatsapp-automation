@@ -9,15 +9,17 @@
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	import { toast } from 'svelte-sonner';
 	import { invalidateAll } from '$app/navigation';
+	import { goto } from '$app/navigation';
 	import { UserPlus, User } from '@lucide/svelte';
 
 	// This should be `Component` after @lucide/svelte updates types
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	let { accounts }: { accounts: any[] } = $props();
+	let { accounts = [], teams = [] }: { accounts?: any[]; teams?: any[] } = $props();
 	const sidebar = useSidebar();
+	const availableAccounts = $derived(accounts.length > 0 ? accounts : teams);
 
 	// Active account is the default one, or the first one if none is default
-	const activeAccount = $derived(accounts.find(a => a.isDefault) || accounts[0]);
+	const activeAccount = $derived(availableAccounts.find((a: any) => a.isDefault) || availableAccounts[0]);
 
 	async function selectAccount(acc: any) {
 		if (acc.isDefault) return;
@@ -79,7 +81,7 @@
 				sideOffset={4}
 			>
 				<DropdownMenu.Label class="text-muted-foreground text-xs uppercase tracking-widest font-bold px-2 py-1.5">Hesaplar</DropdownMenu.Label>
-				{#each accounts as acc, index (acc.id)}
+				{#each availableAccounts as acc, index (acc.id)}
 					<DropdownMenu.Item onSelect={() => selectAccount(acc)} class="gap-3 p-2 cursor-pointer transition-colors hover:bg-primary/5">
 						<div class="flex size-7 items-center justify-center rounded-md border bg-muted group-hover:border-primary/50 font-bold text-xs">
 							{acc.name.charAt(0)}
@@ -97,7 +99,7 @@
                     <div class="p-4 text-xs text-muted-foreground italic text-center">Hesap bulunamadı</div>
 				{/each}
 				<DropdownMenu.Separator />
-				<DropdownMenu.Item class="gap-2 p-2 cursor-pointer" href="/hesaplar">
+				<DropdownMenu.Item class="gap-2 p-2 cursor-pointer" onSelect={() => goto('/hesaplar')}>
 					<div
 						class="flex size-7 items-center justify-center rounded-md border bg-transparent"
 					>

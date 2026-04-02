@@ -3,9 +3,10 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { accounts } from '$lib/server/db/schema';
 import { eq, sql } from 'drizzle-orm';
-import { getCanonicalContactNumber, getContactName, getContactNameAsync, markWhatsAppRead } from '$lib/whatsapp';
+import { getCanonicalContactNumber, getContactName, getAccountStatus } from '$lib/whatsapp';
 import { sendWhatsAppMessage } from '$lib/whatsapp';
-import { deleteWhatsAppMessageForEveryone, editWhatsAppMessage } from '$lib/whatsapp';
+import { deleteWhatsAppMessageForEveryone } from '$lib/whatsapp';
+import { editWhatsAppMessage } from '$lib/whatsapp';
 
 // GET /api/messages/[jid]?accountId=xxx → messages for a conversation
 export const GET: RequestHandler = async ({ params, url, locals }) => {
@@ -15,8 +16,23 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
     if (!accountId) throw error(400, 'accountId gerekli');
 
     const contactParam = decodeURIComponent(params.jid);
+    const isGroupChat = contactParam.endsWith('@g.us');
     const contactNumber = getCanonicalContactNumber(accountId, contactParam);
-    const resolvedJid = contactNumber.includes('@') ? contactNumber : `${contactNumber}@s.whatsapp.net`;
+    const statusUser: any = getAccountStatus(accountId)?.user || {};
+    const selfDigits = String(getAccountStatus(accountId)?.user?.id || '')
+        .split('@')[0]
+        .split(':')[0]
+        .replace(/\D/g, '');
+    const normalizeName = (value: unknown) => String(value || '')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim()
+        .toLowerCase();
+    const selfNameSet = new Set(
+        [statusUser?.name, statusUser?.verifiedName, statusUser?.notify]
+            .map((value) => normalizeName(value))
+            .filter(Boolean)
+    );
 
     // Verify account belongs to user
     const account = await db.select().from(accounts)
@@ -24,34 +40,37 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
         .get();
     if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
 
-    // Async tasks: resolution and read receipt
-    const [nameResult] = await Promise.all([
-        getContactNameAsync(accountId, resolvedJid),
-        markWhatsAppRead(accountId, resolvedJid)
-    ]);
-
     const allMsgs = await db.all(sql`
         SELECT
             m.id,
             m.account_id AS accountId,
             m.contact_jid AS contactJid,
+            m.sender_jid AS senderJid,
+            m.sender_name AS senderName,
             m.from_me AS fromMe,
             m.body,
             m.media_type AS mediaType,
-            m.timestamp,
-            m.status,
-            m.sender_jid AS senderJid,
             m.quoted_msg_id AS quotedMsgId,
             m.quoted_msg_body AS quotedMsgBody,
-            m.reaction
+            qm.media_type AS quotedMediaType,
+            qm.body AS quotedSourceBody,
+            m.reaction,
+            m.edited_at AS editedAt,
+            m.timestamp,
+            m.status
         FROM messages m
+        LEFT JOIN messages qm ON qm.account_id = m.account_id AND qm.id = m.quoted_msg_id
         WHERE m.account_id = ${accountId}
-        ORDER BY m.timestamp ASC
+        ORDER BY m.timestamp DESC
         LIMIT 2000
     `);
 
     const msgs = (allMsgs as any[])
-        .filter((m) => getCanonicalContactNumber(accountId, String(m.contactJid || '')) === contactNumber)
+        .filter((m) => {
+            const rowJid = String(m.contactJid || '');
+            if (isGroupChat) return rowJid === contactParam;
+            return getCanonicalContactNumber(accountId, rowJid) === contactNumber;
+        })
         .filter((m) => {
             const body = String(m.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
             const isGhostRow = !m.mediaType && !body && m.status !== 'deleted_me' && m.status !== 'deleted_everyone';
@@ -59,18 +78,29 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
         })
         .map((m) => ({
             ...m,
-            fromMe: Boolean(m.fromMe), // Explicit cast for UI
+            // Some historical group rows were stored with wrong fromMe=false for own participant.
+            // Derive a stable view-time flag so own messages render on the right.
+            fromMe: Boolean(m.fromMe) || (
+                isGroupChat &&
+                (
+                    (selfDigits.length > 0 &&
+                        String(m.senderJid || '').split('@')[0].split(':')[0].replace(/\D/g, '') === selfDigits) ||
+                    (selfNameSet.size > 0 && selfNameSet.has(normalizeName(m.senderName)))
+                )
+            ),
             body: String(m.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim(),
-            senderName: m.senderJid ? getContactName(accountId, m.senderJid) : null,
-            reaction: m.reaction
+            quotedMsgBody: String(m.quotedMsgBody || m.quotedSourceBody || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim() || null,
+            senderName: isGroupChat
+                ? (String(m.senderName || '').trim() || (m.senderJid ? getContactName(accountId, String(m.senderJid)) : null))
+                : null
         }))
-        .slice(-500);
+        .slice(0, 500)
+        .reverse();
 
     return json({
         messages: msgs,
-        contactName: nameResult.name,
-        participants: nameResult.participants,
-        contactNumber
+        contactName: getContactName(accountId, isGroupChat ? contactParam : `${contactNumber}@s.whatsapp.net`),
+        contactNumber: isGroupChat ? contactParam.split('@')[0] : contactNumber
     });
 };
 
@@ -78,7 +108,7 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
 export const POST: RequestHandler = async ({ params, request, locals }) => {
     if (!locals.user) throw error(401, 'Unauthorized');
 
-    const { accountId, message, media } = await request.json();
+    const { accountId, message, media, replyTo } = await request.json();
     const text = String(message || '').trim();
     const hasMedia = Boolean(media?.data && media?.mimetype && media?.filename);
     if (!accountId || (!text && !hasMedia)) throw error(400, 'accountId ve message veya media gerekli');
@@ -91,8 +121,10 @@ export const POST: RequestHandler = async ({ params, request, locals }) => {
         .get();
     if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
 
-    const to = contactJid.includes('@') ? contactJid : contactJid.replace(/\D/g, '');
-    const result = await sendWhatsAppMessage(accountId, to, text, hasMedia ? media : undefined);
+    const target = contactJid.endsWith('@g.us')
+        ? contactJid
+        : contactJid.split('@')[0].replace(/\D/g, '');
+    const result = await sendWhatsAppMessage(accountId, target, text, hasMedia ? media : undefined, undefined, replyTo);
 
     if (!result.success) throw error(400, result.error || 'Mesaj gönderilemedi');
 
@@ -138,56 +170,39 @@ export const DELETE: RequestHandler = async ({ params, url, locals }) => {
     return json({ success: true });
 };
 
-// PATCH /api/messages/[jid]?accountId=xxx → update/delete single message
+// PATCH /api/messages/[jid]?accountId=xxx → delete or edit single message
 export const PATCH: RequestHandler = async ({ params, url, request, locals }) => {
     if (!locals.user) throw error(401, 'Unauthorized');
 
     const accountId = url.searchParams.get('accountId');
     if (!accountId) throw error(400, 'accountId gerekli');
 
-    const { messageId, action, deleteMode, newText, isMuted } = await request.json();
-    
+    const payload = await request.json();
+    const messageId = String(payload?.messageId || '').trim();
+    const deleteMode = payload?.deleteMode as 'me' | 'everyone' | undefined;
+    const editMode = Boolean(payload?.editMode);
+    const editedBody = String(payload?.editedBody || '').trim();
+
+    if (!messageId) {
+        throw error(400, 'messageId gerekli');
+    }
+    if (!editMode && !deleteMode) {
+        throw error(400, 'deleteMode veya editMode gerekli');
+    }
+    if (deleteMode && !['me', 'everyone'].includes(deleteMode)) {
+        throw error(400, 'geçerli deleteMode gerekli');
+    }
+
     const contactParam = decodeURIComponent(params.jid);
     const contactNumber = getCanonicalContactNumber(accountId, contactParam);
-    const resolvedJid = contactNumber.includes('@') ? contactNumber : `${contactNumber}@s.whatsapp.net`;
 
     const account = await db.select().from(accounts)
         .where(eq(accounts.id, accountId))
         .get();
     if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
 
-    if (action === 'mute') {
-        const duration = isMuted; // Actually duration passed in the request
-        let muteUntilVal = null;
-        let isMutedBool = false;
-
-        if (duration === -1) {
-            // Always (100 years)
-            muteUntilVal = new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000);
-            isMutedBool = true;
-        } else if (typeof duration === 'number' && duration > 0) {
-            // Minutes (8h = 480, 1w = 10080)
-            muteUntilVal = new Date(Date.now() + duration * 60000);
-            isMutedBool = true;
-        } else if (duration === false || duration === 0) {
-            // Unmute
-            muteUntilVal = null;
-            isMutedBool = false;
-        }
-
-        await db.run(sql`
-            INSERT INTO chats (account_id, contact_jid, is_muted, mute_until)
-            VALUES (${accountId}, ${resolvedJid}, ${isMutedBool ? 1 : 0}, ${muteUntilVal})
-            ON CONFLICT(account_id, contact_jid) 
-            DO UPDATE SET is_muted = excluded.is_muted, mute_until = excluded.mute_until
-        `);
-        return json({ success: true, isMuted: isMutedBool, muteUntil: muteUntilVal });
-    }
-    
-    if (!messageId) throw error(400, 'messageId gerekli');
-
-    const rows = await db.all(sql`
-        SELECT id, contact_jid, from_me, timestamp, media_type
+        const rows = await db.all(sql`
+                                SELECT id, contact_jid, from_me, timestamp, media_type, status
         FROM messages
         WHERE account_id = ${accountId}
           AND id = ${String(messageId)}
@@ -199,55 +214,62 @@ export const PATCH: RequestHandler = async ({ params, url, request, locals }) =>
     const targetNumber = getCanonicalContactNumber(accountId, String(target.contact_jid || ''));
     if (targetNumber !== contactNumber) throw error(400, 'Mesaj bu konuşmaya ait değil');
 
-    const prefix = `${accountId}:`;
-    const rawMessageId = String(messageId).startsWith(prefix)
-        ? String(messageId).slice(prefix.length)
-        : String(messageId);
-    const remoteJid = targetNumber.includes('@') ? targetNumber : `${targetNumber}@s.whatsapp.net`;
-
-    if (action === 'edit') {
+    if (editMode) {
         if (!Boolean(target.from_me)) {
-            throw error(400, 'Sadece kendi gönderdiğiniz mesajları düzenleyebilirsiniz');
+            throw error(400, 'Sadece kendi gönderdiğiniz mesajı düzenleyebilirsiniz');
         }
-        if (target.media_type) {
-            throw error(400, 'Medya mesajları düzenlenemez, sadece metin mesajları düzenlenebilir');
+        if (!editedBody) {
+            throw error(400, 'Yeni mesaj metni boş olamaz');
         }
-        if (!newText || !newText.trim()) {
-            throw error(400, 'Yeni mesaj metni gerekli');
+        if (String(target.status || '').startsWith('deleted')) {
+            throw error(400, 'Silinen mesaj düzenlenemez');
         }
 
         const rawTs = target.timestamp;
         const msgTs = typeof rawTs === 'number'
             ? (rawTs < 1e12 ? rawTs * 1000 : rawTs)
             : new Date(rawTs).getTime();
-        const ageMinutes = (Date.now() - msgTs) / (1000 * 60);
-
-        if (ageMinutes > 15) {
-            throw error(400, 'Mesajlar sadece ilk 15 dakika içinde düzenlenebilir');
+        const ageMs = Date.now() - msgTs;
+        const within15Minutes = ageMs >= 0 && ageMs <= 15 * 60 * 1000;
+        if (!within15Minutes) {
+            throw error(400, 'Mesaj sadece ilk 15 dakika içinde düzenlenebilir');
         }
 
-        const editResult = await editWhatsAppMessage(accountId, remoteJid, rawMessageId, newText.trim());
+        const prefix = `${accountId}:`;
+        const rawMessageId = String(messageId).startsWith(prefix)
+            ? String(messageId).slice(prefix.length)
+            : String(messageId);
+        const remoteJid = contactParam.endsWith('@g.us')
+            ? contactParam
+            : `${targetNumber}@s.whatsapp.net`;
+
+        const editResult = await editWhatsAppMessage(accountId, remoteJid, rawMessageId, editedBody);
         if (!editResult.success) {
-            throw error(400, editResult.error || 'Mesaj düzenleme başarısız');
+            throw error(400, editResult.error || 'Mesaj düzenlenemedi');
         }
 
-        await db.run(sql`
-            UPDATE messages
-            SET body = ${newText.trim()}
-            WHERE account_id = ${accountId}
-              AND id = ${String(messageId)}
-        `);
+        try {
+            await db.run(sql`
+                UPDATE messages
+                SET body = ${editedBody},
+                    edited_at = ${new Date()}
+                WHERE account_id = ${accountId}
+                  AND id = ${String(messageId)}
+            `);
+        } catch {
+            // Fallback for older DB instances where edited_at is not yet present.
+            await db.run(sql`
+                UPDATE messages
+                SET body = ${editedBody}
+                WHERE account_id = ${accountId}
+                  AND id = ${String(messageId)}
+            `);
+        }
 
-        return json({ success: true });
+        return json({ success: true, editedAt: Date.now() });
     }
 
-    // Default to delete behavior for backward compatibility if action is not 'edit'
-    const mode = deleteMode || 'me';
-    if (!['me', 'everyone'].includes(mode)) {
-        throw error(400, 'Geçerli deleteMode gerekli');
-    }
-
-    if (mode === 'everyone') {
+    if (deleteMode === 'everyone') {
         if (!Boolean(target.from_me)) {
             throw error(400, 'Sadece kendi gönderdiğiniz mesajı herkesten silebilirsiniz');
         }
@@ -262,13 +284,19 @@ export const PATCH: RequestHandler = async ({ params, url, request, locals }) =>
             throw error(400, 'Herkesten sil sadece son 24 saatte gönderilen mesajlarda kullanılabilir');
         }
 
+        const prefix = `${accountId}:`;
+        const rawMessageId = String(messageId).startsWith(prefix)
+            ? String(messageId).slice(prefix.length)
+            : String(messageId);
+        const remoteJid = `${targetNumber}@s.whatsapp.net`;
+
         const revokeResult = await deleteWhatsAppMessageForEveryone(accountId, remoteJid, rawMessageId);
         if (!revokeResult.success) {
             throw error(400, revokeResult.error || 'Herkesten silme başarısız');
         }
     }
 
-    const nextStatus = mode === 'everyone' ? 'deleted_everyone' : 'deleted_me';
+    const nextStatus = deleteMode === 'everyone' ? 'deleted_everyone' : 'deleted_me';
     await db.run(sql`
         UPDATE messages
         SET body = 'Bu mesaj silindi',

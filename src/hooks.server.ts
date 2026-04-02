@@ -1,5 +1,5 @@
 import { getSession } from '$lib/server/auth';
-import { redirect, type HandleServerError } from '@sveltejs/kit';
+import { redirect } from '@sveltejs/kit';
 
 export const handle = async ({ event, resolve }) => {
 	const sessionId = event.cookies.get('session_id');
@@ -26,15 +26,4 @@ export const handle = async ({ event, resolve }) => {
 	
 	const response = await resolve(event);
 	return response;
-};
-
-export const handleError: HandleServerError = ({ error, event }) => {
-	console.error('Server error at:', event.url.pathname, error);
-	
-	const message = error instanceof Error ? error.message : 'Bilinmeyen bir sunucu hatası oluştu';
-	
-	return {
-		message,
-		code: (error as any)?.code ?? 'INTERNAL_SERVER_ERROR'
-	};
 };

@@ -2,6 +2,7 @@ import type { RequestHandler } from './$types';
 import fs from 'node:fs';
 import path from 'node:path';
 import { downloadMediaMessage, proto } from '@whiskeysockets/baileys';
+import { getWhatsAppClient } from '$lib/whatsapp';
 
 const MEDIA_PATH = process.env.USER_DATA_PATH
     ? path.join(process.env.USER_DATA_PATH, 'media')
@@ -88,7 +89,10 @@ export const GET: RequestHandler = async ({ params, locals }) => {
             const extPart = mimeRaw.split('/')[1]?.split(';')[0]?.split('+')[0] || 'bin';
             const ext = extPart === 'jpeg' ? 'jpg' : extPart;
 
-            const buffer = await downloadMediaMessage(decoded, 'buffer', {}) as Buffer;
+            const client = getWhatsAppClient(accountId) as any;
+            const buffer = await downloadMediaMessage(decoded, 'buffer', {}, {
+                reuploadRequest: client?.updateMediaMessage
+            }) as Buffer;
             
             const filePath = path.join(MEDIA_PATH, accountId, `${rawMsgId}.${ext}`);
             fs.writeFileSync(filePath, buffer);
