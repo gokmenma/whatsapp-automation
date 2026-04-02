@@ -1,0 +1,2 @@
+ALTER TABLE user_settings ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 25;
+ALTER TABLE user_settings ADD COLUMN batch_wait_minutes INTEGER NOT NULL DEFAULT 5;

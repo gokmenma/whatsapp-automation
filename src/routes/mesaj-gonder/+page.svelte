@@ -59,6 +59,12 @@
 		batchSize: number;
 		batchPauseMs: number;
 		randomGreetings: string[];
+		useGreetingVariations: boolean;
+		useIntroVariations: boolean;
+		useClosingVariations: boolean;
+		greetingPool: string[];
+		introPool: string[];
+		closingPool: string[];
 	};
 
 	const GREETINGS = ["Merhaba", "Selam", "İyi günler", "İyi çalışmalar", "Merhabalar", "Selamlar"];
@@ -362,8 +368,38 @@
     }
 
 	let userSettings = $state({
-		messageDelay: 2000
+		messageDelay: 2000,
+		batchSize: 25,
+		batchWaitMinutes: 5,
+		useGreetingVariations: true,
+		useIntroVariations: true,
+		useClosingVariations: true
 	});
+
+	function getRandomInt(min: number, max: number) {
+		return Math.floor(Math.random() * (max - min + 1)) + min;
+	}
+
+	const MIN_RANDOM_BATCH_SIZE = 20;
+	const MIN_RANDOM_WAIT_MINUTES = 3;
+	const MIN_MESSAGE_DELAY_MS = 400;
+
+	function getRandomMessageDelayMs(maxMessageDelayMs: number) {
+		const upper = Math.max(MIN_MESSAGE_DELAY_MS, Math.floor(maxMessageDelayMs));
+		return getRandomInt(MIN_MESSAGE_DELAY_MS, upper);
+	}
+
+	function getRandomBatchTarget(maxBatchSize: number) {
+		const upper = Math.max(MIN_RANDOM_BATCH_SIZE, Math.floor(maxBatchSize));
+		return getRandomInt(MIN_RANDOM_BATCH_SIZE, upper);
+	}
+
+	function getRandomPauseDurationMs(maxWaitMinutes: number) {
+		const upperMinutes = Math.max(MIN_RANDOM_WAIT_MINUTES, Math.floor(maxWaitMinutes));
+		const minMs = MIN_RANDOM_WAIT_MINUTES * 60 * 1000;
+		const maxMs = upperMinutes * 60 * 1000;
+		return getRandomInt(minMs, maxMs);
+	}
 
 	// Anti-ban settings
 	let antiBan = $state<AntiBanSettings>({
@@ -373,7 +409,30 @@
 		batchPauseEnabled: true,     // Her N mesajdan sonra uzun bekleme
 		batchSize: 30,               // Kaç mesajda bir uzun bekleme yapılsın
 		batchPauseMs: 180000,        // Uzun bekleme süresi (milisaniye)
-		randomGreetings: []
+		randomGreetings: [],
+		useGreetingVariations: true,
+		useIntroVariations: true,
+		useClosingVariations: true,
+		greetingPool: [
+			"Merhaba, iyi günler dilerim.",
+    		"İyi günler dilerim.",
+    		"Merhaba.",
+    		"Merhabalar."
+		],
+		introPool: [
+			"Kısaca bilgilendirme yapmak için yazıyorum.",
+    		"Sizin için faydalı olabileceğini düşündüğüm bir konu hakkında ulaşmak istedim.",
+    		"Hizmetimiz hakkında kısa bir bilgi paylaşmak isterim.",
+    		"Yoğunluğunuzu biliyorum, kısaca bilgi ileteceğim.",
+    		"Kısa bir konuda bilgilendirme yapmak istedim."
+		],
+		closingPool: [
+			"Uygun olursanız detay paylaşabilirim.",
+			"İlginiz olursa memnuniyetle yardımcı olurum.",
+			"Dönüş yapmanız durumunda bilgi verebilirim.",
+			"Rahatsızlık verdiysem kusura bakmayın, iyi günler dilerim.",
+			"İyi çalışmalar dilerim."
+		]
 	});
 
 	function parseRandomGreetings(input?: string[] | string): string[] {
@@ -393,7 +452,30 @@
 			batchPauseEnabled: true,
 			batchSize: 30,
 			batchPauseMs: 180000,
-			randomGreetings: []
+			randomGreetings: [],
+			useGreetingVariations: true,
+			useIntroVariations: true,
+			useClosingVariations: true,
+			greetingPool: [
+				"Merhaba, iyi günler dilerim.",
+				"Merhaba, müsait olduğunuzda kısaca bilgi paylaşmak isterim.",
+				"İyi günler, rahatsız etmiyorumdur umarım.",
+				"Merhabalar, size kısa bir konuda ulaşmak istedim."
+			],
+			introPool: [
+				"Kısaca bilgilendirme yapmak için yazıyorum.",
+				"Sizin için faydalı olabileceğini düşündüğüm bir konu hakkında ulaşmak istedim.",
+				"Hizmetimiz hakkında kısa bir bilgi paylaşmak isterim.",
+				"Yoğunluğunuzu biliyorum, kısaca bilgi ileteceğim.",
+				"Yanlış zamanda yazdıysam kusura bakmayın, kısa bir bilgi paylaşacağım."
+			],
+			closingPool: [
+				"Uygun olursanız detay paylaşabilirim.",
+				"İlginiz olursa memnuniyetle yardımcı olurum.",
+				"Dönüş yapmanız durumunda bilgi verebilirim.",
+				"Rahatsızlık verdiysem kusura bakmayın, iyi günler dilerim.",
+				"İyi çalışmalar dilerim."
+			]
 		};
 
 		const legacyMinDelaySec = Number((input as any)?.minDelaySec);
@@ -419,8 +501,19 @@
 				30000,
 				Math.min(3600000, Number(input?.batchPauseMs ?? (Number.isFinite(legacyBatchPauseSeconds) ? legacyBatchPauseSeconds * 1000 : base.batchPauseMs)))
 			),
-			randomGreetings: parseRandomGreetings((input as any)?.randomGreetings ?? (input as any)?.randomGreetingsText)
+			randomGreetings: parseRandomGreetings((input as any)?.randomGreetings ?? (input as any)?.randomGreetingsText),
+			useGreetingVariations: (input as any)?.useGreetingVariations ?? base.useGreetingVariations,
+			useIntroVariations: (input as any)?.useIntroVariations ?? base.useIntroVariations,
+			useClosingVariations: (input as any)?.useClosingVariations ?? base.useClosingVariations,
+			greetingPool: parseRandomGreetings((input as any)?.greetingPool ?? (input as any)?.randomGreetings ?? base.greetingPool),
+			introPool: parseRandomGreetings((input as any)?.introPool ?? base.introPool),
+			closingPool: parseRandomGreetings((input as any)?.closingPool ?? base.closingPool)
 		};
+	}
+
+	function pickRandomFromPool(pool: string[]) {
+		if (!pool.length) return '';
+		return pool[Math.floor(Math.random() * pool.length)] ?? '';
 	}
 
 	function loadAntiBanSettings() {
@@ -448,8 +541,13 @@
 		try {
 			const res = await fetch('/api/settings');
 			const data = await res.json();
-			if (data && data.messageDelay) {
-				userSettings.messageDelay = data.messageDelay;
+			if (data) {
+				if (typeof data.messageDelay === 'number') userSettings.messageDelay = data.messageDelay;
+				if (typeof data.batchSize === 'number') userSettings.batchSize = data.batchSize;
+				if (typeof data.batchWaitMinutes === 'number') userSettings.batchWaitMinutes = data.batchWaitMinutes;
+				if (typeof data.useGreetingVariations === 'boolean') antiBan.useGreetingVariations = data.useGreetingVariations;
+				if (typeof data.useIntroVariations === 'boolean') antiBan.useIntroVariations = data.useIntroVariations;
+				if (typeof data.useClosingVariations === 'boolean') antiBan.useClosingVariations = data.useClosingVariations;
 			}
 		} catch (e) {
 			console.error("Settings fetch error:", e);
@@ -495,8 +593,17 @@
         const batchId = finalRecipients.length > 1 ? Math.random().toString(36).substr(2, 9) : undefined;
 
 		antiBan = normalizeAntiBanSettings(antiBan);
-		const minDelayMs = antiBan.minDelayMs;
-		const maxDelayMs = antiBan.maxDelayMs;
+		const maxMessageDelayMs = Math.max(
+			MIN_MESSAGE_DELAY_MS,
+			Math.floor(Number(userSettings.messageDelay || MIN_MESSAGE_DELAY_MS))
+		);
+		const maxBatchSize = Math.max(MIN_RANDOM_BATCH_SIZE, Number(userSettings.batchSize || antiBan.batchSize));
+		const maxWaitMinutes = Math.max(
+			MIN_RANDOM_WAIT_MINUTES,
+			Math.floor(Number(userSettings.batchWaitMinutes || antiBan.batchPauseMs / 60000))
+		);
+		let sentInCurrentBatch = 0;
+		let randomBatchTarget = getRandomBatchTarget(maxBatchSize);
 
 		for (let i = 0; i < finalRecipients.length; i++) {
 			const item = finalRecipients[i];
@@ -506,21 +613,29 @@
 				break;
 			}
 
-			// Her batchSize mesajdan sonra uzun bekleme (ilk mesaj öncesi değil)
-			if (antiBan.batchPauseEnabled && i > 0 && i % antiBan.batchSize === 0) {
-				const pauseMs = antiBan.batchPauseMs;
-				const variation = pauseMs * 0.2;
-				const actualPause = Math.round(pauseMs + (Math.random() * variation * 2 - variation));
-				currentRecipient = `⏸ ${i} mesaj gönderildi - ban koruması: ${actualPause} ms bekleniyor...`;
-				await new Promise(r => setTimeout(r, actualPause));
-				if (sendStatus !== "sending") break;
-			}
-
-			// Mesaj sonuna gizli rastgele sayı ekle (her mesajı tekil yapar)
+			// Mesajı Ban Koruma varyasyon havuzlarıyla rastgele oluştur
 			let finalMessage = item.message;
-			if (finalMessage && antiBan.randomGreetings.length > 0) {
-				const randomGreeting = antiBan.randomGreetings[Math.floor(Math.random() * antiBan.randomGreetings.length)];
-				finalMessage = `${randomGreeting} ${finalMessage}`;
+			if (finalMessage) {
+				const parts: string[] = [];
+
+				const greeting = antiBan.useGreetingVariations
+					? pickRandomFromPool(antiBan.greetingPool)
+					: pickRandomFromPool(antiBan.randomGreetings);
+				if (greeting) parts.push(greeting);
+
+				if (antiBan.useIntroVariations) {
+					const intro = pickRandomFromPool(antiBan.introPool);
+					if (intro) parts.push(intro);
+				}
+
+				parts.push(finalMessage);
+
+				if (antiBan.useClosingVariations) {
+					const closing = pickRandomFromPool(antiBan.closingPool);
+					if (closing) parts.push(closing);
+				}
+
+				finalMessage = parts.filter(Boolean).join('\n\n');
 			}
 
 			// Mesaj sonuna sadece gizli benzersiz kod ekle
@@ -565,9 +680,21 @@
 				sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: e.message || "Bağlantı hatası" });
 			}
 
-			// Mesajlar arası rastgele bekleme (minDelay ile maxDelay arasında)
-			const finalDelay = minDelayMs + Math.random() * (maxDelayMs - minDelayMs);
+			// Batch içindeki mesajlar için 600 ms ile kullanıcı max gecikmesi arasında rastgele bekleme
+			const finalDelay = getRandomMessageDelayMs(maxMessageDelayMs);
 			await new Promise(r => setTimeout(r, finalDelay));
+
+			sentInCurrentBatch++;
+			const hasMoreRecipients = i < finalRecipients.length - 1;
+			if (antiBan.batchPauseEnabled && hasMoreRecipients && sentInCurrentBatch >= randomBatchTarget) {
+				const randomPauseMs = getRandomPauseDurationMs(maxWaitMinutes);
+				currentRecipient = `⏸ ${sentInCurrentBatch} mesaj gönderildi - ${Math.round(randomPauseMs / 60000)} dk bekleniyor...`;
+				await new Promise((r) => setTimeout(r, randomPauseMs));
+				if (sendStatus !== "sending") break;
+
+				sentInCurrentBatch = 0;
+				randomBatchTarget = getRandomBatchTarget(maxBatchSize);
+			}
 		}
 		
 		sendStatus = "finished";
@@ -1253,14 +1380,15 @@
 					<div class="space-y-1">
 						<p class="text-xs font-semibold text-primary/80 uppercase tracking-wide">İpucu</p>
 						<p class="text-[11px] text-muted-foreground leading-relaxed">
-							Toplu mesajlarda hesap güvenliği için mesajlar arası
-							<span class="font-bold text-primary"> {antiBan.minDelayMs}-{antiBan.maxDelayMs} ms </span>
-							rastgele bekleme uygulanır.
+							Batch içindeki mesajlar arasında
+							<span class="font-bold text-primary"> 400-{Math.max(400, Math.floor(userSettings.messageDelay || 400))} ms </span>
+							rastgele gecikme uygulanır.
 							{#if antiBan.batchPauseEnabled}
-								Ayrica her <span class="font-bold text-primary">{antiBan.batchSize}</span>
-								mesajda yaklaşık
-								<span class="font-bold text-primary"> {antiBan.batchPauseMs} ms </span>
-								mola verilir.
+								Batch arası mola için her
+								<span class="font-bold text-primary"> 20-{Math.max(20, Math.floor(userSettings.batchSize || 20))} </span>
+								mesajda bir,
+								<span class="font-bold text-primary"> 3-{Math.max(3, Math.floor(userSettings.batchWaitMinutes || 3))} dk </span>
+								arasında rastgele beklenir.
 							{/if}
 							<span class="font-semibold">Ban Koruma Ayarları</span> bölümünden özelleştirebilirsiniz.
 						</p>

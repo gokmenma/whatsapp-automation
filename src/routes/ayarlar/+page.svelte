@@ -8,20 +8,29 @@
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Textarea } from "$lib/components/ui/textarea/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
-	import { Loader2, CheckCircle2, Save } from "@lucide/svelte";
+	import { Loader2, CheckCircle2 } from "@lucide/svelte";
 	import { setMode } from "mode-watcher";
 
 	// --- Server settings ---
 	let settings = $state({
 		readReceipt: true,
 		darkMode: true,
-		messageDelay: 2000
+		messageDelay: 2000,
+		batchSize: 25,
+		batchWaitMinutes: 5
 	});
 
 	let isLoading = $state(true);
 	let isSaving = $state(false);
 	let lastSaved = $state(0);
 	let saveMessage = $state("");
+	let antiBanSaveMessage = $state("");
+	let antiBanHydrated = $state(false);
+	let lastSavedAntiBanFlagsSnapshot = JSON.stringify({
+		useGreetingVariations: true,
+		useIntroVariations: true,
+		useClosingVariations: true
+	});
 
 	function readBooleanFlag(value: unknown) {
 		if (typeof value === 'boolean') return value;
@@ -41,14 +50,20 @@
 				settings = {
 					readReceipt: readBooleanFlag(data.readReceipt),
 					darkMode: readBooleanFlag(data.darkMode),
-					messageDelay: data.messageDelay || 2000
+					messageDelay: data.messageDelay || 2000,
+					batchSize: data.batchSize || 25,
+					batchWaitMinutes: data.batchWaitMinutes || 5
 				};
 				setMode(settings.darkMode ? 'dark' : 'light');
+				if (typeof data.useGreetingVariations === 'boolean') antiBan.useGreetingVariations = data.useGreetingVariations;
+				if (typeof data.useIntroVariations === 'boolean') antiBan.useIntroVariations = data.useIntroVariations;
+				if (typeof data.useClosingVariations === 'boolean') antiBan.useClosingVariations = data.useClosingVariations;
 			}
 		} catch (e) {
 			console.error("Fetch settings error:", e);
 		} finally {
 			isLoading = false;
+			antiBanHydrated = true;
 		}
 	}
 
@@ -84,6 +99,26 @@
 		saveSettings();
 	}
 
+	function handleBatchSizeChange(value: number) {
+		const next = Math.max(20, Math.min(300, Math.floor(value)));
+		settings.batchSize = next;
+		saveSettings();
+	}
+
+	function handleBatchWaitChange(value: number) {
+		const next = Math.max(3, Math.min(30, Math.floor(value)));
+		settings.batchWaitMinutes = next;
+		saveSettings();
+	}
+
+	function handleMessageDelayChange(value: number) {
+		const next = Math.max(400, Math.min(10000, Math.floor(value)));
+		settings.messageDelay = next;
+		antiBan.minDelayMs = next;
+		antiBan.maxDelayMs = next;
+		saveSettings();
+	}
+
 	// --- Anti-ban settings (localStorage) ---
 	const ANTIBAN_STORAGE_KEY = 'mesajGonder.antiBanSettings.v1';
 
@@ -91,32 +126,72 @@
 		addRandomSuffix: boolean;
 		minDelayMs: number;
 		maxDelayMs: number;
-		batchPauseEnabled: boolean;
-		batchSize: number;
-		batchPauseMs: number;
-		randomGreetings: string[];
+		useGreetingVariations: boolean;
+		useIntroVariations: boolean;
+		useClosingVariations: boolean;
+		greetingPool: string[];
+		introPool: string[];
+		closingPool: string[];
 	};
-
-	let randomGreetingsText = $state("");
 
 	let antiBan = $state<AntiBanSettings>({
 		addRandomSuffix: true,
 		minDelayMs: 3000,
 		maxDelayMs: 7000,
-		batchPauseEnabled: true,
-		batchSize: 30,
-		batchPauseMs: 180000,
-		randomGreetings: []
+		useGreetingVariations: true,
+		useIntroVariations: true,
+		useClosingVariations: true,
+		greetingPool: [
+			"Merhaba, iyi günler dilerim.",
+			"Merhaba, müsait olduğunuzda kısaca bilgi paylaşmak isterim.",
+			"İyi günler, rahatsız etmiyorumdur umarım.",
+			"Merhabalar, size kısa bir konuda ulaşmak istedim."
+		],
+		introPool: [
+			"Kısaca bilgilendirme yapmak için yazıyorum.",
+			"Sizin için faydalı olabileceğini düşündüğüm bir konu hakkında ulaşmak istedim.",
+			"Hizmetimiz hakkında kısa bir bilgi paylaşmak isterim.",
+			"Yoğunluğunuzu biliyorum, kısaca bilgi ileteceğim.",
+			"Yanlış zamanda yazdıysam kusura bakmayın, kısa bir bilgi paylaşacağım."
+		],
+		closingPool: [
+			"Uygun olursanız detay paylaşabilirim.",
+			"İlginiz olursa memnuniyetle yardımcı olurum.",
+			"Dönüş yapmanız durumunda bilgi verebilirim.",
+			"Rahatsızlık verdiysem kusura bakmayın, iyi günler dilerim.",
+			"İyi çalışmalar dilerim."
+		]
 	});
 
-	function parseRandomGreetings(input?: string | string[]): string[] {
-		const raw = Array.isArray(input) ? input.join('\n') : (input ?? "");
-		const normalizedRaw = raw.replace(/\\n/g, '\n').replace(/\r/g, '\n');
-		const list = normalizedRaw
-			.split(/[\n,]/)
-			.map((item) => item.trim())
-			.filter((item) => item.length > 0);
-		return Array.from(new Set(list)).slice(0, 50);
+	function parseVariationPool(input?: string[] | string): string[] {
+		const raw = Array.isArray(input) ? input.join('\n') : (input ?? '');
+		return Array.from(
+			new Set(
+				raw
+					.split(/\r?\n/)
+					.map((item) => item.trim())
+					.filter((item) => item.length > 0)
+			)
+		).slice(0, 100);
+	}
+
+	function formatVariationPool(input?: string[]): string {
+		return (input ?? []).join('\n');
+	}
+
+	function ensurePoolValues(values: string[], fallback: string[]) {
+		return values.length > 0 ? values : fallback;
+	}
+
+	let greetingPoolText = $state('');
+	let introPoolText = $state('');
+	let closingPoolText = $state('');
+	let lastSavedAntiBanSnapshot = '';
+
+	function syncPoolTextsFromAntiBan() {
+		greetingPoolText = formatVariationPool(antiBan.greetingPool);
+		introPoolText = formatVariationPool(antiBan.introPool);
+		closingPoolText = formatVariationPool(antiBan.closingPool);
 	}
 
 	function normalizeAntiBanSettings(input?: Partial<AntiBanSettings>): AntiBanSettings {
@@ -124,37 +199,54 @@
 			addRandomSuffix: true,
 			minDelayMs: 3000,
 			maxDelayMs: 7000,
-			batchPauseEnabled: true,
-			batchSize: 30,
-			batchPauseMs: 180000,
-			randomGreetings: []
+			useGreetingVariations: true,
+			useIntroVariations: true,
+			useClosingVariations: true,
+			greetingPool: [
+				"Merhaba, iyi günler dilerim.",
+				"Merhaba, müsait olduğunuzda kısaca bilgi paylaşmak isterim.",
+				"İyi günler, rahatsız etmiyorumdur umarım.",
+				"Merhabalar, size kısa bir konuda ulaşmak istedim."
+			],
+			introPool: [
+				"Kısaca bilgilendirme yapmak için yazıyorum.",
+				"Sizin için faydalı olabileceğini düşündüğüm bir konu hakkında ulaşmak istedim.",
+				"Hizmetimiz hakkında kısa bir bilgi paylaşmak isterim.",
+				"Yoğunluğunuzu biliyorum, kısaca bilgi ileteceğim.",
+				"Yanlış zamanda yazdıysam kusura bakmayın, kısa bir bilgi paylaşacağım."
+			],
+			closingPool: [
+				"Uygun olursanız detay paylaşabilirim.",
+				"İlginiz olursa memnuniyetle yardımcı olurum.",
+				"Dönüş yapmanız durumunda bilgi verebilirim.",
+				"Rahatsızlık verdiysem kusura bakmayın, iyi günler dilerim.",
+				"İyi çalışmalar dilerim."
+			]
 		};
 		const legacyMinDelaySec = Number((input as any)?.minDelaySec);
 		const legacyMaxDelaySec = Number((input as any)?.maxDelaySec);
-		const legacyBatchPauseSeconds = Number((input as any)?.batchPauseSeconds);
 		const minDelayMs = Math.max(
-			600,
+			400,
 			Math.min(60000, Number(input?.minDelayMs ?? (Number.isFinite(legacyMinDelaySec) ? legacyMinDelaySec * 1000 : base.minDelayMs)))
 		);
 		const maxDelayMsRaw = Math.max(
-			600,
+			400,
 			Math.min(120000, Number(input?.maxDelayMs ?? (Number.isFinite(legacyMaxDelaySec) ? legacyMaxDelaySec * 1000 : base.maxDelayMs)))
 		);
 		const maxDelayMs = Math.max(minDelayMs, maxDelayMsRaw);
-		const normalizedGreetings = parseRandomGreetings(
-			(input as any)?.randomGreetings ?? (input as any)?.randomGreetingsText
-		);
+		const greetingPool = parseVariationPool((input as any)?.greetingPool ?? (input as any)?.randomGreetings ?? base.greetingPool);
+		const introPool = parseVariationPool((input as any)?.introPool ?? base.introPool);
+		const closingPool = parseVariationPool((input as any)?.closingPool ?? base.closingPool);
 		return {
 			addRandomSuffix: input?.addRandomSuffix ?? base.addRandomSuffix,
 			minDelayMs,
 			maxDelayMs,
-			batchPauseEnabled: input?.batchPauseEnabled ?? base.batchPauseEnabled,
-			batchSize: Math.max(5, Math.min(200, Number(input?.batchSize ?? base.batchSize))),
-			batchPauseMs: Math.max(
-				30000,
-				Math.min(3600000, Number(input?.batchPauseMs ?? (Number.isFinite(legacyBatchPauseSeconds) ? legacyBatchPauseSeconds * 1000 : base.batchPauseMs)))
-			),
-			randomGreetings: normalizedGreetings
+			useGreetingVariations: input?.useGreetingVariations ?? base.useGreetingVariations,
+			useIntroVariations: input?.useIntroVariations ?? base.useIntroVariations,
+			useClosingVariations: input?.useClosingVariations ?? base.useClosingVariations,
+			greetingPool: ensurePoolValues(greetingPool, base.greetingPool),
+			introPool: ensurePoolValues(introPool, base.introPool),
+			closingPool: ensurePoolValues(closingPool, base.closingPool)
 		};
 	}
 
@@ -164,32 +256,109 @@
 			const raw = localStorage.getItem(ANTIBAN_STORAGE_KEY);
 			if (!raw) return;
 			antiBan = normalizeAntiBanSettings(JSON.parse(raw) as Partial<AntiBanSettings>);
-			randomGreetingsText = antiBan.randomGreetings.join('\n');
+			syncPoolTextsFromAntiBan();
+			lastSavedAntiBanSnapshot = JSON.stringify(antiBan);
 		} catch (e) {
 			console.error("Anti-ban settings load error:", e);
 		}
 	}
 
-	function saveAntiBanSettings() {
+	function saveAntiBanSettings(showToast = false) {
 		if (building) return;
 		try {
-			const next = normalizeAntiBanSettings({
-				...antiBan,
-				randomGreetings: parseRandomGreetings(randomGreetingsText)
-			});
+			antiBan.greetingPool = parseVariationPool(greetingPoolText);
+			antiBan.introPool = parseVariationPool(introPoolText);
+			antiBan.closingPool = parseVariationPool(closingPoolText);
+			const next = normalizeAntiBanSettings(antiBan);
+			const nextSnapshot = JSON.stringify(next);
+			if (nextSnapshot === lastSavedAntiBanSnapshot) return;
 			antiBan = next;
-			randomGreetingsText = next.randomGreetings.join('\n');
+			syncPoolTextsFromAntiBan();
 			localStorage.setItem(ANTIBAN_STORAGE_KEY, JSON.stringify(next));
-			toast.success("Ban koruma ayarları kaydedildi.");
+			lastSavedAntiBanSnapshot = nextSnapshot;
+			antiBanSaveMessage = "Kaydedildi";
+			const savedAt = Date.now();
+			setTimeout(() => {
+				if (Date.now() - savedAt >= 3000) antiBanSaveMessage = "";
+			}, 3000);
+			if (showToast) toast.success("Ban koruma ayarları kaydedildi.");
 		} catch (e) {
 			console.error("Anti-ban settings save error:", e);
-			toast.error("Ayarlar kaydedilemedi.");
+			if (showToast) toast.error("Ayarlar kaydedilemedi.");
 		}
 	}
+
+	function saveAntiBanFlagsToServer(showToast = false) {
+		if (building || !antiBanHydrated) return;
+		try {
+			const flagsSnapshot = JSON.stringify({
+				useGreetingVariations: antiBan.useGreetingVariations,
+				useIntroVariations: antiBan.useIntroVariations,
+				useClosingVariations: antiBan.useClosingVariations
+			});
+			if (flagsSnapshot === lastSavedAntiBanFlagsSnapshot) return;
+
+			fetch('/api/settings', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					useGreetingVariations: antiBan.useGreetingVariations,
+					useIntroVariations: antiBan.useIntroVariations,
+					useClosingVariations: antiBan.useClosingVariations
+				})
+			}).then((res) => {
+				if (!res.ok) throw new Error('Failed to save anti-ban flags');
+				lastSavedAntiBanFlagsSnapshot = flagsSnapshot;
+				antiBanSaveMessage = 'Kaydedildi';
+				const savedAt = Date.now();
+				setTimeout(() => {
+					if (Date.now() - savedAt >= 3000) antiBanSaveMessage = '';
+				}, 3000);
+				if (showToast) toast.success('Ban koruma ayarları kaydedildi.');
+			}).catch((error) => {
+				console.error('Anti-ban flags save error:', error);
+				if (showToast) toast.error('Ayarlar kaydedilemedi.');
+			});
+		} catch (e) {
+			console.error("Anti-ban flags save error:", e);
+			if (showToast) toast.error("Ayarlar kaydedilemedi.");
+		}
+	}
+
+	$effect(() => {
+		if (building || !antiBanHydrated) return;
+		antiBan.addRandomSuffix;
+		antiBan.useGreetingVariations;
+		antiBan.useIntroVariations;
+		antiBan.useClosingVariations;
+		greetingPoolText;
+		introPoolText;
+		closingPoolText;
+
+		const timer = setTimeout(() => {
+			saveAntiBanSettings(false);
+		}, 200);
+
+		return () => clearTimeout(timer);
+	});
+
+	$effect(() => {
+		if (building || !antiBanHydrated) return;
+		antiBan.useGreetingVariations;
+		antiBan.useIntroVariations;
+		antiBan.useClosingVariations;
+
+		const timer = setTimeout(() => {
+			saveAntiBanFlagsToServer(false);
+		}, 200);
+
+		return () => clearTimeout(timer);
+	});
 
 	onMount(() => {
 		fetchSettings();
 		loadAntiBanSettings();
+		syncPoolTextsFromAntiBan();
 
 		const root = document.documentElement;
 		const observer = new MutationObserver(() => {
@@ -211,17 +380,26 @@
 <div class="p-6 max-w-6xl mx-auto space-y-6">
 	<div class="flex items-center justify-between">
 		<h1 class="text-3xl font-bold tracking-tight">Ayarlar</h1>
-		{#if isSaving}
-			<div class="flex items-center gap-2 text-muted-foreground text-sm">
-				<Loader2 class="w-4 h-4 animate-spin" />
-				Kaydediliyor...
-			</div>
-		{:else if saveMessage}
-			<div class="flex items-center gap-2 text-green-600 text-sm animate-in fade-in slide-in-from-right-2">
-				<CheckCircle2 class="w-4 h-4" />
-				{saveMessage}
-			</div>
-		{/if}
+		<div class="flex flex-col items-end gap-1 min-h-10 justify-center">
+			{#if isSaving}
+				<div class="flex items-center gap-2 text-muted-foreground text-sm">
+					<Loader2 class="w-4 h-4 animate-spin" />
+					Kaydediliyor...
+				</div>
+			{/if}
+			{#if saveMessage}
+				<div class="flex items-center gap-2 text-green-600 text-sm animate-in fade-in slide-in-from-right-2">
+					<CheckCircle2 class="w-4 h-4" />
+					{saveMessage}
+				</div>
+			{/if}
+			{#if antiBanSaveMessage}
+				<div class="flex items-center gap-2 text-green-600 text-sm animate-in fade-in slide-in-from-right-2">
+					<CheckCircle2 class="w-4 h-4" />
+					{antiBanSaveMessage}
+				</div>
+			{/if}
+		</div>
 	</div>
 
 	{#if isLoading}
@@ -253,6 +431,93 @@
 						</div>
 						<Switch checked={settings.darkMode} onCheckedChange={(checked) => setBooleanValue('darkMode', checked === true)} />
 					</div>
+
+					<div class="rounded-lg border p-3 space-y-3">
+						<div class="flex items-center justify-between">
+							<Label class="text-sm">Toplu Mesaj Gecikmesi</Label>
+							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.messageDelay} ms</span>
+						</div>
+						<div class="flex items-center gap-3">
+							<input
+								type="range"
+								min="400"
+								max="10000"
+								step="100"
+								value={settings.messageDelay}
+								oninput={(e) => handleMessageDelayChange(parseInt((e.target as HTMLInputElement).value))}
+								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
+							/>
+							<Input
+								type="number"
+								min="400"
+								max="10000"
+								step="100"
+								value={settings.messageDelay}
+								onchange={(e) => handleMessageDelayChange(parseInt((e.target as HTMLInputElement).value))}
+								class="h-8 w-20 text-xs font-mono text-center"
+							/>
+						</div>
+						<div class="flex justify-between text-[10px] text-muted-foreground uppercase tracking-widest font-bold">
+							<span class="opacity-50">400 ms</span>
+							<span class="opacity-50">10.000 ms</span>
+						</div>
+					</div>
+
+					<div class="rounded-lg border p-3 space-y-3">
+						<div class="flex items-center justify-between">
+							<Label class="text-sm">Toplu Gönderimde Mesaj Sayısı</Label>
+							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchSize}</span>
+						</div>
+						<div class="flex items-center gap-3">
+							<input
+								type="range"
+								min="20"
+								max="300"
+								step="1"
+								value={settings.batchSize}
+								oninput={(e) => handleBatchSizeChange(parseInt((e.target as HTMLInputElement).value))}
+								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
+							/>
+							<Input
+								type="number"
+								min="20"
+								max="300"
+								step="1"
+								value={settings.batchSize}
+								onchange={(e) => handleBatchSizeChange(parseInt((e.target as HTMLInputElement).value))}
+								class="h-8 w-20 text-xs font-mono text-center"
+							/>
+						</div>
+						<p class="text-xs text-muted-foreground">Her batch için 20 ile bu değer arasında rastgele hedef seçilir.</p>
+					</div>
+
+					<div class="rounded-lg border p-3 space-y-3">
+						<div class="flex items-center justify-between">
+							<Label class="text-sm">Toplu Gönderimde Bekleme (dk)</Label>
+							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchWaitMinutes}</span>
+						</div>
+						<div class="flex items-center gap-3">
+							<input
+								type="range"
+								min="3"
+								max="30"
+								step="1"
+								value={settings.batchWaitMinutes}
+								oninput={(e) => handleBatchWaitChange(parseInt((e.target as HTMLInputElement).value))}
+								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
+							/>
+							<Input
+								type="number"
+								min="3"
+								max="30"
+								step="1"
+								value={settings.batchWaitMinutes}
+								onchange={(e) => handleBatchWaitChange(parseInt((e.target as HTMLInputElement).value))}
+								class="h-8 w-20 text-xs font-mono text-center"
+							/>
+						</div>
+						<p class="text-xs text-muted-foreground">Batch tamamlandığında 3 ile bu değer arasında rastgele dakika beklenir.</p>
+					</div>
 				</Card.Content>
 			</Card.Root>
 
@@ -277,109 +542,45 @@
 							</div>
 						</label>
 
-						<!-- Delay Range -->
-						<div class="space-y-1.5">
+						<div class="space-y-2 rounded-lg border p-3">
 							<div class="flex items-center justify-between">
-								<Label class="text-sm">Mesajlar Arası Bekleme (ms)</Label>
-								<span class="text-xs font-mono text-primary bg-muted px-2 py-1 rounded">{antiBan.minDelayMs} - {antiBan.maxDelayMs} ms</span>
+								<Label class="text-sm">Selamlama Varyasyonu</Label>
+								<Switch checked={antiBan.useGreetingVariations} onCheckedChange={(checked) => antiBan.useGreetingVariations = checked === true} />
 							</div>
-							<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-								<div>
-									<span class="block text-xs text-muted-foreground mb-1">Min. Bekleme: {antiBan.minDelayMs} ms</span>
-									<input
-										type="range"
-										min="600"
-										max="120000"
-										step="100"
-										bind:value={antiBan.minDelayMs}
-										oninput={() => {
-											if (antiBan.minDelayMs > antiBan.maxDelayMs) {
-												antiBan.maxDelayMs = antiBan.minDelayMs;
-											}
-										}}
-										class="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-									/>
-								</div>
-								<div>
-									<span class="block text-xs text-muted-foreground mb-1">Max. Bekleme: {antiBan.maxDelayMs} ms</span>
-									<input
-										type="range"
-										min="600"
-										max="120000"
-										step="100"
-										bind:value={antiBan.maxDelayMs}
-										oninput={() => {
-											if (antiBan.maxDelayMs < antiBan.minDelayMs) {
-												antiBan.minDelayMs = antiBan.maxDelayMs;
-											}
-										}}
-										class="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-									/>
-								</div>
-							</div>
-							<div class="flex justify-between text-[10px] text-muted-foreground uppercase tracking-widest font-bold">
-								<span class="opacity-50">600 ms</span>
-								<span class="opacity-50">120.000 ms</span>
-							</div>
-						</div>
-
-						<div class="space-y-2">
-							<Label class="text-sm">Mesaj Başına Eklenecek Hitaplar</Label>
-							<p class="text-xs text-muted-foreground">Her satıra bir hitap yazın. Kayitli \n ifadeleri otomatik olarak satira cevrilir. Ornek satirlar: Selamlar, Iyi gunler, Merhaba</p>
 							<Textarea
-								bind:value={randomGreetingsText}
-								placeholder="Selamlar\nIyi gunler\nMerhaba"
-								class="min-h-28 text-sm"
+								rows={3}
+								placeholder={"Satır başına bir selamlama yazın"}
+								bind:value={greetingPoolText}
+								class="text-sm"
 							/>
 						</div>
 
-						<!-- Batch Pause -->
-						<div class="space-y-3">
-							<label class="flex items-start gap-3 cursor-pointer">
-								<input type="checkbox" bind:checked={antiBan.batchPauseEnabled} class="mt-0.5 accent-primary" />
-								<div>
-									<span class="text-sm font-medium">Toplu gönderim molası</span>
-									<p class="text-xs text-muted-foreground mt-0.5">Belirli sayıda mesajdan sonra uzun bir mola verilir.</p>
-								</div>
-							</label>
-							{#if antiBan.batchPauseEnabled}
-							<div class="grid grid-cols-2 gap-3 pl-6">
-								<div>
-									<span class="block text-xs text-muted-foreground mb-1">Her kaç mesajda bir</span>
-									<Input
-										type="number"
-										min="5"
-										max="200"
-										bind:value={antiBan.batchSize}
-										class="h-9 text-sm font-mono"
-									/>
-								</div>
-								<div>
-									<span class="block text-xs text-muted-foreground mb-1">Mola süresi (ms)</span>
-									<Input
-										type="number"
-										min="30000"
-										max="3600000"
-										step="1000"
-										bind:value={antiBan.batchPauseMs}
-										class="h-9 text-sm font-mono"
-									/>
-								</div>
+						<div class="space-y-2 rounded-lg border p-3">
+							<div class="flex items-center justify-between">
+								<Label class="text-sm">Giriş Varyasyonu</Label>
+								<Switch checked={antiBan.useIntroVariations} onCheckedChange={(checked) => antiBan.useIntroVariations = checked === true} />
 							</div>
-							{/if}
+							<Textarea
+								rows={3}
+								placeholder={"Satır başına bir giriş cümlesi yazın"}
+								bind:value={introPoolText}
+								class="text-sm"
+							/>
 						</div>
 
-						<div class="pt-1 flex justify-end">
-							<Button
-								type="button"
-								variant="outline"
-								size="sm"
-								onclick={saveAntiBanSettings}
-								class="h-9 rounded-lg text-sm"
-							>
-								<Save class="w-4 h-4 mr-2" /> Kaydet
-							</Button>
+						<div class="space-y-2 rounded-lg border p-3">
+							<div class="flex items-center justify-between">
+								<Label class="text-sm">Kapanış Varyasyonu</Label>
+								<Switch checked={antiBan.useClosingVariations} onCheckedChange={(checked) => antiBan.useClosingVariations = checked === true} />
+							</div>
+							<Textarea
+								rows={3}
+								placeholder={"Satır başına bir kapanış cümlesi yazın"}
+								bind:value={closingPoolText}
+								class="text-sm"
+							/>
 						</div>
+
 					</Card.Content>
 				</Card.Root>
 			</div>
