@@ -1014,6 +1014,10 @@ export async function initializeWhatsApp(accountId: string) {
                         ? jidForSave
                         : `${canonicalDirectNumber}@s.whatsapp.net`;
 
+                    if (!isGroupJid && !canonicalDirectNumber) {
+                        continue;
+                    }
+
                     await dbInst.insert(messagesTable).values({
                         id: messageId,
                         accountId,

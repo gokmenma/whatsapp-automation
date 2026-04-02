@@ -22,8 +22,6 @@ function resolveDirectConversationNumber(accountId: string, jidOrNumber: string)
 
     // Keep plain phone JIDs strict to avoid accidental merges.
     if ((domain === 's.whatsapp.net' || domain === 'c.us') && digits) {
-        const mapped = getCanonicalContactNumber(accountId, raw);
-        if (mapped && mapped !== digits) return mapped;
         return digits;
     }
 
@@ -94,7 +92,6 @@ export const GET: RequestHandler = async ({ url, locals }) => {
     const byCanonical = new Map<string, any>();
     const unreadByConversation = new Map<string, number>();
     const unreadPreviewByConversation = new Map<string, any>();
-    const latestOutgoingAtByConversation = new Map<string, number>();
 
     function normalizeTs(value: unknown) {
         const n = Number(value || 0);
@@ -114,19 +111,8 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         return body;
     }
 
-    for (const row of rows as any[]) {
-        const jid = String(row.contact_jid || '');
-        const isGroup = jid.endsWith('@g.us');
-        const conversationKey = isGroup ? jid : resolveDirectConversationNumber(accountId, jid);
-        if (!conversationKey) continue;
-        if (!Boolean(row.from_me)) continue;
-
-        const ts = normalizeTs(row.timestamp);
-        if (ts > (latestOutgoingAtByConversation.get(conversationKey) || 0)) {
-            latestOutgoingAtByConversation.set(conversationKey, ts);
-        }
-    }
-
+    // Pass 1: collect unread counts/previews from the full history first.
+    // Rows are DESC by timestamp, so first unread hit per conversation is the latest unread preview.
     for (const row of rows as any[]) {
         const jid = String(row.contact_jid || '');
         const isGroup = jid.endsWith('@g.us');
@@ -143,8 +129,7 @@ export const GET: RequestHandler = async ({ url, locals }) => {
             row.status !== 'read' &&
             row.status !== 'played' &&
             row.status !== 'deleted_me' &&
-            row.status !== 'deleted_everyone' &&
-            normalizeTs(row.timestamp) > (latestOutgoingAtByConversation.get(conversationKey) || 0);
+            row.status !== 'deleted_everyone';
         if (isUnread) {
             unreadByConversation.set(conversationKey, (unreadByConversation.get(conversationKey) || 0) + 1);
             if (!unreadPreviewByConversation.has(conversationKey)) {
@@ -157,6 +142,19 @@ export const GET: RequestHandler = async ({ url, locals }) => {
                 });
             }
         }
+    }
+
+    // Pass 2: create conversation list from latest message rows.
+    for (const row of rows as any[]) {
+        const jid = String(row.contact_jid || '');
+        const isGroup = jid.endsWith('@g.us');
+        const number = isGroup ? jid.split('@')[0] : resolveDirectConversationNumber(accountId, jid);
+        if (!number) continue;
+        if (!isGroup && selfNumber && number === selfNumber) continue;
+        const rowBody = String(row.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+        const isGhostRow = !row.media_type && !rowBody && row.status !== 'deleted_me' && row.status !== 'deleted_everyone';
+        if (isGhostRow) continue;
+        const conversationKey = isGroup ? jid : number;
 
         if (byCanonical.has(conversationKey)) continue; // already have latest due to DESC order
 
@@ -189,6 +187,18 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 
     const conversations = Array.from(byCanonical.values())
         .sort((a, b) => Number(b.lastMessageAt || 0) - Number(a.lastMessageAt || 0));
+
+    if (process.env.NODE_ENV !== 'production') {
+        const probe = conversations.find((item) => String(item?.contactJid || '').includes('905409432723'));
+        console.log('[messages-api] account=%s conversations=%d probe=%j', accountId, conversations.length, probe ? {
+            contactJid: probe.contactJid,
+            lastMessage: probe.lastMessage,
+            lastMessageStatus: probe.lastMessageStatus,
+            lastMessageAt: probe.lastMessageAt,
+            unreadCount: probe.unreadCount,
+            unreadPreview: probe.unreadPreview
+        } : null);
+    }
 
     return json({ conversations });
 };
