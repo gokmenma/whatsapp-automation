@@ -9,6 +9,7 @@
 	import { Textarea } from "$lib/components/ui/textarea/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Loader2, CheckCircle2, Save } from "@lucide/svelte";
+	import { setMode } from "mode-watcher";
 
 	// --- Server settings ---
 	let settings = $state({
@@ -22,16 +23,27 @@
 	let lastSaved = $state(0);
 	let saveMessage = $state("");
 
+	function readBooleanFlag(value: unknown) {
+		if (typeof value === 'boolean') return value;
+		if (typeof value === 'number') return value === 1;
+		if (typeof value === 'string') {
+			const normalized = value.trim().toLowerCase();
+			return normalized === '1' || normalized === 'true';
+		}
+		return false;
+	}
+
 	async function fetchSettings() {
 		try {
 			const res = await fetch('/api/settings');
 			const data = await res.json();
 			if (data) {
 				settings = {
-					readReceipt: !!data.readReceipt,
-					darkMode: !!data.darkMode,
+					readReceipt: readBooleanFlag(data.readReceipt),
+					darkMode: readBooleanFlag(data.darkMode),
 					messageDelay: data.messageDelay || 2000
 				};
+				setMode(settings.darkMode ? 'dark' : 'light');
 			}
 		} catch (e) {
 			console.error("Fetch settings error:", e);
@@ -63,11 +75,13 @@
 		}
 	}
 
-	function toggleValue(key: keyof typeof settings) {
-		if (typeof settings[key] === 'boolean') {
-			(settings[key] as boolean) = !settings[key];
-			saveSettings();
+	function setBooleanValue(key: keyof typeof settings, nextValue: boolean) {
+		if (typeof settings[key] !== 'boolean') return;
+		(settings[key] as boolean) = nextValue;
+		if (key === 'darkMode') {
+			setMode(nextValue ? 'dark' : 'light');
 		}
+		saveSettings();
 	}
 
 	// --- Anti-ban settings (localStorage) ---
@@ -176,6 +190,21 @@
 	onMount(() => {
 		fetchSettings();
 		loadAntiBanSettings();
+
+		const root = document.documentElement;
+		const observer = new MutationObserver(() => {
+			const isDark = root.classList.contains('dark');
+			if (settings.darkMode !== isDark) {
+				settings.darkMode = isDark;
+				saveSettings();
+			}
+		});
+
+		observer.observe(root, { attributes: true, attributeFilter: ['class'] });
+
+		return () => {
+			observer.disconnect();
+		};
 	});
 </script>
 
@@ -214,7 +243,7 @@
 							<Label>Okundu Bilgisi Gönder</Label>
 							<p class="text-sm text-muted-foreground">Mesajlar okunduğunda karşı tarafa bilgi verir.</p>
 						</div>
-						<Switch checked={settings.readReceipt} onCheckedChange={() => toggleValue('readReceipt')} />
+						<Switch checked={settings.readReceipt} onCheckedChange={(checked) => setBooleanValue('readReceipt', checked === true)} />
 					</div>
 
 					<div class="flex items-center justify-between">
@@ -222,7 +251,7 @@
 							<Label>Karanlık Mod</Label>
 							<p class="text-sm text-muted-foreground">Uygulama temasını değiştirir.</p>
 						</div>
-						<Switch checked={settings.darkMode} onCheckedChange={() => toggleValue('darkMode')} />
+						<Switch checked={settings.darkMode} onCheckedChange={(checked) => setBooleanValue('darkMode', checked === true)} />
 					</div>
 				</Card.Content>
 			</Card.Root>

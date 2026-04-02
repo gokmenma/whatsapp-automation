@@ -1,5 +1,5 @@
 import { db } from '$lib/server/db';
-import { accounts, users } from '$lib/server/db/schema';
+import { accounts, users, userSettings } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { getAllAccounts } from '$lib/whatsapp';
 
@@ -9,10 +9,12 @@ export const load = async ({ locals }) => {
     const dbAccounts = await db.select().from(accounts).where(eq(accounts.userId, locals.user.id)).all();
     const liveAccounts = getAllAccounts(dbAccounts);
     const user = await db.select().from(users).where(eq(users.id, locals.user.id)).get();
+    const settings = await db.select().from(userSettings).where(eq(userSettings.userId, locals.user.id)).get();
 
     return {
         user: locals.user,
         accounts: liveAccounts,
-        credits: user?.credits ?? 0
+        credits: user?.credits ?? 0,
+        darkMode: settings?.darkMode !== false
     };
 };
