@@ -20,6 +20,8 @@ export const GET = async ({ locals }) => {
             useGreetingVariations: true,
             useIntroVariations: true,
             useClosingVariations: true,
+            rejectMessageCheckEnabled: false,
+            rejectKeywords: 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum',
         };
         await db.insert(userSettings).values(newSettings);
         settings = newSettings;
@@ -49,6 +51,13 @@ export const POST = async ({ request, locals }) => {
     if (body.batchWaitMinutes !== undefined) {
         if (body.batchWaitMinutes < 3 || body.batchWaitMinutes > 30) {
             return json({ error: 'Batch wait time must be between 3 and 30 minutes' }, { status: 400 });
+        }
+    }
+
+    if (body.rejectKeywords !== undefined) {
+        const normalizedKeywords = String(body.rejectKeywords || '').trim();
+        if (normalizedKeywords.length > 2000) {
+            return json({ error: 'Reject keywords length must be 2000 characters or less' }, { status: 400 });
         }
     }
 

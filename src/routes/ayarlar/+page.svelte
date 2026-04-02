@@ -17,7 +17,9 @@
 		darkMode: true,
 		messageDelay: 2000,
 		batchSize: 25,
-		batchWaitMinutes: 5
+		batchWaitMinutes: 5,
+		rejectMessageCheckEnabled: false,
+		rejectKeywords: 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum'
 	});
 
 	let isLoading = $state(true);
@@ -42,6 +44,21 @@
 		return false;
 	}
 
+	function parseRejectKeywords(input?: string): string[] {
+		return Array.from(
+			new Set(
+				String(input || '')
+					.split(/\r?\n|,/)
+					.map((item) => item.trim())
+					.filter((item) => item.length > 0)
+			)
+		).slice(0, 100);
+	}
+
+	function formatRejectKeywords(input?: string[]): string {
+		return (input ?? []).join('\n');
+	}
+
 	async function fetchSettings() {
 		try {
 			const res = await fetch('/api/settings');
@@ -52,7 +69,9 @@
 					darkMode: readBooleanFlag(data.darkMode),
 					messageDelay: data.messageDelay || 2000,
 					batchSize: data.batchSize || 25,
-					batchWaitMinutes: data.batchWaitMinutes || 5
+					batchWaitMinutes: data.batchWaitMinutes || 5,
+					rejectMessageCheckEnabled: readBooleanFlag(data.rejectMessageCheckEnabled),
+					rejectKeywords: formatRejectKeywords(parseRejectKeywords(data.rejectKeywords)) || 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum'
 				};
 				setMode(settings.darkMode ? 'dark' : 'light');
 				if (typeof data.useGreetingVariations === 'boolean') antiBan.useGreetingVariations = data.useGreetingVariations;
@@ -71,6 +90,8 @@
 		isSaving = true;
 		saveMessage = "";
 		try {
+			settings.rejectKeywords = formatRejectKeywords(parseRejectKeywords(settings.rejectKeywords));
+
 			const res = await fetch('/api/settings', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -376,7 +397,7 @@
 	});
 </script>
 
-<div class="p-6 max-w-6xl mx-auto space-y-6">
+<div class="p-6 w-full space-y-6">
 	<div class="flex items-center justify-between">
 		<h1 class="text-3xl font-bold tracking-tight">Ayarlar</h1>
 		<div class="flex flex-col items-end gap-1 min-h-10 justify-center">
@@ -406,7 +427,7 @@
 			<Loader2 class="w-8 h-8 animate-spin text-primary opacity-50" />
 		</div>
 	{:else}
-		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+		<div class="grid grid-cols-1 lg:grid-cols-[430px_minmax(0,1fr)] gap-6 items-start w-full">
 
 			<!-- Sol Kolon: Profil Ayarları -->
 			<Card.Root>
@@ -521,7 +542,7 @@
 			</Card.Root>
 
 			<!-- Sağ Kolon: Ban Ayarları -->
-			<div class="space-y-6">
+			<div class="space-y-6 min-w-0">
 				<!-- Ban Koruma Ayarları -->
 				<Card.Root>
 					<Card.Header>
@@ -532,52 +553,76 @@
 						<Card.Description>Hesabınızın spam tespitinden korunması için gönderim davranışını ayarlayın.</Card.Description>
 					</Card.Header>
 					<Card.Content class="space-y-5">
-						<!-- Random Suffix -->
-						<label class="flex items-start gap-3 cursor-pointer">
-							<input type="checkbox" bind:checked={antiBan.addRandomSuffix} class="mt-0.5 accent-primary" />
-							<div>
-								<span class="text-sm font-medium">Gizli rastgele sayı ekle</span>
-								<p class="text-xs text-muted-foreground mt-0.5">Her mesajın sonuna görünmez rastgele bir sayı eklenir; aynı içerikli mesajlar tekil görünür.</p>
-							</div>
-						</label>
+						<div class="grid grid-cols-1 xl:grid-cols-[1.25fr_1fr] gap-4 items-start">
+							<div class="space-y-3">
+								<!-- Random Suffix -->
+								<div class="flex items-start justify-between gap-3 rounded-lg border p-3">
+									<div>
+										<Label class="text-sm">Gizli rastgele sayı ekle</Label>
+										<p class="text-xs text-muted-foreground mt-0.5">Her mesajın sonuna görünmez rastgele bir sayı eklenir; aynı içerikli mesajlar tekil görünür.</p>
+									</div>
+									<Switch checked={antiBan.addRandomSuffix} onCheckedChange={(checked) => antiBan.addRandomSuffix = checked === true} />
+								</div>
 
-						<div class="space-y-2 rounded-lg border p-3">
-							<div class="flex items-center justify-between">
-								<Label class="text-sm">Selamlama Varyasyonu</Label>
-								<Switch checked={antiBan.useGreetingVariations} onCheckedChange={(checked) => antiBan.useGreetingVariations = checked === true} />
-							</div>
-							<Textarea
-								rows={3}
-								placeholder={"Satır başına bir selamlama yazın"}
-								bind:value={greetingPoolText}
-								class="text-sm"
-							/>
-						</div>
+								<div class="space-y-2 rounded-lg border p-3">
+									<div class="flex items-center justify-between">
+										<div>
+											<Label class="text-sm">Mesaj Red Kontrolü Yap</Label>
+											<p class="text-xs text-muted-foreground mt-0.5">Gönderimden önce, karşı tarafın son 5 gelen mesajında red ifadesi varsa o numara atlanır.</p>
+										</div>
+										<Switch checked={settings.rejectMessageCheckEnabled} onCheckedChange={(checked) => setBooleanValue('rejectMessageCheckEnabled', checked === true)} />
+									</div>
+									<Textarea
+										rows={3}
+										placeholder={"Satır başına bir red ifadesi yazın"}
+										bind:value={settings.rejectKeywords}
+										onchange={() => saveSettings()}
+										class="text-sm"
+									/>
+									<p class="text-[11px] text-muted-foreground">Örnek: Mesaj Red, Red, Mesaj Ret, Ret, Mesaj Almak İstemiyorum</p>
+								</div>
 
-						<div class="space-y-2 rounded-lg border p-3">
-							<div class="flex items-center justify-between">
-								<Label class="text-sm">Giriş Varyasyonu</Label>
-								<Switch checked={antiBan.useIntroVariations} onCheckedChange={(checked) => antiBan.useIntroVariations = checked === true} />
+								<div class="space-y-2 rounded-lg border p-3">
+									<div class="flex items-center justify-between">
+										<Label class="text-sm">Selamlama Varyasyonu</Label>
+										<Switch checked={antiBan.useGreetingVariations} onCheckedChange={(checked) => antiBan.useGreetingVariations = checked === true} />
+									</div>
+									<Textarea
+										rows={4}
+										placeholder={"Satır başına bir selamlama yazın"}
+										bind:value={greetingPoolText}
+										class="text-sm"
+									/>
+								</div>
 							</div>
-							<Textarea
-								rows={3}
-								placeholder={"Satır başına bir giriş cümlesi yazın"}
-								bind:value={introPoolText}
-								class="text-sm"
-							/>
-						</div>
 
-						<div class="space-y-2 rounded-lg border p-3">
-							<div class="flex items-center justify-between">
-								<Label class="text-sm">Kapanış Varyasyonu</Label>
-								<Switch checked={antiBan.useClosingVariations} onCheckedChange={(checked) => antiBan.useClosingVariations = checked === true} />
+							<div class="space-y-3">
+								<div class="space-y-2 rounded-lg border p-3">
+									<div class="flex items-center justify-between">
+										<Label class="text-sm">Giriş Varyasyonu</Label>
+										<Switch checked={antiBan.useIntroVariations} onCheckedChange={(checked) => antiBan.useIntroVariations = checked === true} />
+									</div>
+									<Textarea
+										rows={7}
+										placeholder={"Satır başına bir giriş cümlesi yazın"}
+										bind:value={introPoolText}
+										class="text-sm"
+									/>
+								</div>
+
+								<div class="space-y-2 rounded-lg border p-3">
+									<div class="flex items-center justify-between">
+										<Label class="text-sm">Kapanış Varyasyonu</Label>
+										<Switch checked={antiBan.useClosingVariations} onCheckedChange={(checked) => antiBan.useClosingVariations = checked === true} />
+									</div>
+									<Textarea
+										rows={7}
+										placeholder={"Satır başına bir kapanış cümlesi yazın"}
+										bind:value={closingPoolText}
+										class="text-sm"
+									/>
+								</div>
 							</div>
-							<Textarea
-								rows={3}
-								placeholder={"Satır başına bir kapanış cümlesi yazın"}
-								bind:value={closingPoolText}
-								class="text-sm"
-							/>
 						</div>
 
 						<div class="flex justify-end">

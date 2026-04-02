@@ -38,6 +38,8 @@ export const userSettings = sqliteTable('user_settings', {
     useGreetingVariations: integer('use_greeting_variations', { mode: 'boolean' }).notNull().default(true),
     useIntroVariations: integer('use_intro_variations', { mode: 'boolean' }).notNull().default(true),
     useClosingVariations: integer('use_closing_variations', { mode: 'boolean' }).notNull().default(true),
+    rejectMessageCheckEnabled: integer('reject_message_check_enabled', { mode: 'boolean' }).notNull().default(false),
+    rejectKeywords: text('reject_keywords').notNull().default('mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum'),
 });
 
 export const autoReplyHistory = sqliteTable('auto_reply_history', {

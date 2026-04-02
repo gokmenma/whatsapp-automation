@@ -7,6 +7,7 @@
 	import { Input } from "$lib/components/ui/input";
 	import { Textarea } from "$lib/components/ui/textarea";
 	import { Label } from "$lib/components/ui/label";
+	import { Switch } from "$lib/components/ui/switch";
 	import { Progress } from "$lib/components/ui/progress";
 	import { Checkbox } from "$lib/components/ui/checkbox";
 	import { Badge } from "$lib/components/ui/badge";
@@ -371,10 +372,30 @@
 		messageDelay: 2000,
 		batchSize: 25,
 		batchWaitMinutes: 5,
+		rejectMessageCheckEnabled: false,
 		useGreetingVariations: true,
 		useIntroVariations: true,
 		useClosingVariations: true
 	});
+
+	async function setRejectMessageCheckEnabled(nextValue: boolean) {
+		const previousValue = userSettings.rejectMessageCheckEnabled;
+		userSettings.rejectMessageCheckEnabled = nextValue;
+
+		try {
+			const res = await fetch('/api/settings', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ rejectMessageCheckEnabled: nextValue })
+			});
+
+			if (!res.ok) throw new Error('Mesaj red kontrol ayarı kaydedilemedi.');
+		} catch (error) {
+			userSettings.rejectMessageCheckEnabled = previousValue;
+			console.error('Reject message check save error:', error);
+			toast.error('Mesaj red kontrol ayarı kaydedilemedi.');
+		}
+	}
 
 	function getRandomInt(min: number, max: number) {
 		return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -545,6 +566,7 @@
 				if (typeof data.messageDelay === 'number') userSettings.messageDelay = data.messageDelay;
 				if (typeof data.batchSize === 'number') userSettings.batchSize = data.batchSize;
 				if (typeof data.batchWaitMinutes === 'number') userSettings.batchWaitMinutes = data.batchWaitMinutes;
+				if (typeof data.rejectMessageCheckEnabled === 'boolean') userSettings.rejectMessageCheckEnabled = data.rejectMessageCheckEnabled;
 				if (typeof data.useGreetingVariations === 'boolean') antiBan.useGreetingVariations = data.useGreetingVariations;
 				if (typeof data.useIntroVariations === 'boolean') antiBan.useIntroVariations = data.useIntroVariations;
 				if (typeof data.useClosingVariations === 'boolean') antiBan.useClosingVariations = data.useClosingVariations;
@@ -665,6 +687,12 @@
 				if (data.success) {
 					sentCount++;
 					sendingResults.push({ to: item.to, message: item.message, status: "Başarılı" });
+					if (data.remainingCredits !== undefined) {
+						userCredits = data.remainingCredits;
+					}
+				} else if (data.skipped) {
+					errorCount++;
+					sendingResults.push({ to: item.to, message: item.message, status: "Atlandı", error: data.error || "Mesaj red kontrolü nedeniyle atlandı" });
 					if (data.remainingCredits !== undefined) {
 						userCredits = data.remainingCredits;
 					}
@@ -937,6 +965,14 @@
 			</p>
 		</div>
 		<div class="flex flex-wrap items-center justify-end gap-3">
+			<div class="h-9 px-3 rounded-full border bg-background/80 shadow-sm flex items-center gap-2">
+				<span class="text-xs font-semibold text-muted-foreground whitespace-nowrap">Mesaj Red Kontrolü</span>
+				<Switch
+					checked={userSettings.rejectMessageCheckEnabled}
+					onCheckedChange={(checked) => setRejectMessageCheckEnabled(checked === true)}
+				/>
+			</div>
+
 			<Badge variant={userCredits > 5 ? "secondary" : "destructive"} class="h-9 px-4 flex items-center gap-2 rounded-full border shadow-sm font-bold text-sm">
 				<div class="w-2 h-2 rounded-full {userCredits > 5 ? 'bg-primary' : 'bg-destructive'} animate-pulse"></div>
 				Kalan Kredi: {userCredits}
