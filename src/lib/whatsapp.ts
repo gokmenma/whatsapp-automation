@@ -36,6 +36,9 @@ if (!globalRef.baileysSessionLocks) globalRef.baileysSessionLocks = new Set<stri
 if (!globalRef.baileysSessionLockHandlersRegistered) globalRef.baileysSessionLockHandlersRegistered = false;
 if (!globalRef.baileysPendingMessageStatuses) globalRef.baileysPendingMessageStatuses = new Map<string, Map<string, string>>();
 if (!globalRef.baileysAvatarCache) globalRef.baileysAvatarCache = new Map<string, { url: string | null; expiresAt: number }>();
+if (!globalRef.baileysBadMacHandlerRegistered) globalRef.baileysBadMacHandlerRegistered = false;
+if (!globalRef.baileysBadMacRecoveryRunning) globalRef.baileysBadMacRecoveryRunning = false;
+if (!globalRef.baileysBadMacRecoveryLastAt) globalRef.baileysBadMacRecoveryLastAt = 0;
 
 interface AccountStatus {
     id: string;
@@ -50,6 +53,55 @@ const statuses: Map<string, AccountStatus> = globalRef.baileysStatuses;
 const heldSessionLocks: Set<string> = globalRef.baileysSessionLocks;
 const pendingMessageStatuses: Map<string, Map<string, string>> = globalRef.baileysPendingMessageStatuses;
 const avatarCache: Map<string, { url: string | null; expiresAt: number }> = globalRef.baileysAvatarCache;
+
+function isBadMacSignalError(reason: unknown) {
+    const errorObj = reason as any;
+    const message = String(errorObj?.message || reason || '').toLowerCase();
+    const stack = String(errorObj?.stack || '').toLowerCase();
+    const combined = `${message}\n${stack}`;
+    return combined.includes('bad mac') || combined.includes('session error');
+}
+
+async function recoverFromBadMac(reason: unknown) {
+    if (globalRef.baileysBadMacRecoveryRunning) return;
+
+    const now = Date.now();
+    const lastAt = Number(globalRef.baileysBadMacRecoveryLastAt || 0);
+    if (now - lastAt < 15000) return;
+
+    globalRef.baileysBadMacRecoveryRunning = true;
+    globalRef.baileysBadMacRecoveryLastAt = now;
+
+    try {
+        const accountIds = Array.from(statuses.entries())
+            .filter(([, status]) => status?.status === 'ready' || status?.status === 'connecting' || status?.status === 'loading')
+            .map(([id]) => id);
+
+        console.warn(`[BadMAC] Signal session error detected. Restarting ${accountIds.length} active account(s).`, reason as any);
+
+        for (const accountId of accountIds) {
+            try {
+                await stopWhatsApp(accountId);
+                await delay(600);
+                await initializeWhatsApp(accountId);
+            } catch (e) {
+                console.error(`[${accountId}] Bad MAC recovery failed:`, e);
+            }
+        }
+    } finally {
+        globalRef.baileysBadMacRecoveryRunning = false;
+    }
+}
+
+function registerBadMacRecoveryHandler() {
+    if (globalRef.baileysBadMacHandlerRegistered) return;
+    globalRef.baileysBadMacHandlerRegistered = true;
+
+    process.on('unhandledRejection', (reason) => {
+        if (!isBadMacSignalError(reason)) return;
+        void recoverFromBadMac(reason);
+    });
+}
 
 function getSessionLockPath(accountId: string) {
     const lockDir = path.join(AUTH_PATH, 'locks');
@@ -139,6 +191,7 @@ function registerSessionLockCleanupHandlers() {
 }
 
 registerSessionLockCleanupHandlers();
+registerBadMacRecoveryHandler();
 
 // A simple in-memory store with persistence
 interface SimpleStore {
