@@ -902,7 +902,7 @@
 											<FileText class="w-6 h-6 text-primary" />
 										</div>
 										<p class="text-sm font-bold text-primary">Dosyadaki Medyalar Kullanılıyor</p>
-										<p class="text-[11px] text-muted-foreground mt-1 max-w-[200px]">Gönderim sırasında her numara için Excel'deki dosya yolu kullanılacaktır.</p>
+										<p class="text-[11px] text-muted-foreground mt-1 max-w-50">Gönderim sırasında her numara için Excel'deki dosya yolu kullanılacaktır.</p>
 									</div>
 								</div>
 							{/if}
@@ -999,7 +999,7 @@
 								onmouseleave={handleTextareaSelection}
 								placeholder={isPersonalized ? "Excel dosyasındaki kişiye özel mesajlar kullanılacaktır." : "Mesajınızı buraya yazın..."} 
 								disabled={isPersonalized}
-								class="min-h-[160px] max-h-[200px] overflow-y-auto text-sm resize-none border-none bg-muted/10 p-4 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-xl shadow-inner-sm {isPersonalized ? 'opacity-50' : ''}" 
+								class="min-h-40 max-h-50 overflow-y-auto text-sm resize-none border-none bg-muted/10 p-4 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-xl shadow-inner-sm {isPersonalized ? 'opacity-50' : ''}" 
 							/>
 							{#if messageBody.length > 0}
 								<div class="absolute bottom-3 right-3 text-[10px] bg-background/80 backdrop-blur-sm px-2 py-1 rounded border shadow-sm text-muted-foreground font-mono">
@@ -1045,6 +1045,7 @@
 						</div>
 
 						<div 
+							role="region"
 							class="relative group rounded-2xl transition-all duration-300 {isDraggingNumbers ? 'ring-2 ring-primary ring-offset-2' : ''}"
 							ondragover={handleNumbersDragOver}
 							ondragleave={handleNumbersDragLeave}
@@ -1069,7 +1070,7 @@
 								bind:value={phoneNumberText} 
 								placeholder=""
 								wrap="off"
-								class="min-h-[140px] max-h-[200px] w-full overflow-y-auto text-sm font-mono border-2 border-transparent bg-transparent focus-visible:ring-1 focus-visible:ring-primary/20 transition-all rounded-2xl shadow-inner-sm overflow-x-auto whitespace-pre p-4 {phoneNumberText ? 'border-muted-foreground/10 bg-muted/5' : 'opacity-0 focus:opacity-100'} {isDraggingNumbers ? 'opacity-0' : ''}" 
+								class="min-h-35 max-h-50 w-full overflow-y-auto text-sm font-mono border-2 border-transparent bg-transparent focus-visible:ring-1 focus-visible:ring-primary/20 transition-all rounded-2xl shadow-inner-sm overflow-x-auto whitespace-pre p-4 {phoneNumberText ? 'border-muted-foreground/10 bg-muted/5' : 'opacity-0 focus:opacity-100'} {isDraggingNumbers ? 'opacity-0' : ''}" 
 							/>
 
 							{#if isDraggingNumbers}
@@ -1084,7 +1085,7 @@
 						<Collapsible.Root bind:open={isInfoOpen} class="space-y-3">
 							<div class="flex flex-wrap items-center justify-between gap-1.5">
 								<div class="flex items-center gap-2">
-									<Collapsible.Trigger asChild>
+									<Collapsible.Trigger>
 										<Button variant="ghost" size="sm" class="h-7 px-2 text-[10px] text-muted-foreground hover:text-primary transition-colors flex items-center gap-1.5">
 											{#if isInfoOpen}
 												<ChevronDown class="w-3 h-3" />
@@ -1286,7 +1287,7 @@
 			</div>
 		</div>
 
-		<div class="flex-1 flex overflow-hidden min-h-[450px]">
+		<div class="flex-1 flex overflow-hidden min-h-112.5">
 			<!-- Contacts List -->
 			<div class="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-thin">
 				{#if isLoadingContacts}
@@ -1443,7 +1444,7 @@
 			</div>
 		</Dialog.Header>
 
-		<div class="flex-1 overflow-y-auto p-4 space-y-3 min-h-[300px]">
+		<div class="flex-1 overflow-y-auto p-4 space-y-3 min-h-75">
 			{#if templates.length === 0}
 				<div class="flex flex-col items-center justify-center py-12 text-center space-y-4">
 					<div class="p-4 bg-muted/20 rounded-full text-muted-foreground/30">
