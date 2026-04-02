@@ -14,9 +14,7 @@
 	let settings = $state({
 		readReceipt: true,
 		darkMode: true,
-		messageDelay: 2000,
-		autoReply: false,
-		autoReplyMessage: "",
+		messageDelay: 2000
 	});
 
 	let isLoading = $state(true);
@@ -30,11 +28,9 @@
 			const data = await res.json();
 			if (data) {
 				settings = {
-					autoReply: !!data.autoReply,
 					readReceipt: !!data.readReceipt,
 					darkMode: !!data.darkMode,
-					messageDelay: data.messageDelay || 2000,
-					autoReplyMessage: data.autoReplyMessage || "Merhaba, şu an müsait değilim. En kısa sürede size geri dönüş yapacağım."
+					messageDelay: data.messageDelay || 2000
 				};
 			}
 		} catch (e) {
