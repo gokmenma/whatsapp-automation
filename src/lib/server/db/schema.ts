@@ -101,12 +101,30 @@ export const messages = sqliteTable('messages', {
     id: text('id').primaryKey(),
     accountId: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
     contactJid: text('contact_jid').notNull(),
+    senderJid: text('sender_jid'),
+    senderName: text('sender_name'),
     fromMe: integer('from_me', { mode: 'boolean' }).notNull().default(false),
     body: text('body').notNull().default(''),
     mediaType: text('media_type'), // null | 'image' | 'video' | 'audio' | 'document'
+    quotedMsgId: text('quoted_msg_id'),
+    quotedMsgBody: text('quoted_msg_body'),
+    reaction: text('reaction'),
+    editedAt: integer('edited_at', { mode: 'timestamp' }),
     timestamp: integer('timestamp', { mode: 'timestamp' }).notNull(),
     status: text('status').notNull().default('sent') // 'sent' | 'failed' | 'received'
 }, (t) => ({
     accountContactIdx: index('messages_account_contact_idx').on(t.accountId, t.contactJid),
     timestampIdx: index('messages_timestamp_idx').on(t.timestamp)
+}));
+
+export const conversationPreferences = sqliteTable('conversation_preferences', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    accountId: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+    contactKey: text('contact_key').notNull(),
+    muted: integer('muted', { mode: 'boolean' }).notNull().default(false),
+    archived: integer('archived', { mode: 'boolean' }).notNull().default(false),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull()
+}, (t) => ({
+    accountContactKeyIdx: index('conversation_preferences_account_contact_idx').on(t.accountId, t.contactKey)
 }));

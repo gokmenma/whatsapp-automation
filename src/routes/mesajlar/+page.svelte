@@ -6,23 +6,30 @@
     import MessageSquareIcon from '@lucide/svelte/icons/message-square';
     import MessageSquarePlusIcon from '@lucide/svelte/icons/message-square-plus';
     import PaperclipIcon from '@lucide/svelte/icons/paperclip';
+    import SmileIcon from '@lucide/svelte/icons/smile';
     import XIcon from '@lucide/svelte/icons/x';
     import SendIcon from '@lucide/svelte/icons/send';
     import SearchIcon from '@lucide/svelte/icons/search';
     import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
+    import CornerUpLeftIcon from '@lucide/svelte/icons/corner-up-left';
+    import ForwardIcon from '@lucide/svelte/icons/forward';
+    import EllipsisVerticalIcon from '@lucide/svelte/icons/ellipsis-vertical';
+    import ArchiveIcon from '@lucide/svelte/icons/archive';
+    import BellOffIcon from '@lucide/svelte/icons/bell-off';
     import ImageIcon from '@lucide/svelte/icons/image';
     import FileIcon from '@lucide/svelte/icons/file';
     import MicIcon from '@lucide/svelte/icons/mic';
+    import PinIcon from '@lucide/svelte/icons/pin';
+    import MailOpenIcon from '@lucide/svelte/icons/mail-open';
+    import HeartIcon from '@lucide/svelte/icons/heart';
+    import ListPlusIcon from '@lucide/svelte/icons/list-plus';
+    import BanIcon from '@lucide/svelte/icons/ban';
+    import EraserIcon from '@lucide/svelte/icons/eraser';
     import TrashIcon from '@lucide/svelte/icons/trash-2';
     import BoldIcon from '@lucide/svelte/icons/bold';
     import ItalicIcon from '@lucide/svelte/icons/italic';
     import StrikethroughIcon from '@lucide/svelte/icons/strikethrough';
     import CodeIcon from '@lucide/svelte/icons/code';
-    import ListOrderedIcon from '@lucide/svelte/icons/list-ordered';
-    import ListIcon from '@lucide/svelte/icons/list';
-    import QuoteIcon from '@lucide/svelte/icons/quote';
-    import SmileIcon from '@lucide/svelte/icons/smile';
-    import PlusIcon from '@lucide/svelte/icons/plus';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as Dialog from '$lib/components/ui/dialog';
 
@@ -43,8 +50,12 @@
     let messagesContainerEl = $state<HTMLDivElement | null>(null);
     let messagesEndEl = $state<HTMLDivElement | null>(null);
     let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let conversationsPollInterval: ReturnType<typeof setInterval> | null = null;
     let contextMenu = $state<{ x: number; y: number; conv: any } | null>(null);
     let messageMenu = $state<{ x: number; y: number; msg: any } | null>(null);
+    let replyingTo = $state<{ id: string; body: string; fromMe: boolean; senderJid: string | null; senderName: string | null; mediaType: string | null } | null>(null);
+    let editingMessageId = $state<string | null>(null);
+    let locallyEditedMessageIds = $state<Set<string>>(new Set());
     let deleteDialogOpen = $state(false);
     let convToDelete = $state<any>(null);
     let messageDeleteDialogOpen = $state(false);
@@ -55,14 +66,54 @@
     let allContacts = $state<any[]>([]);
     let filteredContacts = $state<any[]>([]);
     let lastLoadedContactsAccountId = $state('');
+    let conversationsRequestSeq = 0;
     let messageTextareaEl = $state<HTMLTextAreaElement | null>(null);
     let showFormattingToolbar = $state(false);
+    let isEmojiPickerOpen = $state(false);
+    let emojiPickerEl = $state<HTMLDivElement | null>(null);
+    let isArchivedView = $state(false);
+    let topActionsMenuOpen = $state(false);
+    let topActionsMenuButtonEl = $state<HTMLButtonElement | null>(null);
+    let topActionsMenuPosition = $state({ x: 0, y: 0 });
+    let selectionActionsMenuOpen = $state(false);
+    let selectionActionsMenuButtonEl = $state<HTMLButtonElement | null>(null);
+    let selectionActionsMenuPosition = $state({ x: 0, y: 0 });
+    let selectionMode = $state(false);
+    let selectedConversationJids = $state<Set<string>>(new Set());
+    let avatarUrls = $state<Record<string, string | null>>({});
+        let mediaViewerOpen = $state(false);
+        let mediaViewerUrl = $state('');
+        let mediaViewerType = $state<'image' | 'document'>('image');
+        let mediaViewerFilename = $state('');
+
+    const quickEmojis = ['😀', '😄', '😂', '🤣', '😊', '😉', '😍', '😘', '😎', '🤝', '🙏', '💪', '🔥', '✅', '🎉', '❤️', '👍', '👋', '😅', '😇', '🤔', '😢', '😡', '👏'];
+
+    let notificationAudio: HTMLAudioElement | null = null;
+    let conversationsSnapshotInitialized = false;
+    let conversationSnapshots = new Map<string, string>();
 
     let isImageAttachment = $derived(Boolean(attachedMedia?.mimetype?.startsWith('image/')));
     let isVideoAttachment = $derived(Boolean(attachedMedia?.mimetype?.startsWith('video/')));
 
+    function resolvePreferredAccountId(accounts: any[], currentId = '') {
+        if (!accounts || accounts.length === 0) return '';
+
+        // Follow sidebar/default selection first, regardless of connection status.
+        const defaultAccount = accounts.find((a: any) => a.isDefault);
+        if (defaultAccount) return defaultAccount.id;
+
+        const current = accounts.find((a: any) => a.id === currentId);
+        if (current) return current.id;
+
+        const firstReady = accounts.find((a: any) => a.status === 'ready');
+        if (firstReady) return firstReady.id;
+
+        return accounts[0]?.id || '';
+    }
+
     // Derived
     let readyAccounts = $derived(data.accounts.filter((a: any) => a.status === 'ready'));
+    let selectedAccountName = $derived(data.accounts.find((a: any) => a.id === selectedAccountId)?.name || 'Seçili Hesap Yok');
     let filteredConversations = $derived(
         searchQuery.trim()
             ? conversations.filter(c =>
@@ -71,21 +122,111 @@
               )
             : conversations
     );
+    let archivedConversationCount = $derived(conversations.filter((conv) => conv.archived).length);
+    let visibleConversations = $derived(
+        filteredConversations.filter((conv) => isArchivedView ? conv.archived : !conv.archived)
+    );
+
+    function buildConversationSnapshot(conv: any) {
+        return [
+            String(conv.contactJid || ''),
+            String(conv.lastMessageAt || ''),
+            String(conv.lastMessage || ''),
+            String(conv.lastMessageMediaType || ''),
+            String(conv.lastMessageStatus || ''),
+            conv.lastMessageFromMe ? '1' : '0'
+        ].join('|');
+    }
+
+    function resetConversationTracking() {
+        conversationsSnapshotInitialized = false;
+        conversationSnapshots = new Map<string, string>();
+    }
+
+    async function playNotificationSound() {
+        if (typeof window === 'undefined') return;
+        if (!notificationAudio) {
+            notificationAudio = new Audio('/notification.wav');
+            notificationAudio.preload = 'auto';
+        }
+
+        try {
+            notificationAudio.currentTime = 0;
+            await notificationAudio.play();
+        } catch {
+            // Browser autoplay restrictions can block playback until the user interacts.
+        }
+    }
+
+    function trackConversationChanges(nextConversations: any[]) {
+        const nextSnapshots = new Map<string, string>();
+        let shouldPlayNotification = false;
+
+        for (const conv of nextConversations) {
+            const key = String(conv.contactJid || '');
+            const snapshot = buildConversationSnapshot(conv);
+            nextSnapshots.set(key, snapshot);
+
+            if (!conversationsSnapshotInitialized) continue;
+
+            const previous = conversationSnapshots.get(key);
+            const changed = !previous || previous !== snapshot;
+            if (changed && !conv.lastMessageFromMe && !conv.muted && !conv.archived) {
+                shouldPlayNotification = true;
+            }
+        }
+
+        conversationSnapshots = nextSnapshots;
+        conversationsSnapshotInitialized = true;
+
+        if (shouldPlayNotification) {
+            void playNotificationSound();
+        }
+    }
 
     // Load conversations for selected account
     async function loadConversations() {
-        if (!selectedAccountId) return;
+        if (!selectedAccountId) {
+            conversations = [];
+            loadingConversations = false;
+            return;
+        }
+
+        const accountId = selectedAccountId;
+        const requestId = ++conversationsRequestSeq;
         loadingConversations = true;
+
         try {
-            const res = await fetch(`/api/messages?accountId=${encodeURIComponent(selectedAccountId)}`);
+            const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accountId)}`);
+            if (requestId !== conversationsRequestSeq) return;
+
             if (res.ok) {
-                const data = await res.json();
-                conversations = data.conversations || [];
+                const responseData = await res.json();
+                const nextConversations = responseData.conversations || [];
+                trackConversationChanges(nextConversations);
+                conversations = nextConversations;
+
+                if (selectedContact?.jid) {
+                    const refreshed = nextConversations.find((c: any) => c.contactJid === selectedContact?.jid);
+                    if (refreshed) {
+                        selectedContact = {
+                            jid: refreshed.contactJid,
+                            name: refreshed.name,
+                            number: refreshed.number
+                        };
+                    }
+                }
+            } else {
+                conversations = [];
             }
         } catch (e) {
-            /* silent */
+            if (requestId === conversationsRequestSeq) {
+                conversations = [];
+            }
         } finally {
-            loadingConversations = false;
+            if (requestId === conversationsRequestSeq) {
+                loadingConversations = false;
+            }
         }
     }
 
@@ -100,7 +241,7 @@
         }
     }
 
-    async function loadMessages(scrollToBottom = false) {
+    async function loadMessages(scrollToBottom = false, initialScrollBehavior: ScrollBehavior = 'auto') {
         if (!selectedContact || !selectedAccountId) return;
         loadingMessages = true;
         try {
@@ -109,6 +250,13 @@
             if (res.ok) {
                 const d = await res.json();
                 const incoming = d.messages || [];
+                if (selectedContact) {
+                    selectedContact = {
+                        jid: selectedContact.jid,
+                        name: String(d.contactName || selectedContact.name || '').trim() || selectedContact.name,
+                        number: String(d.contactNumber || selectedContact.number || '').trim() || selectedContact.number
+                    };
+                }
                 const changed =
                     incoming.length !== messages.length ||
                     incoming.some((m: any, i: number) => {
@@ -118,15 +266,22 @@
                             m.body !== prev.body ||
                             m.status !== prev.status ||
                             (m.mediaType || m.media_type) !== (prev.mediaType || prev.media_type) ||
-                            m.timestamp !== prev.timestamp;
+                            m.timestamp !== prev.timestamp ||
+                            m.editedAt !== prev.editedAt;
                     });
 
                 if (changed) {
                     messages = incoming;
+                    // Load avatars for group sender JIDs
+                    if (isGroupJid(selectedContact?.jid)) {
+                        const senderJids = new Set<string>(incoming.map((m: any) => String(m?.senderJid || m?.sender_jid || '').trim()).filter((j: string) => j.length > 0));
+                        for (const jid of senderJids) void ensureAvatarLoaded(jid);
+                    }
                 }
 
                 if (scrollToBottom || changed) {
-                    await scrollMessagesToBottom('smooth');
+                    const behavior: ScrollBehavior = scrollToBottom ? initialScrollBehavior : 'smooth';
+                    await scrollMessagesToBottom(behavior);
                 }
             }
         } catch (e) {
@@ -137,12 +292,17 @@
     }
 
     async function selectConversation(conv: any) {
+        if (selectionMode) {
+            toggleConversationSelection(conv.contactJid);
+            return;
+        }
+
         selectedContact = { jid: conv.contactJid, name: conv.name, number: conv.number };
         messages = [];
         stopPolling();
         contextMenu = null;
 
-        await loadMessages(true);
+        await loadMessages(true, 'auto');
 
         // Update URL params without navigation
         const url = new URL(window.location.href);
@@ -153,14 +313,363 @@
 
     function handleConvContextMenu(e: MouseEvent, conv: any) {
         e.preventDefault();
+        if (selectionMode) return;
         messageMenu = null;
-        contextMenu = { x: e.clientX, y: e.clientY, conv };
+        const menuHeight = 380;
+        const menuWidth = 290;
+        const rawY = e.clientY;
+        const rawX = e.clientX;
+        const y = rawY + menuHeight > window.innerHeight ? Math.max(8, rawY - menuHeight) : rawY;
+        const x = rawX + menuWidth > window.innerWidth ? Math.max(8, rawX - menuWidth) : rawX;
+        contextMenu = { x, y, conv };
+    }
+
+    function openTopActionsMenu() {
+        if (typeof window === 'undefined') return;
+
+        const menuWidth = 256;
+        const gutter = 8;
+        const fallbackX = window.innerWidth - menuWidth - gutter;
+        const fallbackY = 72;
+        const rect = topActionsMenuButtonEl?.getBoundingClientRect();
+        const desiredX = rect ? rect.right - menuWidth : fallbackX;
+        const x = Math.max(gutter, Math.min(desiredX, window.innerWidth - menuWidth - gutter));
+        const y = rect ? rect.bottom + 6 : fallbackY;
+
+        topActionsMenuPosition = { x, y };
+        topActionsMenuOpen = true;
+    }
+
+    function toggleTopActionsMenu(e: MouseEvent) {
+        e.stopPropagation();
+        if (topActionsMenuOpen) {
+            topActionsMenuOpen = false;
+            return;
+        }
+        selectionActionsMenuOpen = false;
+        openTopActionsMenu();
+    }
+
+    function openSelectionActionsMenu() {
+        if (typeof window === 'undefined') return;
+
+        const menuWidth = 256;
+        const gutter = 8;
+        const fallbackX = window.innerWidth - menuWidth - gutter;
+        const fallbackY = 112;
+        const rect = selectionActionsMenuButtonEl?.getBoundingClientRect();
+        const desiredX = rect ? rect.right - menuWidth : fallbackX;
+        const x = Math.max(gutter, Math.min(desiredX, window.innerWidth - menuWidth - gutter));
+        const y = rect ? rect.bottom + 6 : fallbackY;
+
+        selectionActionsMenuPosition = { x, y };
+        selectionActionsMenuOpen = true;
+    }
+
+    function toggleSelectionActionsMenu(e: MouseEvent) {
+        e.stopPropagation();
+        if (selectionActionsMenuOpen) {
+            selectionActionsMenuOpen = false;
+            return;
+        }
+        topActionsMenuOpen = false;
+        openSelectionActionsMenu();
+    }
+
+    function startSelectionMode() {
+        topActionsMenuOpen = false;
+        selectionActionsMenuOpen = false;
+        contextMenu = null;
+        messageMenu = null;
+        selectionMode = true;
+        selectedConversationJids = new Set();
+    }
+
+    function exitSelectionMode() {
+        selectionActionsMenuOpen = false;
+        selectionMode = false;
+        selectedConversationJids = new Set();
+    }
+
+    function toggleConversationSelection(contactJid: string) {
+        const next = new Set(selectedConversationJids);
+        if (next.has(contactJid)) next.delete(contactJid);
+        else next.add(contactJid);
+        selectedConversationJids = next;
+    }
+
+    function selectAllVisibleConversations() {
+        selectedConversationJids = new Set(visibleConversations.map((conv) => String(conv.contactJid)));
+    }
+
+    function selectedConversations() {
+        return conversations.filter((conv) => selectedConversationJids.has(String(conv.contactJid)));
+    }
+
+    async function applyBulkPreferences(changes: { muted?: boolean; archived?: boolean }, successMessage: string) {
+        const targets = selectedConversations();
+        if (targets.length === 0) {
+            toast.error('Önce en az bir sohbet seçin');
+            return;
+        }
+
+        let successCount = 0;
+        for (const conv of targets) {
+            const result = await updateConversationPreferences(conv, changes);
+            if (result) successCount += 1;
+        }
+
+        if (successCount > 0) {
+            toast.success(`${successMessage} (${successCount})`);
+            exitSelectionMode();
+        }
+    }
+
+    async function deleteConversationDirect(conv: any, silent = false) {
+        try {
+            const res = await fetch(
+                `/api/messages/${encodeURIComponent(conv.contactJid)}?accountId=${encodeURIComponent(selectedAccountId)}`,
+                { method: 'DELETE' }
+            );
+
+            if (!res.ok) {
+                if (!silent) toast.error('Silme başarısız oldu');
+                return false;
+            }
+
+            conversations = conversations.filter((c) => c.contactJid !== conv.contactJid);
+            if (selectedContact?.jid === conv.contactJid) {
+                selectedContact = null;
+                messages = [];
+            }
+            return true;
+        } catch {
+            if (!silent) toast.error('Hata oluştu');
+            return false;
+        }
+    }
+
+    async function deleteSelectedConversations() {
+        const targets = selectedConversations();
+        if (targets.length === 0) {
+            toast.error('Önce en az bir sohbet seçin');
+            return;
+        }
+
+        const confirmed = window.confirm(`${targets.length} sohbet kalıcı olarak silinsin mi?`);
+        if (!confirmed) return;
+
+        let successCount = 0;
+        for (const conv of targets) {
+            const ok = await deleteConversationDirect(conv, true);
+            if (ok) successCount += 1;
+        }
+
+        if (successCount > 0) {
+            toast.success(`${successCount} sohbet silindi`);
+        }
+        exitSelectionMode();
+    }
+
+    async function updateConversationPreferences(conv: any, changes: { muted?: boolean; archived?: boolean }) {
+        if (!selectedAccountId) return null;
+
+        try {
+            const res = await fetch('/api/messages', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    accountId: selectedAccountId,
+                    contactJid: conv.contactJid,
+                    ...changes
+                })
+            });
+
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                toast.error(err.message || 'Konuşma ayarı güncellenemedi');
+                return null;
+            }
+
+            const responseData = await res.json();
+            const preferences = responseData.preferences || {};
+
+            conversations = conversations.map((item) =>
+                item.contactJid === conv.contactJid
+                    ? { ...item, muted: Boolean(preferences.muted), archived: Boolean(preferences.archived) }
+                    : item
+            );
+
+            return {
+                muted: Boolean(preferences.muted),
+                archived: Boolean(preferences.archived)
+            };
+        } catch {
+            toast.error('Konuşma ayarı güncellenirken hata oluştu');
+            return null;
+        }
+    }
+
+    async function toggleMuteConversation(conv: any) {
+        const nextMuted = !Boolean(conv.muted);
+        const preferences = await updateConversationPreferences(conv, { muted: nextMuted });
+        if (!preferences) return;
+
+        toast.success(preferences.muted ? 'Bildirimler sessize alındı' : 'Sessize alma kaldırıldı');
+        contextMenu = null;
+    }
+
+    async function toggleArchiveConversation(conv: any) {
+        const nextArchived = !Boolean(conv.archived);
+        const preferences = await updateConversationPreferences(conv, { archived: nextArchived });
+        if (!preferences) return;
+
+        if (selectedContact?.jid === conv.contactJid) {
+            isArchivedView = preferences.archived;
+        } else if (!preferences.archived && isArchivedView && archivedConversationCount <= 1) {
+            isArchivedView = false;
+        }
+
+        toast.success(preferences.archived ? 'Konuşma arşivlendi' : 'Konuşma arşivden çıkarıldı');
+        contextMenu = null;
     }
 
     function handleMessageContextMenu(e: MouseEvent, msg: any) {
         e.preventDefault();
         contextMenu = null;
-        messageMenu = { x: e.clientX, y: e.clientY, msg };
+        const menuHeight = canEditMessage(msg) ? 360 : 330;
+        const menuWidth = 220;
+        const rawY = e.clientY;
+        const rawX = e.clientX;
+        const y = rawY + menuHeight > window.innerHeight ? Math.max(8, rawY - menuHeight) : rawY;
+        const x = rawX + menuWidth > window.innerWidth ? Math.max(8, rawX - menuWidth) : rawX;
+        messageMenu = { x, y, msg };
+    }
+
+    function openMessageInfo(msg: any) {
+        const ts = formatTime(msg?.timestamp || Date.now());
+        const status = String(msg?.status || 'sent');
+        toast.info(`Durum: ${status} • ${ts}`);
+        messageMenu = null;
+    }
+
+    async function copyMessageText(msg: any) {
+        const body = String(msg?.body || '').trim();
+        if (!body) {
+            toast.error('Kopyalanacak metin yok');
+            messageMenu = null;
+            return;
+        }
+
+        try {
+            await navigator.clipboard.writeText(body);
+            toast.success('Mesaj kopyalandi');
+        } catch {
+            toast.error('Kopyalama basarisiz');
+        } finally {
+            messageMenu = null;
+        }
+    }
+
+    function forwardMessageToInput(msg: any) {
+        const body = String(msg?.body || '').trim();
+        if (!body) {
+            toast.error('Iletmek icin metin bulunamadi');
+            messageMenu = null;
+            return;
+        }
+
+        messageText = body;
+        messageTextareaEl?.focus();
+        toast.success('Mesaj metni iletmek icin kutuya alindi');
+        messageMenu = null;
+    }
+
+    function editMessageDraft(msg: any) {
+        if (!canEditMessage(msg)) {
+            toast.error('Mesaj sadece ilk 15 dakika icinde duzenlenebilir');
+            messageMenu = null;
+            return;
+        }
+
+        const body = String(msg?.body || '').trim();
+        editingMessageId = String(msg?.id || '');
+        replyingTo = null;
+        messageText = body;
+        messageTextareaEl?.focus();
+        toast.success('Duzenleme modu acildi');
+        messageMenu = null;
+    }
+
+    function reactToOwnMessage() {
+        toast.info('Ifade birakma yakinda eklenecek');
+        messageMenu = null;
+    }
+
+    function togglePinMessage() {
+        toast.info('Mesaj sabitleme yakinda eklenecek');
+        messageMenu = null;
+    }
+
+    function toggleStarMessage() {
+        toast.info('Yildizli mesajlar yakinda eklenecek');
+        messageMenu = null;
+    }
+
+    function getReplyPreviewBody(msg: any) {
+        return String(msg?.body || '').trim() || mediaIcon(msg?.mediaType || msg?.media_type) || 'Mesaj';
+    }
+
+    function getReplySenderName(msg: any) {
+        if (Boolean(msg?.fromMe || msg?.from_me)) return 'Siz';
+        if (isGroupJid(selectedContact?.jid)) return resolveGroupSenderName(msg) || selectedContact?.name || null;
+        return selectedContact?.name || null;
+    }
+
+    async function startReplyToMessage(msg: any) {
+        editingMessageId = null;
+        replyingTo = {
+            id: String(msg?.id || ''),
+            body: getReplyPreviewBody(msg),
+            fromMe: Boolean(msg?.fromMe || msg?.from_me),
+            senderJid: String(msg?.senderJid || msg?.sender_jid || '').trim() || null,
+            senderName: getReplySenderName(msg),
+            mediaType: String(msg?.mediaType || msg?.media_type || '').trim() || null
+        };
+        messageMenu = null;
+        await tick();
+        messageTextareaEl?.focus();
+    }
+
+    function clearReplyToMessage() {
+        replyingTo = null;
+    }
+
+    function clearEditingMessage() {
+        editingMessageId = null;
+    }
+
+    function markMessageLocallyEdited(messageId: string) {
+        const next = new Set(locallyEditedMessageIds);
+        next.add(String(messageId));
+        locallyEditedMessageIds = next;
+    }
+
+    function messageAgeMs(ts: any) {
+        const t = typeof ts === 'number'
+            ? (ts < 1e12 ? ts * 1000 : ts)
+            : new Date(ts).getTime();
+        if (!Number.isFinite(t)) return Number.POSITIVE_INFINITY;
+        return Date.now() - t;
+    }
+
+    function canEditMessage(msg: any) {
+        const isFromMe = Boolean(msg?.fromMe || msg?.from_me);
+        if (!isFromMe) return false;
+        if (String(msg?.status || '').startsWith('deleted')) return false;
+        if (!String(msg?.body || '').trim()) return false;
+        const age = messageAgeMs(msg?.timestamp);
+        return age >= 0 && age <= 15 * 60 * 1000;
     }
 
     async function deleteConversation(conv: any) {
@@ -174,16 +683,8 @@
         if (!convToDelete) return;
         
         try {
-            const res = await fetch(
-                `/api/messages/${encodeURIComponent(convToDelete.contactJid)}?accountId=${encodeURIComponent(selectedAccountId)}`,
-                { method: 'DELETE' }
-            );
-            if (res.ok) {
-                conversations = conversations.filter(c => c.contactJid !== convToDelete.contactJid);
-                if (selectedContact?.jid === convToDelete.contactJid) {
-                    selectedContact = null;
-                    messages = [];
-                }
+            const ok = await deleteConversationDirect(convToDelete, true);
+            if (ok) {
                 toast.success('Konuşma silindi');
             } else {
                 toast.error('Silme başarısız oldu');
@@ -246,9 +747,25 @@
         filteredContacts = allContacts
             .filter((c) =>
                 String(c.name || '').toLowerCase().includes(q) ||
-                String(c.number || '').includes(q)
+                String(c.number || '').includes(q) ||
+                String(c.id || '').toLowerCase().includes(q)
             )
             .slice(0, 100);
+    }
+
+    async function prefetchContacts(accountId: string) {
+        if (lastLoadedContactsAccountId === accountId && allContacts.length > 0) return;
+        try {
+            const res = await fetch(`/api/whatsapp/contacts?accountId=${encodeURIComponent(accountId)}`);
+            const result = await res.json();
+            if (res.ok && result?.success) {
+                allContacts = result.contacts || [];
+                lastLoadedContactsAccountId = accountId;
+                filterContacts();
+            }
+        } catch {
+            // Sessizce görmezden gel
+        }
     }
 
     async function openNewChatDialog() {
@@ -295,7 +812,7 @@
         } else {
             selectedContact = { jid, name, number };
             messages = [];
-            await loadMessages(true);
+            await loadMessages(true, 'auto');
 
             const url = new URL(window.location.href);
             url.searchParams.set('account', selectedAccountId);
@@ -324,31 +841,48 @@
         reader.readAsDataURL(file);
     }
 
-    async function handlePaste(e: ClipboardEvent) {
+    function handleMessagePaste(e: ClipboardEvent) {
         const items = e.clipboardData?.items;
-        if (!items) return;
+        if (!items || items.length === 0) return;
 
-        for (let i = 0; i < items.length; i++) {
-            if (items[i].type.indexOf('image') !== -1) {
-                const file = items[i].getAsFile();
-                if (!file) continue;
+        const imageItem = Array.from(items).find((item) => item.type.startsWith('image/'));
+        if (!imageItem) return;
 
-                const reader = new FileReader();
-                reader.onload = () => {
-                    attachedMedia = {
-                        data: String(reader.result || ''),
-                        mimetype: file.type,
-                        filename: file.name || `resim-${Date.now()}.png`
-                    };
-                };
-                reader.onerror = () => toast.error('Resim okunamadı');
-                reader.readAsDataURL(file);
-                
-                // If it's an image paste, we usually don't want the text "image.png" or similar to be pasted as text
-                // But we don't necessarily want to prevent default if there's also text in the clipboard.
-                // However, most clipboard image copies don't have text.
-                break;
-            }
+        const file = imageItem.getAsFile();
+        if (!file) return;
+
+        e.preventDefault();
+
+        const reader = new FileReader();
+        reader.onload = () => {
+            const ext = (file.type.split('/')[1] || 'png').split('+')[0];
+            attachedMedia = {
+                data: String(reader.result || ''),
+                mimetype: file.type || 'image/png',
+                filename: `clipboard-image.${ext}`
+            };
+            toast.success('Panodaki resim eklendi.');
+        };
+        reader.onerror = () => toast.error('Panodaki resim okunamadı');
+        reader.readAsDataURL(file);
+    }
+
+    async function insertEmoji(emoji: string) {
+        if (!messageTextareaEl) {
+            messageText += emoji;
+            return;
+        }
+
+        const start = messageTextareaEl.selectionStart ?? messageText.length;
+        const end = messageTextareaEl.selectionEnd ?? messageText.length;
+        messageText = messageText.slice(0, start) + emoji + messageText.slice(end);
+
+        await tick();
+        const caretPos = start + emoji.length;
+        if (messageTextareaEl) {
+            messageTextareaEl.focus();
+            messageTextareaEl.selectionStart = caretPos;
+            messageTextareaEl.selectionEnd = caretPos;
         }
     }
 
@@ -362,8 +896,48 @@
         sendingMessage = true;
         const text = messageText.trim();
         const media = attachedMedia;
+        const replyTo = replyingTo;
+        const editTargetId = editingMessageId;
         messageText = '';
         attachedMedia = null;
+        replyingTo = null;
+        editingMessageId = null;
+
+        if (editTargetId) {
+            try {
+                const jid = encodeURIComponent(selectedContact.jid);
+                const res = await fetch(`/api/messages/${jid}?accountId=${encodeURIComponent(selectedAccountId)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ messageId: editTargetId, editMode: true, editedBody: text })
+                });
+
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    toast.error(err.message || 'Mesaj duzenlenemedi');
+                    messageText = text;
+                    editingMessageId = editTargetId;
+                    return;
+                }
+
+                const nowTs = Math.floor(Date.now() / 1000);
+                messages = messages.map((m) =>
+                    String(m.id) === String(editTargetId)
+                        ? { ...m, body: text, editedAt: nowTs }
+                        : m
+                );
+                markMessageLocallyEdited(String(editTargetId));
+                await loadConversations();
+                toast.success('Mesaj duzenlendi');
+            } catch {
+                toast.error('Duzenleme sirasinda baglanti hatasi');
+                messageText = text;
+                editingMessageId = editTargetId;
+            } finally {
+                sendingMessage = false;
+            }
+            return;
+        }
 
         // Optimistic UI
         const tempId = `temp-${Date.now()}`;
@@ -374,6 +948,8 @@
             mediaType: media
                 ? (media.mimetype.startsWith('image/') ? 'image' : media.mimetype.startsWith('video/') ? 'video' : media.mimetype.startsWith('audio/') ? 'audio' : 'document')
                 : null,
+            quotedMsgId: replyTo?.id || null,
+            quotedMsgBody: replyTo?.body || null,
             timestamp: Math.floor(Date.now() / 1000),
             status: 'sent'
         }];
@@ -384,7 +960,7 @@
             const res = await fetch(`/api/messages/${jid}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ accountId: selectedAccountId, message: text, media })
+                body: JSON.stringify({ accountId: selectedAccountId, message: text, media, replyTo })
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
@@ -393,6 +969,7 @@
                 messages = messages.filter(m => m.id !== tempId);
                 messageText = text;
                 attachedMedia = media;
+                replyingTo = replyTo;
             } else {
                 // Refresh messages to get real ID
                 await loadMessages(false);
@@ -402,6 +979,8 @@
             toast.error('Bağlantı hatası');
             messages = messages.filter(m => m.id !== tempId);
             messageText = text;
+            attachedMedia = media;
+            replyingTo = replyTo;
         } finally {
             sendingMessage = false;
         }
@@ -453,6 +1032,70 @@
         return '';
     }
 
+    function statusTickClass(status: string | null | undefined) {
+        if (status === 'read' || status === 'played') return 'text-sky-500';
+        if (status === 'failed') return 'text-destructive';
+        return 'text-muted-foreground';
+    }
+
+    function isDoubleTickStatus(status: string | null | undefined) {
+        return status === 'delivered' || status === 'read' || status === 'played';
+    }
+
+    function isFailedStatus(status: string | null | undefined) {
+        return status === 'failed';
+    }
+
+    function isGroupJid(jid: string | null | undefined) {
+        return String(jid || '').endsWith('@g.us');
+    }
+
+    async function ensureAvatarLoaded(jid: string | null | undefined) {
+        const targetJid = String(jid || '').trim();
+        if (!selectedAccountId || !targetJid || avatarUrls[targetJid] !== undefined) return;
+
+        try {
+            const res = await fetch(`/api/whatsapp/avatar?accountId=${encodeURIComponent(selectedAccountId)}&jid=${encodeURIComponent(targetJid)}`);
+            const payload = await res.json().catch(() => ({}));
+            avatarUrls = { ...avatarUrls, [targetJid]: String(payload?.avatarUrl || '').trim() || null };
+        } catch {
+            avatarUrls = { ...avatarUrls, [targetJid]: null };
+        }
+    }
+
+    function clearAvatarUrl(jid: string) {
+        avatarUrls = { ...avatarUrls, [jid]: null };
+    }
+
+    function resolveGroupSenderName(msg: any) {
+        return String(msg?.senderName || msg?.sender_name || msg?.senderJid || msg?.sender_jid || '').trim();
+    }
+
+    function openMediaViewer(url: string, type: 'image' | 'document', filename = '') {
+        mediaViewerUrl = url;
+        mediaViewerType = type;
+        mediaViewerFilename = filename;
+        mediaViewerOpen = true;
+    }
+
+    function parseMessageReactions(raw: unknown) {
+        try {
+            const parsed = JSON.parse(String(raw || '[]'));
+            if (!Array.isArray(parsed)) return [];
+
+            const grouped = new Map<string, number>();
+            for (const item of parsed) {
+                const emoji = String(item?.emoji || '').trim();
+                if (!emoji) continue;
+                grouped.set(emoji, (grouped.get(emoji) || 0) + 1);
+            }
+
+            return Array.from(grouped.entries()).map(([emoji, count]) => ({ emoji, count }));
+        } catch {
+            return [];
+        }
+    }
+
     function getInitials(name: string) {
         return name?.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) || '?';
     }
@@ -469,12 +1112,27 @@
         if (pollInterval) clearInterval(pollInterval);
         pollInterval = setInterval(async () => {
             await loadMessages(false);
-            await loadConversations();
         }, 3000);
     }
 
     function stopPolling() {
         if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    }
+
+    function startConversationsPolling() {
+        if (conversationsPollInterval) clearInterval(conversationsPollInterval);
+        if (!selectedAccountId) return;
+
+        conversationsPollInterval = setInterval(async () => {
+            await loadConversations();
+        }, 3000);
+    }
+
+    function stopConversationsPolling() {
+        if (conversationsPollInterval) {
+            clearInterval(conversationsPollInterval);
+            conversationsPollInterval = null;
+        }
     }
 
     // Control polling based on selectedContact and messages state
@@ -485,6 +1143,35 @@
             stopPolling();
         }
         return () => stopPolling();
+    });
+
+    $effect(() => {
+        if (selectedAccountId) {
+            startConversationsPolling();
+        } else {
+            stopConversationsPolling();
+        }
+
+        return () => stopConversationsPolling();
+    });
+
+    $effect(() => {
+        if (!selectedAccountId) {
+            avatarUrls = {};
+            return;
+        }
+
+        for (const conv of conversations) {
+            void ensureAvatarLoaded(conv?.contactJid);
+        }
+
+        void ensureAvatarLoaded(selectedContact?.jid);
+    });
+
+    $effect(() => {
+        if (isArchivedView && archivedConversationCount === 0) {
+            isArchivedView = false;
+        }
     });
 
     // Text formatting functions (selection only + toggle)
@@ -547,18 +1234,6 @@
         toggleFormat('`');
     }
 
-    function formatQuote() {
-        toggleFormat('\n> ');
-    }
-
-    function formatBulletList() {
-        toggleFormat('\n- ');
-    }
-
-    function formatOrderedList() {
-        toggleFormat('\n1. ');
-    }
-
     // Parse and render markdown-style formatting
     function parseMessageFormatting(text: string): string {
         // Escape HTML first
@@ -579,16 +1254,6 @@
         
         // Code: `text` → <code>text</code>
         escaped = escaped.replace(/`([^`]+?)`/g, '<code>$1</code>');
-
-        // Quote: \n> text → <blockquote>text</blockquote>
-        escaped = escaped.replace(/(?:^|\n)&gt;\s?(.*)/g, '<blockquote>$1</blockquote>');
-
-        // Bullet list: \n- text → <ul><li>text</li></ul>
-        // Simple regex for line starts
-        escaped = escaped.replace(/(?:^|\n)-\s?(.*)/g, '<ul><li>$1</li></ul>');
-
-        // Ordered list: \n1. text → <ol><li>text</li></ol>
-        escaped = escaped.replace(/(?:^|\n)\d+\.\s?(.*)/g, '<ol><li>$1</li></ol>');
         
         return escaped;
     }
@@ -598,17 +1263,48 @@
     });
 
     $effect(() => {
-        if (selectedAccountId) {
+        const nextAccountId = resolvePreferredAccountId(data.accounts, selectedAccountId);
+        if (nextAccountId !== selectedAccountId) {
+            selectedAccountId = nextAccountId;
+        }
+    });
+
+    $effect(() => {
+        if (!selectedAccountId) {
+            conversations = [];
             selectedContact = null;
             messages = [];
+            loadingConversations = false;
+            exitSelectionMode();
+            stopPolling();
+            return;
+        }
+
+        conversations = [];
+        loadingConversations = true;
+        selectedContact = null;
+        messages = [];
+        isArchivedView = false;
+        exitSelectionMode();
+        stopPolling();
+        stopConversationsPolling();
+        resetConversationTracking();
+        contextMenu = null;
+        messageMenu = null;
+        topActionsMenuOpen = false;
+        void loadConversations();
+        void prefetchContacts(selectedAccountId);
+
+        if (typeof window !== 'undefined') {
+            const url = new URL(window.location.href);
+            url.searchParams.set('account', selectedAccountId);
+            url.searchParams.delete('contact');
+            window.history.replaceState({}, '', url.toString());
         }
     });
 
     onMount(async () => {
-        // Set default account
-        if (!selectedAccountId) {
-            selectedAccountId = data.accounts.find((a: any) => a.status === 'ready')?.id || data.accounts[0]?.id || '';
-        }
+        selectedAccountId = resolvePreferredAccountId(data.accounts, selectedAccountId);
         // Restore from URL params
         const urlParams = new URLSearchParams(window.location.search);
         const urlAccount = urlParams.get('account');
@@ -616,6 +1312,8 @@
         if (urlAccount && data.accounts.some((a: any) => a.id === urlAccount)) {
             selectedAccountId = urlAccount;
         }
+
+        resetConversationTracking();
         await loadConversations();
         if (urlContact) {
             const conv = conversations.find(c => c.contactJid === urlContact);
@@ -623,7 +1321,10 @@
         }
     });
 
-    onDestroy(() => stopPolling());
+    onDestroy(() => {
+        stopPolling();
+        stopConversationsPolling();
+    });
 
     // Close context menu on document click
     $effect(() => {
@@ -631,50 +1332,159 @@
         function handleDocClick() {
             contextMenu = null;
             messageMenu = null;
+            topActionsMenuOpen = false;
+            selectionActionsMenuOpen = false;
         }
-        if (contextMenu || messageMenu) {
+        if (contextMenu || messageMenu || topActionsMenuOpen || selectionActionsMenuOpen) {
             document.addEventListener('click', handleDocClick);
             return () => document.removeEventListener('click', handleDocClick);
         }
     });
+
+    $effect(() => {
+        if (typeof window === 'undefined' || !isEmojiPickerOpen) return;
+
+        const closeOnOutside = (event: MouseEvent) => {
+            const target = event.target as Node | null;
+            if (!target) return;
+            if (emojiPickerEl?.contains(target)) return;
+            isEmojiPickerOpen = false;
+        };
+
+        document.addEventListener('mousedown', closeOnOutside);
+        return () => document.removeEventListener('mousedown', closeOnOutside);
+    });
 </script>
 
-<div class="flex h-[calc(100vh-4rem)] overflow-hidden bg-background">
+<div class="flex h-[calc(100vh-4rem)] overflow-hidden bg-background -mx-4 -mb-4">
     <!-- LEFT PANEL: Conversation List -->
     <div class="flex flex-col border-r border-border {selectedContact ? 'hidden md:flex' : 'flex'}"
          style="min-width: 320px; max-width: 380px; flex-basis: 340px;">
 
         <!-- Header -->
         <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
+            <span class="text-xs text-muted-foreground font-medium truncate max-w-36" title={selectedAccountName}>
+                {selectedAccountName}
+            </span>
+
             <div class="flex items-center gap-2">
                 <div class="relative group">
-                <button
-                    class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors hover:scale-105"
-                    aria-label="Yeni mesaj başlat"
-                    title="Yeni mesaj başlat"
-                    onclick={openNewChatDialog}
-                >
-                    <MessageSquarePlusIcon class="w-4 h-4 text-foreground" />
-                </button>
+                    <button
+                        class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors hover:scale-105"
+                        aria-label="Yeni mesaj başlat"
+                        title="Yeni mesaj başlat"
+                        onclick={openNewChatDialog}
+                    >
+                        <MessageSquarePlusIcon class="w-4 h-4 text-foreground" />
+                    </button>
                     <span class="pointer-events-none absolute left-1/2 -translate-x-1/2 top-full mt-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Yeni konuşma</span>
                 </div>
+                <div class="relative">
+                    <button
+                        bind:this={topActionsMenuButtonEl}
+                        class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors"
+                        aria-label="Sohbet işlemleri"
+                        title="Sohbet işlemleri"
+                        onclick={toggleTopActionsMenu}
+                    >
+                        <EllipsisVerticalIcon class="w-4 h-4 text-foreground" />
+                    </button>
+
+                    {#if topActionsMenuOpen}
+                        <div
+                            class="fixed z-50 w-64 overflow-hidden rounded-2xl border border-black/8 bg-background/98 py-1 shadow-[0_16px_44px_rgba(15,23,42,0.16)] backdrop-blur-xl"
+                            style={`left:${topActionsMenuPosition.x}px; top:${topActionsMenuPosition.y}px;`}
+                            onmousedown={(e) => e.stopPropagation()}
+                            role="menu"
+                            tabindex="-1"
+                        >
+                            {#if !selectionMode}
+                                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem">
+                                    <span>Yeni grup</span>
+                                </button>
+                                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem">
+                                    <span>Yıldızlı mesajlar</span>
+                                </button>
+                                <button
+                                    class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60"
+                                    onclick={() => startSelectionMode()}
+                                    role="menuitem"
+                                >
+                                    <span>Sohbetleri seç</span>
+                                </button>
+                                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem">
+                                    <span>Tümünü okundu olarak işaretle</span>
+                                </button>
+                            {/if}
+                        </div>
+                    {/if}
+                </div>
             </div>
-            <!-- Account selector -->
-            {#if data.accounts.length > 1}
-            <select
-                bind:value={selectedAccountId}
-                class="text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-            >
-                {#each data.accounts as acc}
-                    <option value={acc.id} disabled={acc.status !== 'ready'}>
-                        {acc.name}{acc.status !== 'ready' ? ' (bağlı değil)' : ''}
-                    </option>
-                {/each}
-            </select>
-            {:else if data.accounts.length === 1}
-                <span class="text-xs text-muted-foreground font-medium">{data.accounts[0].name}</span>
-            {/if}
         </div>
+
+        {#if selectionMode}
+            <div class="px-3 py-2 border-b border-border/70 bg-muted/25 flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2 min-w-0">
+                    <button
+                        class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors"
+                        aria-label="Seçimi temizle"
+                        title="Seçimi temizle"
+                        onclick={exitSelectionMode}
+                    >
+                        <XIcon class="w-4 h-4" />
+                    </button>
+                    <span class="text-sm font-medium truncate">{selectedConversationJids.size} sohbet seçildi</span>
+                </div>
+
+                <div class="relative">
+                    <button
+                        bind:this={selectionActionsMenuButtonEl}
+                        class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors"
+                        aria-label="Seçili sohbet işlemleri"
+                        title="Seçili sohbet işlemleri"
+                        onclick={toggleSelectionActionsMenu}
+                    >
+                        <EllipsisVerticalIcon class="w-4 h-4" />
+                    </button>
+
+                    {#if selectionActionsMenuOpen}
+                        <div
+                            class="fixed z-50 w-64 overflow-hidden rounded-2xl border border-black/8 bg-background/98 py-1 shadow-[0_16px_44px_rgba(15,23,42,0.16)] backdrop-blur-xl"
+                            style={`left:${selectionActionsMenuPosition.x}px; top:${selectionActionsMenuPosition.y}px;`}
+                            onmousedown={(e) => e.stopPropagation()}
+                            role="menu"
+                            tabindex="-1"
+                        >
+                            <div class="px-4 py-2 text-xs font-medium text-muted-foreground border-b border-border/70">
+                                {selectedConversationJids.size} sohbet seçili
+                            </div>
+                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={selectAllVisibleConversations} role="menuitem">
+                                <span>Tüm görünenleri seç</span>
+                            </button>
+                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ archived: true }, 'Sohbetler arşivlendi')} role="menuitem">
+                                <span>Seçilenleri arşivle</span>
+                            </button>
+                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ archived: false }, 'Sohbetler arşivden çıkarıldı')} role="menuitem">
+                                <span>Seçilenleri arşivden çıkar</span>
+                            </button>
+                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ muted: true }, 'Sohbetler sessize alındı')} role="menuitem">
+                                <span>Seçilenleri sessize al</span>
+                            </button>
+                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ muted: false }, 'Sohbetler sessizden çıkarıldı')} role="menuitem">
+                                <span>Seçilenleri sessizden çıkar</span>
+                            </button>
+                            <div class="mx-4 my-1 h-px bg-border/70"></div>
+                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-destructive hover:bg-destructive/8" onclick={deleteSelectedConversations} role="menuitem">
+                                <span>Seçilenleri sil</span>
+                            </button>
+                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={exitSelectionMode} role="menuitem">
+                                <span>Seçimden çık</span>
+                            </button>
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        {/if}
 
         <!-- Search -->
         <div class="px-3 py-2 border-b border-border">
@@ -689,6 +1499,25 @@
             </div>
         </div>
 
+        {#if archivedConversationCount > 0 || isArchivedView}
+            <div class="px-3 py-2 border-b border-border/70 bg-background/80">
+                <button
+                    class="w-full flex items-center justify-between rounded-xl border border-border/70 px-3 py-2 text-left transition-colors {isArchivedView ? 'bg-primary/10 border-primary/25' : 'bg-muted/20 hover:bg-muted/40'}"
+                    onclick={() => { isArchivedView = !isArchivedView; }}
+                >
+                    <div>
+                        <div class="text-sm font-medium">Arşivlenmiş</div>
+                        <div class="text-[11px] text-muted-foreground">
+                            {isArchivedView ? 'Ana konuşma listesine dön' : 'Arşivdeki konuşmaları göster'}
+                        </div>
+                    </div>
+                    <span class="min-w-6 rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground text-center">
+                        {archivedConversationCount}
+                    </span>
+                </button>
+            </div>
+        {/if}
+
         <!-- No account ready state -->
         {#if readyAccounts.length === 0}
             <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
@@ -699,18 +1528,31 @@
 
         <!-- Loading state -->
         {:else if loadingConversations && conversations.length === 0}
-            <div class="flex-1 flex items-center justify-center">
-                <div class="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+            <div class="flex-1 p-3 space-y-2">
+                <div class="flex items-center gap-2 px-2 py-1.5 text-[11px] text-muted-foreground font-medium">
+                    <div class="w-3 h-3 border-2 border-primary/70 border-t-transparent rounded-full animate-spin"></div>
+                    Konuşmalar yükleniyor...
+                </div>
+                {#each Array(8) as _, i}
+                    <div class="flex items-center gap-3 px-2 py-2 rounded-lg border border-border/40 bg-muted/20 animate-pulse" style="animation-delay: {i * 60}ms">
+                        <div class="w-10 h-10 rounded-full bg-muted-foreground/15 shrink-0"></div>
+                        <div class="flex-1 min-w-0 space-y-2">
+                            <div class="h-3 rounded bg-muted-foreground/15 w-2/3"></div>
+                            <div class="h-2.5 rounded bg-muted-foreground/10 w-5/6"></div>
+                        </div>
+                        <div class="h-2.5 w-8 rounded bg-muted-foreground/10 shrink-0"></div>
+                    </div>
+                {/each}
             </div>
 
         <!-- Empty state -->
-        {:else if filteredConversations.length === 0}
+        {:else if visibleConversations.length === 0}
             <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
                 <MessageSquareIcon class="w-12 h-12 text-muted-foreground/40" />
                 <p class="text-sm text-muted-foreground">
-                    {searchQuery ? 'Sonuç bulunamadı' : 'Henüz mesaj yok'}
+                    {searchQuery ? 'Sonuç bulunamadı' : (isArchivedView ? 'Arşivlenmiş konuşma yok' : 'Henüz mesaj yok')}
                 </p>
-                {#if !searchQuery}
+                {#if !searchQuery && !isArchivedView}
                     <p class="text-xs text-muted-foreground/70">Mesaj gönderdiğinizde burada görünecek.</p>
                     <button class="text-xs text-primary hover:underline" onclick={openNewChatDialog}>Yeni konuşma başlat →</button>
                 {/if}
@@ -719,29 +1561,59 @@
         <!-- Conversation list -->
         {:else}
             <div class="flex-1 overflow-y-auto">
-                {#each filteredConversations as conv (conv.contactJid)}
+                {#each visibleConversations as conv (conv.contactJid)}
                     {@const isActive = selectedContact?.jid === conv.contactJid}
+                    {@const isSelected = selectedConversationJids.has(conv.contactJid)}
                     <button
-                        class="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors text-left border-b border-border/50 cursor-pointer {isActive ? 'bg-primary/10 border-l-2 border-l-primary' : ''}"
+                        class="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors text-left border-b border-border/50 cursor-pointer {selectionMode && isSelected ? 'bg-primary/8 border-l-2 border-l-primary' : ''} {(!selectionMode && isActive) ? 'bg-primary/10 border-l-2 border-l-primary' : ''}"
                         onclick={() => selectConversation(conv)}
                         oncontextmenu={(e) => handleConvContextMenu(e, conv)}
                     >
+                        {#if selectionMode}
+                            <div class="shrink-0 w-5 h-5 rounded-md border flex items-center justify-center text-[11px] font-bold {isSelected ? 'bg-primary text-primary-foreground border-primary' : 'border-muted-foreground/50 text-transparent'}">
+                                ✓
+                            </div>
+                        {/if}
                         <!-- Avatar -->
-                        <div
-                            class="shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-semibold"
-                            style="background-color: {avatarColor(conv.name)};"
-                        >
-                            {getInitials(conv.name)}
-                        </div>
+                        {#if avatarUrls[conv.contactJid]}
+                            <img
+                                src={avatarUrls[conv.contactJid] || ''}
+                                alt={conv.name}
+                                class="shrink-0 w-10 h-10 rounded-full object-cover"
+                                onerror={() => clearAvatarUrl(conv.contactJid)}
+                            />
+                        {:else}
+                            <div
+                                class="shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-semibold"
+                                style="background-color: {avatarColor(conv.name)};"
+                            >
+                                {getInitials(conv.name)}
+                            </div>
+                        {/if}
                         <!-- Info -->
                         <div class="flex-1 min-w-0">
                             <div class="flex items-baseline justify-between gap-1">
-                                <span class="font-medium text-sm truncate">{conv.name}</span>
+                                <div class="flex items-center gap-2 min-w-0">
+                                    <span class="font-medium text-sm truncate">{conv.name}</span>
+                                    {#if conv.muted}
+                                        <span class="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Sessizde</span>
+                                    {/if}
+                                </div>
                                 <span class="text-xs text-muted-foreground shrink-0">{formatConvTime(conv.lastMessageAt)}</span>
                             </div>
                             <div class="flex items-center gap-1 mt-0.5">
                                 {#if conv.lastMessageFromMe}
-                                    <span class="text-xs text-muted-foreground">✓</span>
+                                    <span class={"message-status text-xs " + statusTickClass(conv.lastMessageStatus)} aria-hidden="true">
+                                        {#if isDoubleTickStatus(conv.lastMessageStatus)}
+                                            <span class="message-status-double">
+                                                <span>✓</span><span>✓</span>
+                                            </span>
+                                        {:else if isFailedStatus(conv.lastMessageStatus)}
+                                            !
+                                        {:else}
+                                            ✓
+                                        {/if}
+                                    </span>
                                 {/if}
                                 <span class="text-xs text-muted-foreground truncate">
                                     {conv.lastMessageMediaType ? mediaIcon(conv.lastMessageMediaType) : (conv.lastMessage || '')}
@@ -756,21 +1628,93 @@
         <!-- Context Menu -->
         {#if contextMenu}
             <div
-                class="fixed bg-background border border-border rounded-lg shadow-lg py-1 z-50"
+                class="fixed z-50 w-72 overflow-hidden rounded-3xl border border-black/8 bg-background/98 py-2 shadow-[0_18px_48px_rgba(15,23,42,0.18)] backdrop-blur-xl"
                 style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
                 onmousedown={(e) => e.preventDefault()}
                 role="menu"
                 tabindex="0"
             >
                 <button
-                    class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50 transition-colors text-destructive"
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-muted/60"
+                    aria-label={contextMenu.conv.archived ? 'Sohbeti arşivden çıkar' : 'Sohbeti arşivle'}
+                    onclick={() => {
+                        toggleArchiveConversation(contextMenu!.conv);
+                    }}
+                    role="menuitem"
+                >
+                    <ArchiveIcon class="h-4 w-4 shrink-0 text-foreground/85" />
+                    <span>{contextMenu.conv.archived ? 'Arşivden çıkar' : 'Sohbeti arşivle'}</span>
+                </button>
+                <button
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-muted/60"
+                    aria-label={contextMenu.conv.muted ? 'Bildirimleri aç' : 'Bildirimleri sessize al'}
+                    onclick={() => {
+                        toggleMuteConversation(contextMenu!.conv);
+                    }}
+                    role="menuitem"
+                >
+                    <BellOffIcon class="h-4 w-4 shrink-0 text-foreground/85" />
+                    <span>{contextMenu.conv.muted ? 'Bildirimleri aç' : 'Bildirimleri sessize al'}</span>
+                </button>
+                <button
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
+                    disabled
+                    role="menuitem"
+                >
+                    <PinIcon class="h-4 w-4 shrink-0" />
+                    <span>Sohbeti sabitle</span>
+                </button>
+                <button
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
+                    disabled
+                    role="menuitem"
+                >
+                    <MailOpenIcon class="h-4 w-4 shrink-0" />
+                    <span>Okunmadı olarak işaretle</span>
+                </button>
+                <button
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
+                    disabled
+                    role="menuitem"
+                >
+                    <HeartIcon class="h-4 w-4 shrink-0" />
+                    <span>Favoriler'e ekle</span>
+                </button>
+                <button
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
+                    disabled
+                    role="menuitem"
+                >
+                    <ListPlusIcon class="h-4 w-4 shrink-0" />
+                    <span>Listeye ekle</span>
+                </button>
+                <div class="mx-4 my-1 h-px bg-border/70"></div>
+                <button
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
+                    disabled
+                    role="menuitem"
+                >
+                    <BanIcon class="h-4 w-4 shrink-0" />
+                    <span>Engelle</span>
+                </button>
+                <button
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
+                    disabled
+                    role="menuitem"
+                >
+                    <EraserIcon class="h-4 w-4 shrink-0" />
+                    <span>Sohbeti temizle</span>
+                </button>
+                <div class="mx-4 my-1 h-px bg-border/70"></div>
+                <button
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-destructive transition-colors hover:bg-destructive/8"
                     onclick={() => {
                         deleteConversation(contextMenu!.conv);
                     }}
                     role="menuitem"
                 >
-                    <TrashIcon class="w-4 h-4" />
-                    <span>Sil</span>
+                    <TrashIcon class="h-4 w-4 shrink-0" />
+                    <span>Sohbeti sil</span>
                 </button>
             </div>
         {/if}
@@ -865,12 +1809,21 @@
                 >
                     <ArrowLeftIcon class="w-5 h-5" />
                 </button>
-                <div
-                    class="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-semibold shrink-0"
-                    style="background-color: {avatarColor(selectedContact.name)};"
-                >
-                    {getInitials(selectedContact.name)}
-                </div>
+                {#if selectedContact?.jid && avatarUrls[selectedContact.jid]}
+                    <img
+                        src={avatarUrls[selectedContact.jid] || ''}
+                        alt={selectedContact.name}
+                        class="w-9 h-9 rounded-full object-cover shrink-0"
+                        onerror={() => clearAvatarUrl(selectedContact?.jid || '')}
+                    />
+                {:else}
+                    <div
+                        class="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-semibold shrink-0"
+                        style="background-color: {avatarColor(selectedContact.name)};"
+                    >
+                        {getInitials(selectedContact.name)}
+                    </div>
+                {/if}
                 <div class="flex-1 min-w-0">
                     <p class="font-semibold text-sm truncate">{selectedContact.name}</p>
                     <p class="text-xs text-muted-foreground">+{selectedContact.number}</p>
@@ -895,7 +1848,9 @@
                     {#each messages as msg, i (msg.id)}
                         {@const isFromMe = Boolean(msg.fromMe || msg.from_me)}
                         {@const isDeleted = (msg.status === 'deleted_me' || msg.status === 'deleted_everyone')}
+                        {@const senderName = resolveGroupSenderName(msg)}
                         {@const prevIsFromMe = i > 0 ? Boolean(messages[i-1].fromMe || messages[i-1].from_me) : null}
+                        {@const prevSenderName = i > 0 ? resolveGroupSenderName(messages[i-1]) : ''}
                         {@const msgTs = msg.timestamp < 1e12 ? msg.timestamp * 1000 : msg.timestamp}
                         {@const showDateSep = i === 0 || (() => {
                             const prevTs = messages[i-1].timestamp < 1e12 ? messages[i-1].timestamp * 1000 : messages[i-1].timestamp;
@@ -903,6 +1858,19 @@
                         })()}
                         {@const mediaKind = msg.mediaType || msg.media_type}
                         {@const mediaUrl = `/api/messages/media/${encodeURIComponent(msg.id)}`}
+                        {@const mediaThumbUrl = `/api/messages/media-thumb/${encodeURIComponent(msg.id)}`}
+                        {@const reactions = parseMessageReactions(msg.reaction)}
+                        {@const quotedPreview = String(msg.quotedMsgBody || '').trim()}
+                        {@const quotedMediaKind = String(msg.quotedMediaType || msg.quoted_media_type || '').trim()}
+                        {@const quotedHasMedia = Boolean(quotedMediaKind)}
+                        {@const quotedDisplayText = quotedPreview || (quotedHasMedia ? mediaIcon(quotedMediaKind) : 'Mesaj')}
+                        {@const quotedThumbUrl = msg.quotedMsgId && (quotedMediaKind === 'image' || quotedMediaKind === 'video' || quotedMediaKind === 'document')
+                            ? `/api/messages/media-thumb/${encodeURIComponent(String(msg.quotedMsgId))}`
+                            : ''}
+                        {@const senderJid = String(msg?.senderJid || msg?.sender_jid || '').trim()}
+                        {@const isSameSender = !showDateSep && prevIsFromMe === isFromMe && prevSenderName === senderName}
+                        {@const showGroupSender = !isFromMe && !isSameSender && isGroupJid(selectedContact?.jid) && Boolean(senderName)}
+                        {@const msgAvatarUrl = isGroupJid(selectedContact?.jid) ? (avatarUrls[senderJid] ?? null) : (avatarUrls[selectedContact?.jid ?? ''] ?? null)}
 
                         <!-- Date separator -->
                         {#if showDateSep}
@@ -914,22 +1882,68 @@
                         {/if}
 
                         <!-- Message bubble -->
-                        <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} {prevIsFromMe === isFromMe ? 'mt-0.5' : 'mt-2'}">
+                        <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} items-start gap-1.5 {isSameSender ? 'mt-0.5' : 'mt-4'}">
+                            {#if !isFromMe}
+                                {#if !isSameSender}
+                                    {#if msgAvatarUrl}
+                                        <img src={msgAvatarUrl} alt={senderName || ''} class="shrink-0 w-7 h-7 rounded-full object-cover" onerror={() => { if (senderJid) clearAvatarUrl(senderJid); }} />
+                                    {:else}
+                                        <div class="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-white text-[10px] font-semibold" style="background-color: {avatarColor(senderName || selectedContact?.name || '')}">
+                                            {getInitials(senderName || selectedContact?.name || '')}
+                                        </div>
+                                    {/if}
+                                {:else}
+                                    <div class="shrink-0 w-7"></div>
+                                {/if}
+                            {/if}
                             <!-- svelte-ignore a11y_no_static_element_interactions -->
                             <div
                                 class="max-w-[75%] rounded-2xl text-sm shadow-sm overflow-hidden {isDeleted ? 'bg-muted/70 text-muted-foreground rounded-xl opacity-80' : (isFromMe ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted text-foreground rounded-bl-sm')}"
                                 oncontextmenu={(e) => handleMessageContextMenu(e, msg)}
                             >
 
+                                {#if showGroupSender}
+                                    <div class="px-3 pt-1.5 pb-0 text-[11px] leading-tight font-semibold text-sky-700">
+                                        {senderName}
+                                    </div>
+                                {/if}
+
+                                {#if msg.quotedMsgId || quotedPreview}
+                                    <div class="px-3 {showGroupSender ? 'pt-1' : 'pt-2'} pb-0.5">
+                                        <div class="rounded-xl border-l-2 px-2.5 py-1.5 text-[11px] leading-snug {isFromMe ? 'border-primary-foreground/35 bg-primary-foreground/10 text-primary-foreground/85' : 'border-sky-500/55 bg-background/55 text-foreground/80'}">
+                                            <div class="text-[10px] font-semibold opacity-80">Alıntılanan mesaj</div>
+                                            <div class="flex items-start gap-2">
+                                                <div class="min-w-0 flex-1 max-h-10 overflow-hidden whitespace-pre-wrap break-all">{quotedDisplayText}</div>
+                                                {#if quotedThumbUrl}
+                                                    <img
+                                                        src={quotedThumbUrl}
+                                                        alt="Alintilanan medya"
+                                                        class="h-10 w-10 shrink-0 rounded-md border border-border/40 object-cover"
+                                                        loading="lazy"
+                                                        onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                                                    />
+                                                {/if}
+                                            </div>
+                                        </div>
+                                    </div>
+                                {/if}
+
                                 <!-- Media content -->
                                 {#if !isDeleted && mediaKind === 'image'}
-                                    <img
-                                        src={mediaUrl}
-                                        alt="Fotoğraf"
-                                        class="max-w-full max-h-64 block object-cover"
-                                        loading="lazy"
-                                        onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display='none'; (e.currentTarget.nextElementSibling as HTMLElement).style.display='flex'; }}
-                                    />
+                                    <button class="block cursor-zoom-in" type="button" onclick={() => openMediaViewer(mediaUrl, 'image')} aria-label="Fotoğrafı görüntüle">
+                                        <img
+                                            src={mediaUrl}
+                                            alt="Fotoğraf"
+                                            class="max-w-full max-h-64 block object-cover hover:opacity-90 transition-opacity"
+                                            loading="lazy"
+                                            onerror={(e) => {
+                                                const img = e.currentTarget as HTMLImageElement;
+                                                img.style.display = 'none';
+                                                const fallback = img.parentElement?.nextElementSibling as HTMLElement | null;
+                                                if (fallback) fallback.style.display = 'flex';
+                                            }}
+                                        />
+                                    </button>
                                     <div class="hidden items-center gap-1.5 px-3 py-2 opacity-80 text-xs font-medium">
                                         <ImageIcon class="w-3.5 h-3.5" /><span>Fotoğraf</span>
                                     </div>
@@ -946,28 +1960,69 @@
                                         </audio>
                                     </div>
                                 {:else if !isDeleted && mediaKind === 'document'}
+                                    <!-- svelte-ignore a11y_click_events_have_key_events -->
+                                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                                    <div class="px-3 pt-2 cursor-pointer" onclick={() => openMediaViewer(mediaUrl, 'document', msg.body || 'Belge')}>
+                                        <img
+                                            src={mediaThumbUrl}
+                                            alt="Belge onizlemesi"
+                                            class="max-w-full max-h-48 rounded-md border border-border/40 mb-2 object-cover"
+                                            loading="lazy"
+                                            onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                                        />
+                                    </div>
                                     <div class="flex items-center gap-2 px-3 py-2 opacity-80 text-xs font-medium">
                                         <FileIcon class="w-3.5 h-3.5 shrink-0" />
-                                        <a href={mediaUrl} download class="underline">Dosya indir</a>
+                                        <button onclick={() => openMediaViewer(mediaUrl, 'document', msg.body || 'Belge')} class="underline hover:text-primary transition-colors">Görüntüle</button>
+                                        <span class="opacity-40">·</span>
+                                        <a href={mediaUrl} download class="underline hover:text-primary transition-colors">İndir</a>
                                     </div>
                                 {/if}
 
                                 <!-- Body text / caption -->
                                 {#if msg.body}
-                                    <p class="px-3 py-2 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">
+                                    <p class="px-3 py-1.5 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">
                                         {@html parseMessageFormatting(msg.body)}
                                     </p>
                                 {:else if !mediaKind}
-                                    <div class="px-3 py-2"></div>
+                                    <div class="px-3 py-1.5"></div>
                                 {/if}
 
                                 <!-- Timestamp -->
-                                <div class="flex justify-end px-3 pb-1.5 mt-0.5">
-                                    <span class="text-[10px] {isFromMe ? 'text-primary-foreground/70' : 'text-muted-foreground'}">
+                                <div class="flex justify-end items-end px-3 pb-1 mt-0">
+                                    <span class="text-[10px] leading-none {isFromMe ? 'text-primary-foreground/70' : 'text-muted-foreground'}">
                                         {formatTime(msg.timestamp)}
-                                        {#if isFromMe}&#32;✓{/if}
+                                        {#if msg.editedAt || locallyEditedMessageIds.has(String(msg.id || ''))}
+                                            <span class="ml-1 opacity-80">(duzenlendi)</span>
+                                        {/if}
+                                        {#if isFromMe}
+                                            <span class={"message-status ml-1 " + statusTickClass(msg.status)} aria-hidden="true">
+                                                {#if isDoubleTickStatus(msg.status)}
+                                                    <span class="message-status-double">
+                                                        <span>✓</span><span>✓</span>
+                                                    </span>
+                                                {:else if isFailedStatus(msg.status)}
+                                                    !
+                                                {:else}
+                                                    ✓
+                                                {/if}
+                                            </span>
+                                        {/if}
                                     </span>
                                 </div>
+
+                                {#if reactions.length > 0}
+                                    <div class="px-3 pb-2 pt-0.5 flex flex-wrap justify-end gap-1">
+                                        {#each reactions as reaction (reaction.emoji)}
+                                            <span class="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/95 px-2 py-0.5 text-[11px] leading-none shadow-sm">
+                                                <span>{reaction.emoji}</span>
+                                                {#if reaction.count > 1}
+                                                    <span class="text-muted-foreground">{reaction.count}</span>
+                                                {/if}
+                                            </span>
+                                        {/each}
+                                    </div>
+                                {/if}
                             </div>
                         </div>
                     {/each}
@@ -977,17 +2032,48 @@
 
             {#if messageMenu}
                 <div
-                    class="fixed bg-background border border-border rounded-lg shadow-lg py-1 z-50"
+                    class="fixed min-w-40 bg-background border border-border rounded-lg shadow-lg py-1 z-50"
                     style="left: {messageMenu.x}px; top: {messageMenu.y}px;"
                     onmousedown={(e) => e.preventDefault()}
                     role="menu"
                     tabindex="0"
                 >
-                    <button
-                        class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors"
-                        onclick={openMessageDeleteDialog}
-                        role="menuitem"
-                    >
+                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => openMessageInfo(messageMenu!.msg)} role="menuitem">
+                        <MessageSquareIcon class="w-4 h-4" />
+                        Mesaj bilgisi
+                    </button>
+                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => startReplyToMessage(messageMenu!.msg)} role="menuitem">
+                        <CornerUpLeftIcon class="w-4 h-4" />
+                        Cevapla
+                    </button>
+                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => copyMessageText(messageMenu!.msg)} role="menuitem">
+                        <FileIcon class="w-4 h-4" />
+                        Kopyala
+                    </button>
+                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={reactToOwnMessage} role="menuitem">
+                        <SmileIcon class="w-4 h-4" />
+                        Ifade birak
+                    </button>
+                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => forwardMessageToInput(messageMenu!.msg)} role="menuitem">
+                        <ForwardIcon class="w-4 h-4" />
+                        Ilet
+                    </button>
+                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={togglePinMessage} role="menuitem">
+                        <PinIcon class="w-4 h-4" />
+                        Sabitle
+                    </button>
+                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={toggleStarMessage} role="menuitem">
+                        <HeartIcon class="w-4 h-4" />
+                        Yildiz ekle
+                    </button>
+                    {#if canEditMessage(messageMenu.msg)}
+                        <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => editMessageDraft(messageMenu!.msg)} role="menuitem">
+                            <CodeIcon class="w-4 h-4" />
+                            Duzenle
+                        </button>
+                    {/if}
+                    <div class="mx-2 my-1 h-px bg-border/70"></div>
+                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={openMessageDeleteDialog} role="menuitem">
                         <TrashIcon class="w-4 h-4" />
                         Sil
                     </button>
@@ -1026,6 +2112,28 @@
 
             <!-- Message Input -->
             <div class="px-4 py-3 border-t border-border bg-background">
+                {#if editingMessageId}
+                    <div class="mb-2 flex items-start justify-between gap-3 rounded-xl border border-amber-300/60 bg-amber-50/60 px-3 py-2">
+                        <div class="min-w-0">
+                            <div class="text-[11px] font-semibold text-amber-700">Mesaj duzenleniyor</div>
+                            <div class="text-xs text-amber-700/80">Yeni mesaj gitmez, mevcut mesaj guncellenir.</div>
+                        </div>
+                        <button class="shrink-0 rounded-md p-1 hover:bg-amber-100" type="button" onclick={clearEditingMessage} aria-label="Duzenlemeyi iptal et">
+                            <XIcon class="w-4 h-4 text-amber-700" />
+                        </button>
+                    </div>
+                {/if}
+                {#if replyingTo}
+                    <div class="mb-2 flex items-start justify-between gap-3 rounded-xl border border-border bg-muted/35 px-3 py-2">
+                        <div class="min-w-0">
+                            <div class="text-[11px] font-semibold text-sky-700">{replyingTo.senderName || 'Mesaja cevap'}</div>
+                            <div class="text-xs text-muted-foreground max-h-9 overflow-hidden whitespace-pre-wrap break-all">{replyingTo.body}</div>
+                        </div>
+                        <button class="shrink-0 rounded-md p-1 hover:bg-muted" type="button" onclick={clearReplyToMessage} aria-label="Cevabı iptal et">
+                            <XIcon class="w-4 h-4 text-muted-foreground" />
+                        </button>
+                    </div>
+                {/if}
                 {#if attachedMedia && (isImageAttachment || isVideoAttachment)}
                     <div class="mb-2 inline-block rounded-lg border border-border bg-muted/30 p-1">
                         {#if isImageAttachment}
@@ -1036,26 +2144,53 @@
                         {/if}
                     </div>
                 {/if}
-                <div class="flex items-center gap-2">
-                    <div class="flex-1 bg-muted/50 rounded-2xl border border-border px-3 py-1.5 flex items-center gap-1.5">
-                        <div class="shrink-0 flex items-center">
+                <div class="flex items-end gap-2">
+                    <div class="flex-1 bg-muted/50 rounded-2xl border border-border px-4 py-2.5 flex items-end gap-2">
+                        <div class="relative group shrink-0">
                             <button
-                                class="p-1.5 rounded-full hover:bg-muted transition-colors hover:scale-105 cursor-pointer text-muted-foreground hover:text-foreground"
+                                class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105"
                                 title="Dosya ekle"
                                 aria-label="Dosya ekle"
                                 onclick={() => mediaInputEl?.click()}
                                 type="button"
                             >
-                                <PlusIcon class="w-5 h-5" />
+                                <PaperclipIcon class="w-4 h-4 text-muted-foreground" />
                             </button>
+                            <span class="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Dosya ekle</span>
+                        </div>
+                        <div class="relative group shrink-0">
                             <button
-                                class="p-1.5 rounded-full hover:bg-muted transition-colors hover:scale-105 cursor-pointer text-muted-foreground hover:text-foreground"
-                                title="Emoji"
-                                aria-label="Emoji"
+                                class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105"
+                                title="Emoji ekle"
+                                aria-label="Emoji ekle"
+                                onclick={() => { isEmojiPickerOpen = !isEmojiPickerOpen; }}
                                 type="button"
                             >
-                                <SmileIcon class="w-5 h-5" />
+                                <SmileIcon class="w-4 h-4 text-muted-foreground" />
                             </button>
+                            <span class="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Emoji</span>
+
+                            {#if isEmojiPickerOpen}
+                                <div
+                                    bind:this={emojiPickerEl}
+                                    class="absolute bottom-full left-0 mb-2 w-64 rounded-xl border border-border bg-background shadow-xl p-3 z-30"
+                                >
+                                    <div class="text-[11px] font-semibold text-muted-foreground mb-2">Hizli ifadeler</div>
+                                    <div class="grid grid-cols-8 gap-1.5">
+                                        {#each quickEmojis as emoji}
+                                            <button
+                                                class="h-7 w-7 rounded-md hover:bg-muted text-base leading-none flex items-center justify-center"
+                                                type="button"
+                                                onclick={async () => { await insertEmoji(emoji); }}
+                                                title={emoji}
+                                                aria-label={`Emoji ${emoji}`}
+                                            >
+                                                {emoji}
+                                            </button>
+                                        {/each}
+                                    </div>
+                                </div>
+                            {/if}
                         </div>
                         <input
                             bind:this={mediaInputEl}
@@ -1064,25 +2199,25 @@
                             accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
                             onchange={handleMediaSelect}
                         />
-                        <div class="flex-1 relative flex items-center">
+                        <div class="flex-1 relative">
                             <textarea
                                 bind:this={messageTextareaEl}
                                 bind:value={messageText}
                                 onkeydown={handleKeydown}
-                                onpaste={handlePaste}
+                                onpaste={handleMessagePaste}
                                 placeholder="Mesaj yazın..."
                                 rows="1"
                                 onmouseup={() => { showFormattingToolbar = (messageTextareaEl?.selectionStart ?? 0) !== (messageTextareaEl?.selectionEnd ?? 0); }}
                                 onkeyup={() => { showFormattingToolbar = (messageTextareaEl?.selectionStart ?? 0) !== (messageTextareaEl?.selectionEnd ?? 0); }}
                                 onblur={() => { setTimeout(() => { showFormattingToolbar = false; }, 150); }}
-                                class="flex-1 w-full bg-transparent resize-none outline-none text-sm leading-relaxed placeholder:text-muted-foreground max-h-32 self-center"
+                                class="flex-1 w-full bg-transparent resize-none outline-none text-sm leading-relaxed placeholder:text-muted-foreground max-h-32"
                                 style="field-sizing: content;"
                             ></textarea>
 
                             {#if showFormattingToolbar && messageTextareaEl && (messageTextareaEl.selectionStart ?? 0) !== (messageTextareaEl.selectionEnd ?? 0)}
                                 <div class="absolute -top-10 left-0 flex gap-1 bg-muted border border-border rounded-lg p-1 shadow-md">
                                     <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95 cursor-pointer"
+                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95"
                                         onmousedown={(e) => { e.preventDefault(); formatBold(); }}
                                         type="button"
                                         title="Kalın"
@@ -1091,7 +2226,7 @@
                                         <BoldIcon class="w-4 h-4" />
                                     </button>
                                     <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95 cursor-pointer"
+                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95"
                                         onmousedown={(e) => { e.preventDefault(); formatItalic(); }}
                                         title="İtalik (Ctrl+I)"
                                         type="button"
@@ -1100,7 +2235,7 @@
                                         <ItalicIcon class="w-4 h-4" />
                                     </button>
                                     <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95 cursor-pointer"
+                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95"
                                         onmousedown={(e) => { e.preventDefault(); formatStrikethrough(); }}
                                         title="Üstü çizili"
                                         type="button"
@@ -1109,40 +2244,13 @@
                                         <StrikethroughIcon class="w-4 h-4" />
                                     </button>
                                     <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95 cursor-pointer"
+                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95"
                                         onmousedown={(e) => { e.preventDefault(); formatCode(); }}
                                         title="Kod"
                                         type="button"
                                         aria-label="Kod"
                                     >
                                         <CodeIcon class="w-4 h-4" />
-                                    </button>
-                                    <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95 cursor-pointer"
-                                        onmousedown={(e) => { e.preventDefault(); formatOrderedList(); }}
-                                        title="Numaralı Liste"
-                                        type="button"
-                                        aria-label="Numaralı Liste"
-                                    >
-                                        <ListOrderedIcon class="w-4 h-4" />
-                                    </button>
-                                    <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95 cursor-pointer"
-                                        onmousedown={(e) => { e.preventDefault(); formatBulletList(); }}
-                                        title="Maddeli Liste"
-                                        type="button"
-                                        aria-label="Maddeli Liste"
-                                    >
-                                        <ListIcon class="w-4 h-4" />
-                                    </button>
-                                    <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95 cursor-pointer"
-                                        onmousedown={(e) => { e.preventDefault(); formatQuote(); }}
-                                        title="Alıntı"
-                                        type="button"
-                                        aria-label="Alıntı"
-                                    >
-                                        <QuoteIcon class="w-4 h-4" />
                                     </button>
                                 </div>
                             {/if}
@@ -1151,7 +2259,7 @@
                     <button
                         onclick={sendMessage}
                         disabled={(!messageText.trim() && !attachedMedia) || sendingMessage}
-                        class="shrink-0 w-10 h-10 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground rounded-full flex items-center justify-center transition-all active:scale-95 cursor-pointer"
+                        class="shrink-0 w-10 h-10 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground rounded-full flex items-center justify-center transition-all active:scale-95"
                     >
                         {#if sendingMessage}
                             <div class="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin"></div>
@@ -1176,3 +2284,82 @@
         {/if}
     </div>
 </div>
+
+{#if mediaViewerOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+        class="fixed inset-0 z-200 flex items-center justify-center bg-black/85 backdrop-blur-sm"
+        onclick={() => mediaViewerOpen = false}
+        role="dialog"
+        aria-modal="true"
+        tabindex="-1"
+    >
+        <button
+            class="absolute top-4 right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-white/20 text-white hover:bg-white/35 transition-colors"
+            onclick={() => mediaViewerOpen = false}
+            aria-label="Kapat"
+        >
+            <XIcon class="w-5 h-5" />
+        </button>
+        {#if mediaViewerType === 'image'}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div onclick={(e) => e.stopPropagation()}>
+                <img
+                    src={mediaViewerUrl}
+                    alt={mediaViewerFilename || 'Fotoğraf'}
+                    class="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl"
+                />
+            </div>
+        {:else}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+                class="relative flex flex-col bg-background rounded-xl shadow-2xl overflow-hidden"
+                style="width: min(92vw, 900px); height: min(90vh, 700px);"
+                onclick={(e) => e.stopPropagation()}
+            >
+                <div class="flex items-center justify-between px-4 py-2.5 border-b border-border bg-muted/50 shrink-0">
+                    <span class="text-sm font-medium truncate flex items-center gap-2 min-w-0">
+                        <FileIcon class="w-4 h-4 text-muted-foreground shrink-0" />
+                        <span class="truncate">{mediaViewerFilename || 'Belge'}</span>
+                    </span>
+                    <div class="flex items-center gap-3 shrink-0 ml-3">
+                        <a href={mediaViewerUrl} download={mediaViewerFilename || 'belge'} class="text-xs text-primary hover:underline">İndir</a>
+                        <button
+                            class="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted transition-colors"
+                            onclick={() => mediaViewerOpen = false}
+                            aria-label="Kapat"
+                        >
+                            <XIcon class="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
+                <iframe
+                    src={mediaViewerUrl}
+                    title={mediaViewerFilename || 'Belge'}
+                    class="flex-1 w-full border-none"
+                ></iframe>
+            </div>
+        {/if}
+    </div>
+{/if}
+
+<style>
+    .message-status {
+        display: inline-flex;
+        align-items: center;
+        line-height: 1;
+        vertical-align: middle;
+    }
+
+    .message-status-double {
+        display: inline-flex;
+        align-items: center;
+    }
+
+    .message-status-double span + span {
+        margin-left: -0.34em;
+    }
+</style>

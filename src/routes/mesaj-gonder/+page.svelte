@@ -1,14 +1,12 @@
 <script lang="ts">
-	import { onMount, untrack } from 'svelte';
+	import { onMount } from 'svelte';
 	import { building } from '$app/environment';
-	import { invalidateAll } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
 	import * as Card from "$lib/components/ui/card";
 	import { Button } from "$lib/components/ui/button";
 	import { Input } from "$lib/components/ui/input";
 	import { Textarea } from "$lib/components/ui/textarea";
 	import { Label } from "$lib/components/ui/label";
-	import * as Select from "$lib/components/ui/select";
 	import { Progress } from "$lib/components/ui/progress";
 	import { Checkbox } from "$lib/components/ui/checkbox";
 	import { Badge } from "$lib/components/ui/badge";
@@ -54,13 +52,13 @@
 	const ANTIBAN_STORAGE_KEY = 'mesajGonder.antiBanSettings.v1';
 
 	type AntiBanSettings = {
-		addRandomGreeting: boolean;
 		addRandomSuffix: boolean;
-		minDelayMs: number;
-		maxDelayMs: number;
+		minDelaySec: number;
+		maxDelaySec: number;
 		batchPauseEnabled: boolean;
 		batchSize: number;
-		batchPauseMs: number;
+		batchPauseSeconds: number;
+		randomGreetings: string[];
 	};
 
 	const GREETINGS = ["Merhaba", "Selam", "İyi günler", "İyi çalışmalar", "Merhabalar", "Selamlar"];
@@ -81,7 +79,6 @@
 			)
 			.join('');
 	}
-
 	let phoneNumberText = $state("");
 	let messageBody = $state("");
 	let textareaSelection = $state({ start: 0, end: 0, text: '' });
@@ -95,32 +92,9 @@
 			.length
 	);
 
-	let { data } = $props();
-
-	let accounts = $derived(data.accounts || []);
-	let selectedAccountId = $derived(accounts.find((a: any) => a.isDefault)?.id || (accounts[0]?.id || ""));
-	let userCredits = $derived(data.credits || 0);
-
-	async function handleAccountChange(val: string) {
-		if (!val) return;
-		try {
-			const res = await fetch('/api/whatsapp/update-settings', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ accountId: val, isDefault: true })
-			});
-			const result = await res.json();
-			if (result.success) {
-				toast.success("Varsayılan hesap değiştirildi.");
-				invalidateAll();
-			} else {
-				toast.error(result.error || "Hesap seçimi başarısız.");
-			}
-		} catch (e) {
-			toast.error("Bir hata oluştu.");
-		}
-	}
-	
+	let selectedAccountId = $state("");
+	let userCredits = $state(0);
+	let accounts: any[] = $state([]);
 	let isBulk = $state(false);
 	
 	let sendStatus = $state("idle"); // idle, sending, finished, error
@@ -162,8 +136,23 @@
     let fileInput: HTMLInputElement | undefined = $state();
     let isDraggingMedia = $state(false);
 	let isDraggingNumbers = $state(false);
-	let lastLoadedAccountId = $state("");
 
+	async function fetchAccounts() {
+		try {
+			const res = await fetch('/api/whatsapp/status');
+			const data = await res.json();
+			accounts = (data.accounts || []).filter((a: any) => a.status === 'ready');
+			userCredits = data.credits || 0;
+			if (accounts.length > 0 && !selectedAccountId) {
+				const defaultAccount = accounts.find((a: any) => a.isDefault);
+				selectedAccountId = defaultAccount ? defaultAccount.id : accounts[0].id;
+			}
+		} catch (e) {
+			console.error("Account fetch error:", e);
+		}
+	}
+
+	let lastLoadedAccountId = "";
 	async function openContactModal() {
 		if (!selectedAccountId) return alert("Önce bir hesap seçmelisiniz");
 		
@@ -378,41 +367,47 @@
 
 	// Anti-ban settings
 	let antiBan = $state<AntiBanSettings>({
-		addRandomGreeting: true,     // Mesaj başına rastgele hitap ekle
 		addRandomSuffix: true,       // Mesaj sonuna gizli rastgele sayı ekle
-		minDelayMs: 3000,
-		maxDelayMs: 7000,
+		minDelaySec: 3,
+		maxDelaySec: 7,
 		batchPauseEnabled: true,     // Her N mesajdan sonra uzun bekleme
 		batchSize: 30,               // Kaç mesajda bir uzun bekleme yapılsın
-		batchPauseMs: 60000          // Uzun bekleme süresi (ms)
+		batchPauseSeconds: 180,      // Uzun bekleme süresi (saniye)
+		randomGreetings: []
 	});
-	let isAntiBanOpen = $state(false);
+
+	function parseRandomGreetings(input?: string[] | string): string[] {
+		const raw = Array.isArray(input) ? input.join('\n') : (input ?? "");
+		const list = raw
+			.split(/[\n,]/)
+			.map((item) => item.trim())
+			.filter((item) => item.length > 0);
+		return Array.from(new Set(list)).slice(0, 50);
+	}
 
 	function normalizeAntiBanSettings(input?: Partial<AntiBanSettings>): AntiBanSettings {
 		const base: AntiBanSettings = {
-			addRandomGreeting: true,
 			addRandomSuffix: true,
-			minDelayMs: 3000,
-			maxDelayMs: 7000,
+			minDelaySec: 3,
+			maxDelaySec: 7,
 			batchPauseEnabled: true,
 			batchSize: 30,
-			batchPauseMs: 60000
+			batchPauseSeconds: 180,
+			randomGreetings: []
 		};
 
-		if (!input) return base;
-
-		const minDelayMs = Math.max(500, Math.min(60000, Number(input.minDelayMs !== undefined ? input.minDelayMs : base.minDelayMs)));
-		const maxDelayMsRaw = Math.max(500, Math.min(120000, Number(input.maxDelayMs !== undefined ? input.maxDelayMs : base.maxDelayMs)));
-		const maxDelayMs = Math.max(minDelayMs, maxDelayMsRaw);
+		const minDelaySec = Math.max(1, Math.min(60, Number(input?.minDelaySec ?? base.minDelaySec)));
+		const maxDelaySecRaw = Math.max(1, Math.min(120, Number(input?.maxDelaySec ?? base.maxDelaySec)));
+		const maxDelaySec = Math.max(minDelaySec, maxDelaySecRaw);
 
 		return {
-			addRandomGreeting: input.addRandomGreeting !== undefined ? !!input.addRandomGreeting : base.addRandomGreeting,
-			addRandomSuffix: input.addRandomSuffix !== undefined ? !!input.addRandomSuffix : base.addRandomSuffix,
-			minDelayMs,
-			maxDelayMs,
-			batchPauseEnabled: input.batchPauseEnabled !== undefined ? !!input.batchPauseEnabled : base.batchPauseEnabled,
-			batchSize: Math.max(5, Math.min(200, Number(input.batchSize !== undefined ? input.batchSize : base.batchSize))),
-			batchPauseMs: Math.max(1000, Math.min(3600000, Number(input.batchPauseMs !== undefined ? input.batchPauseMs : base.batchPauseMs)))
+			addRandomSuffix: input?.addRandomSuffix ?? base.addRandomSuffix,
+			minDelaySec,
+			maxDelaySec,
+			batchPauseEnabled: input?.batchPauseEnabled ?? base.batchPauseEnabled,
+			batchSize: Math.max(5, Math.min(200, Number(input?.batchSize ?? base.batchSize))),
+			batchPauseSeconds: Math.max(30, Math.min(3600, Number(input?.batchPauseSeconds ?? base.batchPauseSeconds))),
+			randomGreetings: parseRandomGreetings((input as any)?.randomGreetings ?? (input as any)?.randomGreetingsText)
 		};
 	}
 
@@ -428,24 +423,26 @@
 		}
 	}
 
-	function saveAntiBanSettings(showFeedback = false) {
+	function saveAntiBanSettings() {
 		if (building) return;
 		try {
-			const normalized = normalizeAntiBanSettings(antiBan);
-			// Svelte 5 state update to reflect normalization in UI
-			Object.assign(antiBan, normalized);
-			localStorage.setItem(ANTIBAN_STORAGE_KEY, JSON.stringify(normalized));
-			if (showFeedback) {
-				toast.success("Ban koruma ayarları varsayılan olarak kaydedildi.");
-			}
+			localStorage.setItem(ANTIBAN_STORAGE_KEY, JSON.stringify(normalizeAntiBanSettings(antiBan)));
 		} catch (e) {
 			console.error("Anti-ban settings save error:", e);
-			if (showFeedback) {
-				toast.error("Ayarlar kaydedilemedi.");
-			}
 		}
 	}
 
+	async function fetchUserSettings() {
+		try {
+			const res = await fetch('/api/settings');
+			const data = await res.json();
+			if (data && data.messageDelay) {
+				userSettings.messageDelay = data.messageDelay;
+			}
+		} catch (e) {
+			console.error("Settings fetch error:", e);
+		}
+	}
 
 	async function startSending() {
 		const finalRecipients = phoneNumberText.split(/\r?\n/)
@@ -486,8 +483,8 @@
         const batchId = finalRecipients.length > 1 ? Math.random().toString(36).substr(2, 9) : undefined;
 
 		antiBan = normalizeAntiBanSettings(antiBan);
-		const minDelayMs = antiBan.minDelayMs;
-		const maxDelayMs = antiBan.maxDelayMs;
+		const minDelayMs = antiBan.minDelaySec * 1000;
+		const maxDelayMs = antiBan.maxDelaySec * 1000;
 
 		for (let i = 0; i < finalRecipients.length; i++) {
 			const item = finalRecipients[i];
@@ -499,7 +496,7 @@
 
 			// Her batchSize mesajdan sonra uzun bekleme (ilk mesaj öncesi değil)
 			if (antiBan.batchPauseEnabled && i > 0 && i % antiBan.batchSize === 0) {
-				const pauseMs = antiBan.batchPauseMs;
+				const pauseMs = antiBan.batchPauseSeconds * 1000;
 				const variation = pauseMs * 0.2;
 				const actualPause = Math.round(pauseMs + (Math.random() * variation * 2 - variation));
 				currentRecipient = `⏸ ${i} mesaj gönderildi — ban koruması: ${Math.round(actualPause / 1000)} sn. bekleniyor...`;
@@ -507,11 +504,11 @@
 				if (sendStatus !== "sending") break;
 			}
 
-			// Mesaj başına rastgele hitap ekle
+			// Mesaj sonuna gizli rastgele sayı ekle (her mesajı tekil yapar)
 			let finalMessage = item.message;
-			if (antiBan.addRandomGreeting && finalMessage) {
-				const greeting = GREETINGS[Math.floor(Math.random() * GREETINGS.length)];
-				finalMessage = greeting + ",\n" + finalMessage;
+			if (finalMessage && antiBan.randomGreetings.length > 0) {
+				const randomGreeting = antiBan.randomGreetings[Math.floor(Math.random() * antiBan.randomGreetings.length)];
+				finalMessage = `${randomGreeting} ${finalMessage}`;
 			}
 
 			// Mesaj sonuna sadece gizli benzersiz kod ekle
@@ -715,6 +712,8 @@
     }
 
 	onMount(() => {
+		fetchAccounts();
+		fetchUserSettings();
 		fetchTemplates();
 		loadAntiBanSettings();
 	});
@@ -722,10 +721,7 @@
 	$effect(() => {
 		if (building) return;
 		// Auto persist anti-ban options on each change for refresh durability.
-		const settings = antiBan; // Track any change in antiBan object structure or values
-		untrack(() => {
-			saveAntiBanSettings();
-		});
+		saveAntiBanSettings();
 	});
 
 	$effect(() => {
@@ -801,51 +797,21 @@
 				<Send class="w-3.5 h-3.5" /> Tekli veya toplu WhatsApp mesajları oluşturun ve gönderin.
 			</p>
 		</div>
-		<div class="flex items-center gap-3">
-			<Select.Root type="single" value={selectedAccountId} onValueChange={handleAccountChange}>
-				<Select.Trigger class="h-10 px-4 min-w-[200px] max-w-[280px] flex items-center gap-2 rounded-xl border shadow-xs font-bold text-sm bg-background transition-all hover:bg-muted group border-primary/20">
-					<div class="flex items-center gap-2 max-w-full truncate">
-						<div class="shrink-0 p-1 bg-primary/10 rounded-md group-hover:bg-primary/20 transition-colors">
-							<User class="w-3.5 h-3.5 text-primary" />
-						</div>
-						<div class="flex items-center gap-1.5 truncate">
-							<span class="truncate">
-								{accounts.find(a => a.id === selectedAccountId)?.name || "Hesap Seç"}
-							</span>
-							<Badge variant="outline" class="text-[9px] h-4 bg-muted/50 border-none font-bold opacity-80 shrink-0">
-								({userCredits})
-							</Badge>
-						</div>
-					</div>
-				</Select.Trigger>
-				<Select.Content class="rounded-xl shadow-2xl border-primary/10 min-w-[220px]">
-					{#if accounts.length === 0}
-						<div class="p-4 text-xs text-muted-foreground text-center italic">Aktif bağlı hesap bulunamadı...</div>
-					{:else}
-						{#each accounts as acc}
-							<Select.Item value={acc.id} label={acc.name} class="py-3 px-4 rounded-lg focus:bg-primary/5 mb-1 last:mb-0 transition-colors">
-								<div class="flex items-center gap-3 w-full">
-									<div class="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-muted-foreground font-bold shrink-0">
-										{acc.name.charAt(0)}
-									</div>
-									<div class="flex flex-col">
-										<span class="font-bold text-sm tracking-tight">{acc.name}</span>
-										<span class="text-[10px] text-muted-foreground font-mono">{acc.id.substring(0, 12)}...</span>
-									</div>
-									{#if acc.status === 'ready'}
-										<div class="ml-auto w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]"></div>
-									{:else}
-										<div class="ml-auto w-2 h-2 rounded-full bg-red-400"></div>
-									{/if}
-								</div>
-							</Select.Item>
-						{/each}
-					{/if}
-				</Select.Content>
-			</Select.Root>
+		<div class="flex flex-wrap items-center justify-end gap-3">
+			<Badge variant={userCredits > 5 ? "secondary" : "destructive"} class="h-9 px-4 flex items-center gap-2 rounded-full border shadow-sm font-bold text-sm">
+				<div class="w-2 h-2 rounded-full {userCredits > 5 ? 'bg-primary' : 'bg-destructive'} animate-pulse"></div>
+				Kalan Kredi: {userCredits}
+			</Badge>
+
+			<div class="h-9 px-3 rounded-full border bg-background shadow-sm flex items-center gap-2 max-w-[320px]">
+				<User class="w-3.5 h-3.5 text-primary shrink-0" />
+				<span class="text-xs font-semibold truncate">
+					{accounts.find(a => a.id === selectedAccountId)?.name || "Seçili Hesap Yok"}
+				</span>
+			</div>
 
 			{#if sendStatus === "finished"}
-				<Button variant="outline" size="sm" onclick={resetForm} class="h-10 rounded-full px-4 border shadow-sm transition-all hover:bg-muted active:scale-95">
+				<Button variant="outline" size="sm" onclick={resetForm} class="h-9 rounded-full px-4">
 					<Plus class="w-4 h-4 mr-2" /> Yeni Mesaj
 				</Button>
 			{/if}
@@ -1061,8 +1027,6 @@
 					</div>
 				</Card.Header>
 				<Card.Content class="p-6 space-y-6">
-
-
 					<div class="space-y-3">
 						<div class="flex items-center justify-between">
 							<div class="flex items-center gap-2">
@@ -1234,114 +1198,6 @@
 						{/if}
 
 						{#if sendStatus === "idle"}
-							<!-- Anti-Ban Ayarları -->
-							<div class="mt-5 border border-border/40 rounded-xl overflow-hidden">
-								<button
-									type="button"
-									onclick={() => isAntiBanOpen = !isAntiBanOpen}
-									class="w-full flex items-center justify-between px-4 py-2.5 bg-muted/40 hover:bg-muted/60 transition-colors text-xs font-semibold text-muted-foreground"
-								>
-									<div class="flex items-center gap-2">
-										<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/></svg>
-										Ban Koruma Ayarları
-									</div>
-									<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="transition-transform {isAntiBanOpen ? 'rotate-180' : ''}"><path d="m6 9 6 6 6-6"/></svg>
-								</button>
-								{#if isAntiBanOpen}
-								<div class="px-4 py-3 space-y-3 text-xs">
-									<!-- Random Greeting -->
-									<label class="flex items-start gap-3 cursor-pointer">
-										<input type="checkbox" bind:checked={antiBan.addRandomGreeting} class="mt-0.5 accent-primary" />
-										<div>
-											<span class="font-medium">Rastgele hitap ekle</span>
-											<p class="text-muted-foreground mt-0.5">Mesajın başına <i>"Merhaba, Selam, İyi günler..."</i> gibi rastgele bir hitap kelimesi eklenir.</p>
-										</div>
-									</label>
-
-									<!-- Random Suffix -->
-									<label class="flex items-start gap-3 cursor-pointer">
-										<input type="checkbox" bind:checked={antiBan.addRandomSuffix} class="mt-0.5 accent-primary" />
-										<div>
-											<span class="font-medium">Gizli rastgele sayı ekle</span>
-											<p class="text-muted-foreground mt-0.5">Mesajın en sonuna, görünmeyen özel bir karakterle birlikte rastgele bir sayı eklenir.</p>
-										</div>
-									</label>
-
-									<!-- Delay Range -->
-									<div class="grid grid-cols-2 gap-2">
-										<div>
-											<span class="block text-muted-foreground mb-1">Min. Bekleme (ms)</span>
-											<input
-												type="number"
-												min="100"
-												max="60000"
-												step="100"
-												bind:value={antiBan.minDelayMs}
-												class="w-full px-2 py-1.5 rounded-md border border-border bg-background text-xs"
-											/>
-										</div>
-										<div>
-											<span class="block text-muted-foreground mb-1">Max. Bekleme (ms)</span>
-											<input
-												type="number"
-												min="100"
-												max="120000"
-												step="100"
-												bind:value={antiBan.maxDelayMs}
-												class="w-full px-2 py-1.5 rounded-md border border-border bg-background text-xs"
-											/>
-										</div>
-									</div>
-
-									<!-- Batch Pause -->
-									<label class="flex items-start gap-3 cursor-pointer">
-										<input type="checkbox" bind:checked={antiBan.batchPauseEnabled} class="mt-0.5 accent-primary" />
-										<div>
-											<span class="font-medium">Toplu gönderim molası</span>
-											<p class="text-muted-foreground mt-0.5">Belirli sayıda mesajdan sonra uzun bir mola verilir.</p>
-										</div>
-									</label>
-									{#if antiBan.batchPauseEnabled}
-									<div class="grid grid-cols-2 gap-2 pl-6">
-										<div>
-											<span class="block text-muted-foreground mb-1">Her kaç mesajda</span>
-											<input
-												type="number"
-												min="5"
-												max="200"
-												bind:value={antiBan.batchSize}
-												class="w-full px-2 py-1.5 rounded-md border border-border bg-background text-xs"
-											/>
-										</div>
-										<div>
-											<span class="block text-muted-foreground mb-1">Mola süresi (ms)</span>
-											<input
-												type="number"
-												min="500"
-												max="3600000"
-												step="100"
-												bind:value={antiBan.batchPauseMs}
-												class="w-full px-2 py-1.5 rounded-md border border-border bg-background text-xs"
-											/>
-										</div>
-									</div>
-									{/if}
-
-									<div class="flex justify-end pt-1">
-										<Button
-											type="button"
-											variant="outline"
-											size="sm"
-											onclick={() => saveAntiBanSettings(true)}
-											class="h-8 rounded-lg text-xs"
-										>
-											<Save class="w-3.5 h-3.5 mr-1.5" /> Varsayılan Olarak Kaydet
-										</Button>
-									</div>
-								</div>
-								{/if}
-							</div>
-
 							<div class="mt-4">
 								<Button 
 									onclick={startSending} 
@@ -1385,12 +1241,12 @@
 						<p class="text-xs font-semibold text-primary/80 uppercase tracking-wide">İpucu</p>
 						<p class="text-[11px] text-muted-foreground leading-relaxed">
 							Toplu mesajlarda hesap güvenliği için mesajlar arası
-							<span class="font-bold text-primary"> {antiBan.minDelayMs}-{antiBan.maxDelayMs} ms </span>
+							<span class="font-bold text-primary"> {antiBan.minDelaySec}-{antiBan.maxDelaySec} sn </span>
 							rastgele bekleme uygulanır.
 							{#if antiBan.batchPauseEnabled}
 								Ayrica her <span class="font-bold text-primary">{antiBan.batchSize}</span>
 								mesajda yaklaşık
-								<span class="font-bold text-primary"> {antiBan.batchPauseMs} ms </span>
+								<span class="font-bold text-primary"> {antiBan.batchPauseSeconds} sn </span>
 								mola verilir.
 							{/if}
 							<span class="font-semibold">Ban Koruma Ayarları</span> bölümünden özelleştirebilirsiniz.

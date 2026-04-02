@@ -68,12 +68,12 @@
 		user = data.user,
 		accounts = [],
 		...restProps
-	}: ComponentProps<typeof Sidebar.Root> & { user?: any, accounts?: any[] } = $props();
+	}: ComponentProps<typeof Sidebar.Root> & { user?: any; accounts?: any[] } = $props();
 </script>
 
 <Sidebar.Root bind:ref {collapsible} {...restProps}>
 	<Sidebar.Header>
-		<TeamSwitcher {accounts} />
+		<TeamSwitcher accounts={accounts} />
 	</Sidebar.Header>
 	<Sidebar.Content>
 		<NavMain items={data.navMain} />

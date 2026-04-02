@@ -31,6 +31,9 @@ sqlite.db-wal
 accounts.json
 *.log
 
+# Media files (user-specific, not for version control)
+/media/
+
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
