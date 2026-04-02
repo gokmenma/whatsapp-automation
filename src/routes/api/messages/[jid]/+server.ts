@@ -23,8 +23,6 @@ function resolveDirectConversationNumber(accountId: string, jidOrNumber: string)
     const [, domain = ''] = raw.split('@');
     const digits = normalizeDirectDigits(raw);
     if ((domain === 's.whatsapp.net' || domain === 'c.us') && digits) {
-        const mapped = getCanonicalContactNumber(accountId, raw);
-        if (mapped && mapped !== digits) return mapped;
         return digits;
     }
 
