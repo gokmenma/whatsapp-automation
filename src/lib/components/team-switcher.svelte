@@ -11,6 +11,7 @@
 	import { invalidateAll } from '$app/navigation';
 	import { goto } from '$app/navigation';
 	import { UserPlus, User } from '@lucide/svelte';
+	import { onMount } from 'svelte';
 
 	// This should be `Component` after @lucide/svelte updates types
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -19,14 +20,42 @@
 	const availableAccounts = $derived(accounts.length > 0 ? accounts : teams);
 	let switchingAccountId = $state('');
 	let optimisticActiveAccountId = $state('');
+	let uiActiveAccountId = $state('');
 
 	// Active account is the default one, or the first one if none is default
 	const serverActiveAccount = $derived(availableAccounts.find((a: any) => a.isDefault) || availableAccounts[0]);
 	const activeAccount = $derived(
 		(optimisticActiveAccountId
 			? availableAccounts.find((a: any) => a.id === optimisticActiveAccountId)
-			: null) || serverActiveAccount
+			: null) ||
+		(uiActiveAccountId
+			? availableAccounts.find((a: any) => a.id === uiActiveAccountId)
+			: null) ||
+		serverActiveAccount
 	);
+
+	onMount(() => {
+		if (typeof window === 'undefined') return;
+
+		const fromStorage = String(window.localStorage.getItem('activeUiAccountId') || '').trim();
+		if (fromStorage) uiActiveAccountId = fromStorage;
+
+		if (window.location.pathname.startsWith('/mesajlar')) {
+			const fromUrl = new URLSearchParams(window.location.search).get('account');
+			if (fromUrl) uiActiveAccountId = fromUrl;
+		}
+
+		const onAccountSelected = (event: Event) => {
+			const customEvent = event as CustomEvent<{ accountId?: string }>;
+			const nextId = String(customEvent.detail?.accountId || '').trim();
+			if (!nextId) return;
+			uiActiveAccountId = nextId;
+			window.localStorage.setItem('activeUiAccountId', nextId);
+		};
+
+		window.addEventListener('account:selected', onAccountSelected as EventListener);
+		return () => window.removeEventListener('account:selected', onAccountSelected as EventListener);
+	});
 
 	$effect(() => {
 		if (!optimisticActiveAccountId) return;
@@ -41,8 +70,10 @@
 		if (acc.isDefault || switchingAccountId) return;
 		const previousAccountId = String(activeAccount?.id || '').trim();
 		optimisticActiveAccountId = acc.id;
+		uiActiveAccountId = acc.id;
 		switchingAccountId = acc.id;
 		if (typeof window !== 'undefined') {
+			window.localStorage.setItem('activeUiAccountId', acc.id);
 			window.dispatchEvent(new CustomEvent('account:selected', {
 				detail: { accountId: acc.id }
 			}));
@@ -62,20 +93,24 @@
 				optimisticActiveAccountId = '';
 			} else {
 				if (typeof window !== 'undefined' && previousAccountId) {
+					window.localStorage.setItem('activeUiAccountId', previousAccountId);
 					window.dispatchEvent(new CustomEvent('account:selected', {
 						detail: { accountId: previousAccountId }
 					}));
 				}
+				uiActiveAccountId = previousAccountId;
 				switchingAccountId = '';
 				optimisticActiveAccountId = '';
 				toast.error(data.error || "Hesap seçilemedi.");
 			}
 		} catch (e) {
 			if (typeof window !== 'undefined' && previousAccountId) {
+				window.localStorage.setItem('activeUiAccountId', previousAccountId);
 				window.dispatchEvent(new CustomEvent('account:selected', {
 					detail: { accountId: previousAccountId }
 				}));
 			}
+			uiActiveAccountId = previousAccountId;
 			switchingAccountId = '';
 			optimisticActiveAccountId = '';
 			toast.error("Bir hata oluştu.");
@@ -94,9 +129,15 @@
 						{...props}
 					>
 						<div
-							class="bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg font-bold uppercase transition-transform active:scale-95"
+							class="bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg font-bold uppercase transition-transform active:scale-95 relative"
 						>
 							{activeAccount?.name?.charAt(0) || 'W'}
+							{#if availableAccounts.some(a => a.id !== activeAccount?.id && a.unreadCount > 0)}
+								<span class="absolute -top-1 -right-1 flex h-3 w-3">
+									<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+									<span class="relative inline-flex rounded-full h-3 w-3 bg-red-500 border-2 border-sidebar-background"></span>
+								</span>
+							{/if}
 						</div>
 						<div class="grid flex-1 text-start text-sm leading-tight">
 							<span class="truncate font-semibold tracking-tight">
@@ -129,7 +170,14 @@
 							{acc.name.charAt(0)}
 						</div>
 						<div class="flex flex-col flex-1">
-							<span class="font-bold text-sm">{acc.name}</span>
+							<div class="flex items-center gap-2">
+								<span class="font-bold text-sm">{acc.name}</span>
+								{#if acc.unreadCount > 0}
+									<span class="bg-primary text-primary-foreground text-[10px] px-1.5 py-0.5 rounded-full font-black min-w-[1.2rem] text-center shadow-sm">
+										{acc.unreadCount > 99 ? '99+' : acc.unreadCount}
+									</span>
+								{/if}
+							</div>
 							<span class="text-[10px] text-muted-foreground">ID: {acc.id.substring(0, 8)}...</span>
 						</div>
 						{#if switchingAccountId === acc.id}

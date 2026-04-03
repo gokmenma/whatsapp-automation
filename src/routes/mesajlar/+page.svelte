@@ -50,7 +50,9 @@
     let messagesContainerEl = $state<HTMLDivElement | null>(null);
     let messagesEndEl = $state<HTMLDivElement | null>(null);
     let pollInterval: ReturnType<typeof setInterval> | null = null;
-    let conversationsPollInterval: ReturnType<typeof setInterval> | null = null;
+    let conversationsEventSource = $state<EventSource | null>(null);
+    let conversationsStreamAccountId = $state('');
+    let conversationsStreamFingerprint = $state('');
     let contextMenu = $state<{ x: number; y: number; conv: any } | null>(null);
     let messageMenu = $state<{ x: number; y: number; msg: any } | null>(null);
     let replyingTo = $state<{ id: string; body: string; fromMe: boolean; senderJid: string | null; senderName: string | null; mediaType: string | null } | null>(null);
@@ -70,6 +72,7 @@
     let conversationsRequestSeq = 0;
     let conversationsFetchInFlight = false;
     let conversationsReloadQueued = false;
+    const conversationsFetchTimeoutMs = 15000;
     let messageTextareaEl = $state<HTMLTextAreaElement | null>(null);
     let showFormattingToolbar = $state(false);
     let isEmojiPickerOpen = $state(false);
@@ -104,12 +107,12 @@
     function resolvePreferredAccountId(accounts: any[], currentId = '') {
         if (!accounts || accounts.length === 0) return '';
 
-        // Follow sidebar/default selection first, regardless of connection status.
-        const defaultAccount = accounts.find((a: any) => a.isDefault);
-        if (defaultAccount) return defaultAccount.id;
-
         const current = accounts.find((a: any) => a.id === currentId);
         if (current) return current.id;
+
+        // Fall back to default account when current selection is unavailable.
+        const defaultAccount = accounts.find((a: any) => a.isDefault);
+        if (defaultAccount) return defaultAccount.id;
 
         const firstReady = accounts.find((a: any) => a.status === 'ready');
         if (firstReady) return firstReady.id;
@@ -429,8 +432,9 @@
     }
 
     // Load conversations for selected account
-    async function loadConversations() {
-        if (!selectedAccountId) {
+    async function loadConversations(targetAccountId?: string) {
+        const activeAccountId = String(targetAccountId || selectedAccountId || '').trim();
+        if (!activeAccountId) {
             conversations = [];
             loadingConversations = false;
             return;
@@ -441,13 +445,19 @@
             return;
         }
 
-        const accountId = selectedAccountId;
+        const accountId = activeAccountId;
         const requestId = ++conversationsRequestSeq;
         conversationsFetchInFlight = true;
         loadingConversations = true;
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => {
+            abortController.abort();
+        }, conversationsFetchTimeoutMs);
 
         try {
-            const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accountId)}`);
+            const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accountId)}`, {
+                signal: abortController.signal
+            });
             if (requestId !== conversationsRequestSeq || accountId !== selectedAccountId) return;
 
             if (res.ok) {
@@ -475,10 +485,10 @@
                 conversations = [];
             }
         } finally {
+            clearTimeout(timeoutId);
             conversationsFetchInFlight = false;
-            if (requestId === conversationsRequestSeq && accountId === selectedAccountId) {
+            if (requestId === conversationsRequestSeq) {
                 loadingConversations = false;
-                startConversationsPolling(); // restart 3s timer only after load completes
             }
 
             if (conversationsReloadQueued) {
@@ -1404,20 +1414,64 @@
         if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     }
 
-    function startConversationsPolling() {
-        if (conversationsPollInterval) clearInterval(conversationsPollInterval);
-        if (!selectedAccountId) return;
-
-        conversationsPollInterval = setInterval(async () => {
-            await loadConversations();
-        }, 3000);
+    function stopConversationsStream() {
+        if (conversationsEventSource) {
+            conversationsEventSource.close();
+            conversationsEventSource = null;
+        }
+        conversationsStreamAccountId = '';
+        conversationsStreamFingerprint = '';
     }
 
-    function stopConversationsPolling() {
-        if (conversationsPollInterval) {
-            clearInterval(conversationsPollInterval);
-            conversationsPollInterval = null;
+    function startConversationsStream(accountId: string, options?: { skipInitialSnapshot?: boolean }) {
+        if (typeof window === 'undefined') return;
+
+        const nextAccountId = String(accountId || '').trim();
+        if (!nextAccountId) {
+            stopConversationsStream();
+            return;
         }
+
+        const sameAccountOpen =
+            conversationsEventSource && conversationsStreamAccountId === nextAccountId;
+        if (sameAccountOpen) return;
+
+        stopConversationsStream();
+
+        conversationsStreamAccountId = nextAccountId;
+        let skipInitialSnapshot = Boolean(options?.skipInitialSnapshot);
+
+        const stream = new EventSource(`/api/messages/stream?accountId=${encodeURIComponent(nextAccountId)}`);
+        conversationsEventSource = stream;
+
+        stream.addEventListener('messages', (event) => {
+            if (stream !== conversationsEventSource) return;
+            if (!selectedAccountId || selectedAccountId !== nextAccountId) return;
+
+            let payload: any = null;
+            try {
+                payload = JSON.parse(String((event as MessageEvent).data || '{}'));
+            } catch {
+                payload = null;
+            }
+
+            const fingerprint = String(payload?.fingerprint || '').trim();
+            if (fingerprint && fingerprint === conversationsStreamFingerprint) return;
+
+            if (skipInitialSnapshot) {
+                skipInitialSnapshot = false;
+                if (fingerprint) conversationsStreamFingerprint = fingerprint;
+                return;
+            }
+
+            if (fingerprint) conversationsStreamFingerprint = fingerprint;
+            void loadConversations();
+        });
+
+        stream.onerror = () => {
+            if (stream !== conversationsEventSource) return;
+            // Native EventSource auto-reconnect is more stable than manual close/reopen.
+        };
     }
 
     // Control polling based on selectedContact and messages state
@@ -1428,13 +1482,6 @@
             stopPolling();
         }
         return () => stopPolling();
-    });
-
-    $effect(() => {
-        if (!selectedAccountId) {
-            stopConversationsPolling();
-        }
-        return () => stopConversationsPolling();
     });
 
     $effect(() => {
@@ -1573,18 +1620,29 @@
         isArchivedView = false;
         exitSelectionMode();
         stopPolling();
-        stopConversationsPolling();
+        stopConversationsStream();
         resetConversationTracking();
         contextMenu = null;
         messageMenu = null;
         topActionsMenuOpen = false;
-        void loadConversations();
+        const activeAccountId = selectedAccountId;
+        void (async () => {
+            await loadConversations();
+            if (selectedAccountId === activeAccountId) {
+                startConversationsStream(activeAccountId, { skipInitialSnapshot: true });
+            }
+        })();
 
         if (typeof window !== 'undefined') {
             const url = new URL(window.location.href);
             url.searchParams.set('account', selectedAccountId);
             url.searchParams.delete('contact');
             window.history.replaceState({}, '', url.toString());
+
+            window.localStorage.setItem('activeUiAccountId', selectedAccountId);
+            window.dispatchEvent(new CustomEvent('account:selected', {
+                detail: { accountId: selectedAccountId }
+            }));
         }
     });
 
@@ -1593,6 +1651,13 @@
         syncBrowserNotificationPermission();
         if (desktopNotificationsEnabled) {
             void requestBrowserNotificationPermission();
+        }
+
+        if (typeof window !== 'undefined') {
+            const stored = String(window.localStorage.getItem('activeUiAccountId') || '').trim();
+            if (stored && data.accounts.some((a: any) => a.id === stored)) {
+                selectedAccountId = stored;
+            }
         }
 
         selectedAccountId = resolvePreferredAccountId(data.accounts, selectedAccountId);
@@ -1632,7 +1697,7 @@
 
     onDestroy(() => {
         stopPolling();
-        stopConversationsPolling();
+        stopConversationsStream();
     });
 
     // Close context menu on document click

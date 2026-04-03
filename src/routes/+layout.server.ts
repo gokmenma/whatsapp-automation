@@ -7,7 +7,7 @@ export const load = async ({ locals }) => {
     if (!locals.user) return { user: null, accounts: [] };
 
     const dbAccounts = await db.select().from(accounts).where(eq(accounts.userId, locals.user.id)).all();
-    const liveAccounts = getAllAccounts(dbAccounts);
+    const liveAccounts = await getAllAccounts(dbAccounts);
     const user = await db.select().from(users).where(eq(users.id, locals.user.id)).get();
     const settings = await db.select().from(userSettings).where(eq(userSettings.userId, locals.user.id)).get();
 

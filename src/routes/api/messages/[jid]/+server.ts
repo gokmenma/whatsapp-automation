@@ -7,6 +7,7 @@ import { getCanonicalContactNumber, getContactName, getAccountStatus } from '$li
 import { sendWhatsAppMessage } from '$lib/whatsapp';
 import { deleteWhatsAppMessageForEveryone } from '$lib/whatsapp';
 import { editWhatsAppMessage } from '$lib/whatsapp';
+import { markConversationAsReadOnWhatsApp } from '$lib/whatsapp';
 
 function normalizeDirectDigits(value: string) {
     return String(value || '').split('@')[0].split(':')[0].replace(/\D/g, '');
@@ -65,12 +66,15 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
     if (isGroupChat) {
         await db.run(sql`
             UPDATE messages
-            SET status = 'read'
+            SET status = 'read',
+                is_read = 1
             WHERE account_id = ${accountId}
               AND contact_jid = ${contactParam}
               AND from_me = 0
-              AND status NOT IN ('read', 'played', 'deleted_me', 'deleted_everyone')
+              AND is_read = 0
         `);
+
+        await markConversationAsReadOnWhatsApp(accountId, [contactParam]);
     } else {
         const rows = await db.all(sql`
             SELECT DISTINCT contact_jid
@@ -87,13 +91,16 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
         for (const jid of targetJids) {
             await db.run(sql`
                 UPDATE messages
-                SET status = 'read'
+                SET status = 'read',
+                    is_read = 1
                 WHERE account_id = ${accountId}
                   AND contact_jid = ${jid}
                   AND from_me = 0
-                  AND status NOT IN ('read', 'played', 'deleted_me', 'deleted_everyone')
+                  AND is_read = 0
             `);
         }
+
+        await markConversationAsReadOnWhatsApp(accountId, targetJids);
     }
 
     const allMsgs = await db.all(sql`

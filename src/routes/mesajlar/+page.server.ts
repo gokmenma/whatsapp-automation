@@ -9,7 +9,7 @@ export const load: PageServerLoad = async ({ locals }) => {
     if (!locals.user) throw redirect(303, '/login');
 
     const userAccounts = await db.select().from(accounts).where(eq(accounts.userId, locals.user.id));
-    const accountsWithStatus = getAllAccounts(userAccounts);
+    const accountsWithStatus = await getAllAccounts(userAccounts);
 
     return {
         accounts: accountsWithStatus,

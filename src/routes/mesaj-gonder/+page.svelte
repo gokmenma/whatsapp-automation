@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
+	import { invalidateAll } from '$app/navigation';
 	import { building } from '$app/environment';
 	import { toast } from 'svelte-sonner';
 	import * as Card from "$lib/components/ui/card";
@@ -79,6 +80,8 @@
 			)
 			.join('');
 	}
+	let { data } = $props();
+	
 	let phoneNumberText = $state("");
 	let messageBody = $state("");
 	let textareaSelection = $state({ start: 0, end: 0, text: '' });
@@ -93,8 +96,8 @@
 	);
 
 	let selectedAccountId = $state("");
-	let userCredits = $state(0);
-	let accounts: any[] = $state([]);
+	let userCredits = $state(data.credits || 0);
+	let accounts: any[] = $state(data.accounts || []);
 	let isBulk = $state(false);
 	
 	let sendStatus = $state("idle"); // idle, sending, finished, error
@@ -137,18 +140,32 @@
     let isDraggingMedia = $state(false);
 	let isDraggingNumbers = $state(false);
 
+	// Use data from parent layout whenever it updates
+	$effect(() => {
+		// Register dependencies on both accounts and credits from props
+		const incomingAccounts = data.accounts;
+		const incomingCredits = data.credits;
+		
+		// Untrack local state updates to prevent reactivity loops
+		untrack(() => {
+			// Update local accounts list
+			accounts = (incomingAccounts || []).filter((a: any) => a.status === 'ready');
+			userCredits = incomingCredits || 0;
+			
+			// If no account is selected, or if the current one is not ready/doesn't exist, try to pick one
+			const currentIsReady = accounts.find(a => a.id === selectedAccountId);
+			if (!selectedAccountId || !currentIsReady) {
+				const defaultAccount = accounts.find((a: any) => a.isDefault);
+				selectedAccountId = defaultAccount ? defaultAccount.id : (accounts[0]?.id || "");
+			}
+		});
+	});
+
 	async function fetchAccounts() {
 		try {
-			const res = await fetch('/api/whatsapp/status');
-			const data = await res.json();
-			accounts = (data.accounts || []).filter((a: any) => a.status === 'ready');
-			userCredits = data.credits || 0;
-			if (accounts.length > 0 && !selectedAccountId) {
-				const defaultAccount = accounts.find((a: any) => a.isDefault);
-				selectedAccountId = defaultAccount ? defaultAccount.id : accounts[0].id;
-			}
+			await invalidateAll();
 		} catch (e) {
-			console.error("Account fetch error:", e);
+			console.error("Account refresh error:", e);
 		}
 	}
 
@@ -175,9 +192,9 @@
 		try {
 			console.log(`[Frontend] Fetching contacts for account: ${selectedAccountId}`);
 			const res = await fetch(`/api/whatsapp/contacts?accountId=${selectedAccountId}`);
-			const data = await res.json();
-			if (data.success) {
-				allContacts = data.contacts;
+			const resData = await res.json();
+			if (resData.success) {
+				allContacts = resData.contacts;
 				lastLoadedAccountId = selectedAccountId;
 				filterContacts();
 			} else {
@@ -447,9 +464,9 @@
 	async function fetchUserSettings() {
 		try {
 			const res = await fetch('/api/settings');
-			const data = await res.json();
-			if (data && data.messageDelay) {
-				userSettings.messageDelay = data.messageDelay;
+			const resData = await res.json();
+			if (resData && resData.messageDelay) {
+				userSettings.messageDelay = resData.messageDelay;
 			}
 		} catch (e) {
 			console.error("Settings fetch error:", e);
@@ -546,18 +563,18 @@
                         batchId: batchId
 					})
 				});
-				const data = await res.json();
-				if (data.success) {
+				const resData = await res.json();
+				if (resData.success) {
 					sentCount++;
 					sendingResults.push({ to: item.to, message: item.message, status: "Başarılı" });
-					if (data.remainingCredits !== undefined) {
-						userCredits = data.remainingCredits;
+					if (resData.remainingCredits !== undefined) {
+						userCredits = resData.remainingCredits;
 					}
 				} else {
 					errorCount++;
-					sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: data.error || "Bilinmeyen hata" });
-					if (data.remainingCredits !== undefined) {
-						userCredits = data.remainingCredits;
+					sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: resData.error || "Bilinmeyen hata" });
+					if (resData.remainingCredits !== undefined) {
+						userCredits = resData.remainingCredits;
 					}
 				}
 			} catch (e: any) {
@@ -576,9 +593,9 @@
 	async function fetchTemplates() {
 		try {
 			const res = await fetch('/api/templates');
-			const data = await res.json();
-			if (data.success) {
-				templates = data.templates;
+			const resData = await res.json();
+			if (resData.success) {
+				templates = resData.templates;
 			}
 		} catch (e) {
 			console.error("Fetch templates error:", e);
@@ -596,13 +613,13 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ name: newTemplateName, content: messageBody })
 			});
-			const data = await res.json();
-			if (data.success) {
-				templates = [data.template, ...templates];
+			const resData = await res.json();
+			if (resData.success) {
+				templates = [resData.template, ...templates];
 				isSaveTemplateModalOpen = false;
 				newTemplateName = "";
 			} else {
-				alert(data.error || "Şablon kaydedilemedi");
+				alert(resData.error || "Şablon kaydedilemedi");
 			}
 		} catch (e) {
 			console.error("Save template error:", e);
@@ -724,10 +741,22 @@
     }
 
 	onMount(() => {
-		fetchAccounts();
+		const handleAccountSwitch = (e: any) => {
+			if (e.detail?.accountId) {
+				console.log("[Page] Account switch detected:", e.detail.accountId);
+				selectedAccountId = e.detail.accountId;
+			}
+		};
+		window.addEventListener('account:selected', handleAccountSwitch);
+
+		// removed fetchAccounts here since the $effect on data.accounts handles it more efficiently
 		fetchUserSettings();
 		fetchTemplates();
 		loadAntiBanSettings();
+
+		return () => {
+			window.removeEventListener('account:selected', handleAccountSwitch);
+		}
 	});
 
 	$effect(() => {
@@ -784,14 +813,14 @@
 	function exportReport() {
 		if (sendingResults.length === 0) return;
 		
-		const data = sendingResults.map(r => ({
+		const reportData = sendingResults.map(r => ({
 			"Alıcı": r.to,
 			"Mesaj": r.message,
 			"Durum": r.status,
 			"Hata Detayı": r.error || "-"
 		}));
 
-		const ws = XLSX.utils.json_to_sheet(data);
+		const ws = XLSX.utils.json_to_sheet(reportData);
 		const wb = XLSX.utils.book_new();
 		XLSX.utils.book_append_sheet(wb, ws, "Gönderim Raporu");
 		

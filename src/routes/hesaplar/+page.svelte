@@ -11,7 +11,7 @@
     import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
     import { Switch } from "$lib/components/ui/switch";
     import { Textarea } from "$lib/components/ui/textarea";
-    import { Power, RefreshCcw, Smartphone, Unplug, Plus, Trash2, Loader2, QrCode, Edit2, Download, FileSpreadsheet, Settings, Copy, Check } from "@lucide/svelte";
+    import { Power, RefreshCcw, Smartphone, Unplug, Plus, Trash2, Loader2, QrCode, Edit2, Download, FileSpreadsheet, Settings, Copy, Check, WifiOff, AlertTriangle, Wifi } from "@lucide/svelte";
 
 
 	let accounts: any[] = $state([]);
@@ -31,6 +31,20 @@
     let isAddingAccount = $state(false);
     let isSavingName = $state(false);
     let copiedId = $state("");
+    let isBrowserOffline = $state(false);
+    let lastFetchFailed = $state(false);
+
+    function syncBrowserNetwork() {
+        isBrowserOffline = typeof navigator !== 'undefined' ? !navigator.onLine : false;
+    }
+
+    function hasConnectingAccounts() {
+        return accounts.some((acc) => acc.status === 'loading' || acc.status === 'connecting');
+    }
+
+    function getConnectionIssueAccount() {
+        return accounts.find((acc) => acc.connectionIssue === 'dns' || acc.connectionIssue === 'offline');
+    }
 
     async function copyImageToClipboard(imageUrl: string, id: string) {
         if (!imageUrl) return;
@@ -95,9 +109,11 @@
 			accounts = data.accounts || [];
             limit = data.limit || 1;
             isLoading = false;
+            lastFetchFailed = false;
 		} catch (e) {
 			console.error(e);
             isLoading = false;
+            lastFetchFailed = true;
 		}
 	}
 
@@ -208,9 +224,21 @@
         window.location.href = `/api/whatsapp/export-contacts?accountId=${accountId}&type=${type}`;
     }
 	onMount(() => {
+        syncBrowserNetwork();
+        const onOnline = () => {
+            syncBrowserNetwork();
+            fetchAccounts();
+        };
+        const onOffline = () => syncBrowserNetwork();
+        window.addEventListener('online', onOnline);
+        window.addEventListener('offline', onOffline);
         fetchAccounts();
 		const interval = setInterval(fetchAccounts, 5000); 
-		return () => clearInterval(interval);
+		return () => {
+            clearInterval(interval);
+            window.removeEventListener('online', onOnline);
+            window.removeEventListener('offline', onOffline);
+        };
 	});
 </script>
 
@@ -269,6 +297,67 @@
             </Dialog.Root>
         </div>
 	</div>
+
+    {#if isBrowserOffline}
+        <div class="relative overflow-hidden rounded-2xl border border-rose-300/70 bg-linear-to-r from-rose-50 via-orange-50 to-rose-100 p-4 md:p-5 shadow-sm">
+            <div class="absolute -right-10 -top-10 h-32 w-32 rounded-full bg-rose-200/40 blur-2xl"></div>
+            <div class="relative flex items-start gap-3">
+                <div class="h-10 w-10 shrink-0 rounded-xl bg-rose-500/10 text-rose-600 border border-rose-300/60 flex items-center justify-center">
+                    <WifiOff class="w-5 h-5" />
+                </div>
+                <div>
+                    <p class="text-sm font-semibold text-rose-800">İnternet bağlantısı yok</p>
+                    <p class="text-xs md:text-sm text-rose-700/90 mt-0.5">Bağlantı geri geldiğinde hesap durumları otomatik yenilenir. Şu an WhatsApp bağlantısı kurulamaz.</p>
+                </div>
+            </div>
+        </div>
+    {:else if lastFetchFailed}
+        <div class="relative overflow-hidden rounded-2xl border border-amber-300/70 bg-linear-to-r from-amber-50 to-orange-50 p-4 md:p-5 shadow-sm">
+            <div class="relative flex items-start gap-3">
+                <div class="h-10 w-10 shrink-0 rounded-xl bg-amber-500/10 text-amber-700 border border-amber-300/60 flex items-center justify-center">
+                    <AlertTriangle class="w-5 h-5" />
+                </div>
+                <div>
+                    <p class="text-sm font-semibold text-amber-900">Sunucuya ulaşılamadı</p>
+                    <p class="text-xs md:text-sm text-amber-800/90 mt-0.5">Durum bilgisi geçici olarak alınamadı. İnternetinizi kontrol edin, sistem kısa süre içinde yeniden deneyecek.</p>
+                </div>
+            </div>
+        </div>
+    {:else if getConnectionIssueAccount()}
+        <div class="relative overflow-hidden rounded-2xl border border-orange-300/70 bg-linear-to-r from-orange-50 via-amber-50 to-orange-100 p-4 md:p-5 shadow-sm">
+            <div class="absolute -left-8 -bottom-10 h-28 w-28 rounded-full bg-orange-200/40 blur-2xl"></div>
+            <div class="relative flex items-start gap-3">
+                <div class="h-10 w-10 shrink-0 rounded-xl bg-orange-500/10 text-orange-700 border border-orange-300/60 flex items-center justify-center">
+                    <AlertTriangle class="w-5 h-5" />
+                </div>
+                <div>
+                    <p class="text-sm font-semibold text-orange-900">WhatsApp bağlantı sorunu algılandı</p>
+                    <p class="text-xs md:text-sm text-orange-800/90 mt-0.5">
+                        {#if getConnectionIssueAccount()?.connectionIssue === 'dns'}
+                            DNS/erişim hatası nedeniyle web.whatsapp.com çözümlenemedi. Ağ geri geldiğinde sistem otomatik tekrar bağlanacak.
+                        {:else}
+                            Ağ kesintisi nedeniyle bağlantı geçici olarak kapandı. Sistem otomatik olarak yeniden deniyor.
+                        {/if}
+                    </p>
+                </div>
+            </div>
+        </div>
+    {:else if hasConnectingAccounts()}
+        <div class="relative overflow-hidden rounded-2xl border border-sky-300/70 bg-linear-to-r from-sky-50 via-cyan-50 to-blue-50 p-4 md:p-5 shadow-sm">
+            <div class="relative flex items-start gap-3">
+                <div class="h-10 w-10 shrink-0 rounded-xl bg-sky-500/10 text-sky-700 border border-sky-300/60 flex items-center justify-center">
+                    <Loader2 class="w-5 h-5 animate-spin" />
+                </div>
+                <div>
+                    <p class="text-sm font-semibold text-sky-900">Bağlantı hazırlanıyor</p>
+                    <p class="text-xs md:text-sm text-sky-800/90 mt-0.5">WhatsApp oturumu başlatılıyor. QR ekranı birazdan görünebilir, lütfen sayfayı açık tutun.</p>
+                </div>
+                <div class="ml-auto hidden md:flex items-center gap-1.5 text-sky-700/80 text-xs">
+                    <Wifi class="w-3.5 h-3.5" /> Canlı denetim
+                </div>
+            </div>
+        </div>
+    {/if}
 
     {#if isLoading}
         <div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
