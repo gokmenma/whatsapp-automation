@@ -22,9 +22,19 @@ function normalizeDirectKey(value: string) {
     return String(value || '').split('@')[0].split(':')[0].replace(/\D/g, '');
 }
 
+function isLikelyInternalIdentity(value: string) {
+    const digits = normalizeDirectKey(value);
+    return digits.length >= 15 && digits === String(value || '').trim();
+}
+
 function resolveDirectConversationNumber(accountId: string, jidOrNumber: string) {
     const raw = String(jidOrNumber || '').trim();
     if (!raw) return '';
+
+    // Always prefer store-aware canonical mapping first (covers lid/device identities
+    // that can still arrive under @s.whatsapp.net).
+    const canonical = getCanonicalContactNumber(accountId, raw);
+    if (canonical) return canonical;
 
     if (!raw.includes('@')) {
         return normalizeDirectKey(raw);
@@ -38,8 +48,7 @@ function resolveDirectConversationNumber(accountId: string, jidOrNumber: string)
         return digits;
     }
 
-    // Fallback to store-aware mapping only for lid-like or non-digit identities.
-    return getCanonicalContactNumber(accountId, raw) || digits;
+    return digits;
 }
 
 function getConversationKey(accountId: string, jidOrNumber: string) {
@@ -57,8 +66,9 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 
     await ensureMessagesConversationIndex();
 
-    const accountId = url.searchParams.get('accountId');
-    if (!accountId) throw error(400, 'accountId gerekli');
+    const accountIdParam = url.searchParams.get('accountId');
+    if (!accountIdParam) throw error(400, 'accountId gerekli');
+    const accountId = accountIdParam;
 
     // Verify account belongs to user
     const account = await db.select().from(accounts)
@@ -207,7 +217,10 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         if (byCanonical.has(conversationKey)) continue; // deduplicate same-number different-JID variants
 
         const prefs = preferenceMap.get(conversationKey);
-        const resolvedName = resolveConversationName(jid, isGroup, number);
+        const resolvedNameRaw = resolveConversationName(jid, isGroup, number);
+        const resolvedName = !isGroup && isLikelyInternalIdentity(String(resolvedNameRaw || '').trim())
+            ? number
+            : resolvedNameRaw;
 
         const lastMessage = buildPreviewText(rowBody, String(row.sender_name || ''), isGroup, Boolean(row.from_me));
 

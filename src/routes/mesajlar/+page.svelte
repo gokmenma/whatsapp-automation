@@ -47,6 +47,13 @@
     let messageText = $state('');
     let mediaInputEl = $state<HTMLInputElement | null>(null);
     let attachedMedia = $state<{ data: string; mimetype: string; filename: string } | null>(null);
+    let mediaRecorder: MediaRecorder | null = null;
+    let recordingStream: MediaStream | null = null;
+    let recordingChunks: Blob[] = [];
+    let recordingTimer: ReturnType<typeof setInterval> | null = null;
+    let isRecordingAudio = $state(false);
+    let isPreparingAudioRecorder = $state(false);
+    let recordedAudioSeconds = $state(0);
     let searchQuery = $state('');
     let sendingMessage = $state(false);
     let loadingConversations = $state(false);
@@ -1279,6 +1286,137 @@
         if (mediaInputEl) mediaInputEl.value = '';
     }
 
+    function stopRecordingTimer() {
+        if (recordingTimer) {
+            clearInterval(recordingTimer);
+            recordingTimer = null;
+        }
+    }
+
+    function resetRecorderResources() {
+        if (recordingStream) {
+            for (const track of recordingStream.getTracks()) {
+                track.stop();
+            }
+            recordingStream = null;
+        }
+        mediaRecorder = null;
+        recordingChunks = [];
+        stopRecordingTimer();
+        isRecordingAudio = false;
+        isPreparingAudioRecorder = false;
+    }
+
+    function formatRecordDuration(totalSeconds: number) {
+        const safe = Math.max(0, Number(totalSeconds) || 0);
+        const mm = String(Math.floor(safe / 60)).padStart(2, '0');
+        const ss = String(safe % 60).padStart(2, '0');
+        return `${mm}:${ss}`;
+    }
+
+    async function attachRecordedAudio(blob: Blob) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.onerror = () => reject(new Error('Kayıt okunamadı'));
+            reader.readAsDataURL(blob);
+        });
+
+        const ext = blob.type.includes('ogg') ? 'ogg' : blob.type.includes('mp4') ? 'm4a' : 'webm';
+        attachedMedia = {
+            data: dataUrl,
+            mimetype: blob.type || 'audio/webm',
+            filename: `voice-${Date.now()}.${ext}`
+        };
+        toast.success('Ses kaydı eklendi. Gönderebilirsin.');
+    }
+
+    async function startAudioRecording() {
+        if (isPreparingAudioRecorder || isRecordingAudio) return;
+        if (attachedMedia) {
+            toast.error('Önce ekli dosyayı kaldır veya gönder.');
+            return;
+        }
+        if (typeof window === 'undefined' || typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+            toast.error('Tarayıcı mikrofon kaydını desteklemiyor.');
+            return;
+        }
+
+        isPreparingAudioRecorder = true;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            recordingStream = stream;
+
+            const supportsOggOpus = MediaRecorder.isTypeSupported('audio/ogg;codecs=opus');
+            const supportsWebmOpus = MediaRecorder.isTypeSupported('audio/webm;codecs=opus');
+            const mimeType = supportsOggOpus
+                ? 'audio/ogg;codecs=opus'
+                : supportsWebmOpus
+                    ? 'audio/webm;codecs=opus'
+                    : 'audio/webm';
+
+            if (!supportsOggOpus) {
+                toast.warning('Cihaz OGG/Opus desteklemiyor, kayıt bazı telefonlarda açılamayabilir.');
+            }
+
+            const recorder = new MediaRecorder(stream, { mimeType });
+            mediaRecorder = recorder;
+            recordingChunks = [];
+            recordedAudioSeconds = 0;
+
+            recorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    recordingChunks.push(event.data);
+                }
+            };
+
+            recorder.onstop = async () => {
+                try {
+                    const blob = new Blob(recordingChunks, { type: recorder.mimeType || mimeType });
+                    if (blob.size <= 0) {
+                        toast.error('Ses kaydı alınamadı.');
+                        return;
+                    }
+                    await attachRecordedAudio(blob);
+                } catch {
+                    toast.error('Ses kaydı hazırlanamadı.');
+                } finally {
+                    resetRecorderResources();
+                }
+            };
+
+            recorder.onerror = () => {
+                toast.error('Mikrofon kaydı sırasında hata oluştu.');
+                resetRecorderResources();
+            };
+
+            recorder.start();
+            isRecordingAudio = true;
+            isPreparingAudioRecorder = false;
+            recordingTimer = setInterval(() => {
+                recordedAudioSeconds += 1;
+            }, 1000);
+        } catch {
+            resetRecorderResources();
+            toast.error('Mikrofon izni verilmedi veya kayıt başlatılamadı.');
+        }
+    }
+
+    function stopAudioRecording() {
+        if (!mediaRecorder) return;
+        if (mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+        }
+    }
+
+    async function toggleAudioRecording() {
+        if (isRecordingAudio) {
+            stopAudioRecording();
+            return;
+        }
+        await startAudioRecording();
+    }
+
     async function sendMessage() {
         if ((!messageText.trim() && !attachedMedia) || !selectedContact || !selectedAccountId || sendingMessage) return;
         sendingMessage = true;
@@ -1958,6 +2096,10 @@
     onDestroy(() => {
         stopPolling();
         stopConversationsStream();
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+        }
+        resetRecorderResources();
     });
 
     // Close context menu on document click
@@ -3020,6 +3162,12 @@
                         {/if}
                     </div>
                 {/if}
+                {#if isRecordingAudio}
+                    <div class="mb-2 inline-flex items-center gap-2 rounded-full border border-red-300/70 bg-red-50/80 px-3 py-1 text-xs text-red-700">
+                        <span class="inline-block h-2 w-2 rounded-full bg-red-500 animate-pulse"></span>
+                        <span>Ses kaydediliyor {formatRecordDuration(recordedAudioSeconds)}</span>
+                    </div>
+                {/if}
                 <div class="flex items-end gap-2">
                     <div class="flex-1 bg-muted/50 rounded-2xl border border-border px-4 py-2.5 flex items-end gap-2">
                         <div class="relative group shrink-0">
@@ -3199,17 +3347,29 @@
                             {/if}
                         </div>
                     </div>
-                    <button
-                        onclick={sendMessage}
-                        disabled={(!messageText.trim() && !attachedMedia) || sendingMessage || isTranslating}
-                        class="shrink-0 w-10 h-10 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground rounded-full flex items-center justify-center transition-all active:scale-95"
-                    >
-                        {#if sendingMessage || isTranslating}
-                            <div class="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin"></div>
-                        {:else}
-                            <SendIcon class="w-4 h-4" />
-                        {/if}
-                    </button>
+                    {#if !messageText.trim() && !attachedMedia && !sendingMessage && !isTranslating}
+                        <button
+                            onclick={toggleAudioRecording}
+                            disabled={isPreparingAudioRecorder}
+                            class="relative -top-1.25 shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed {isRecordingAudio ? 'bg-red-500 hover:bg-red-500/90 text-white' : 'bg-primary hover:bg-primary/90 text-primary-foreground'}"
+                            title={isRecordingAudio ? 'Kaydı durdur' : 'Ses kaydı başlat'}
+                            aria-label={isRecordingAudio ? 'Kaydı durdur' : 'Ses kaydı başlat'}
+                        >
+                            <MicIcon class="w-4 h-4" />
+                        </button>
+                    {:else}
+                        <button
+                            onclick={sendMessage}
+                            disabled={(!messageText.trim() && !attachedMedia) || sendingMessage || isTranslating}
+                            class="relative -top-1.25 shrink-0 w-10 h-10 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground rounded-full flex items-center justify-center transition-all active:scale-95"
+                        >
+                            {#if sendingMessage || isTranslating}
+                                <div class="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin"></div>
+                            {:else}
+                                <SendIcon class="w-4 h-4" />
+                            {/if}
+                        </button>
+                    {/if}
                 </div>
                 {#if attachedMedia}
                     <div class="mt-2 inline-flex items-center gap-2 px-2.5 py-1 rounded-md border border-border bg-muted/40 text-xs">

@@ -103,8 +103,8 @@
 	);
 
 	let selectedAccountId = $state("");
-	let userCredits = $state(data.credits || 0);
-	let accounts: any[] = $state(data.accounts || []);
+	let userCredits = $state(0);
+	let accounts: any[] = $state([]);
 	let isBulk = $state(false);
 	
 	let sendStatus = $state("idle"); // idle, sending, finished, error
@@ -190,11 +190,6 @@
 			selectedContacts.clear();
 		}
 
-		if (allContacts.length > 0) {
-			filterContacts();
-			return;
-		}
-		
 		isLoadingContacts = true;
 		try {
 			console.log(`[Frontend] Fetching contacts for account: ${selectedAccountId}`);
