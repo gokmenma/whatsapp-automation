@@ -93,6 +93,18 @@
     let selectionMode = $state(false);
     let selectedConversationJids = $state<Set<string>>(new Set());
     let avatarUrls = $state<Record<string, string | null>>({});
+    type LinkPreview = {
+        url: string;
+        title: string;
+        description: string;
+        image: string;
+        thumbnail: string;
+        siteName: string;
+        domain: string;
+        authorName?: string;
+    };
+    let linkPreviewCache = $state<Record<string, LinkPreview | null>>({});
+    const linkPreviewRequests = new Set<string>();
         let mediaViewerOpen = $state(false);
         let mediaViewerUrl = $state('');
         let mediaViewerType = $state<'image' | 'document'>('image');
@@ -613,6 +625,7 @@
 
                 if (changed) {
                     messages = incoming;
+                    prefetchIncomingMessageLinkPreviews(incoming);
                     // Load avatars for group sender JIDs
                     if (isGroupJid(selectedContact?.jid)) {
                         const senderJids = new Set<string>(incoming.map((m: any) => String(m?.senderJid || m?.sender_jid || '').trim()).filter((j: string) => j.length > 0));
@@ -1691,8 +1704,98 @@
         
         // Code: `text` → <code>text</code>
         escaped = escaped.replace(/`([^`]+?)`/g, '<code>$1</code>');
+
+        // Linkify plain URLs in message body.
+        escaped = escaped.replace(/(https?:\/\/[^\s<]+)/gi, (rawUrl) => {
+            const cleanUrl = trimTrailingUrlPunctuation(rawUrl);
+            const trailing = rawUrl.slice(cleanUrl.length);
+            return `<a href="${cleanUrl}" target="_blank" rel="noopener noreferrer" class="underline break-all">${cleanUrl}</a>${trailing}`;
+        });
         
         return escaped;
+    }
+
+    function trimTrailingUrlPunctuation(value: string): string {
+        return String(value || '').replace(/[),.!?:;]+$/g, '');
+    }
+
+    function extractMessageUrls(text: string): string[] {
+        const raw = String(text || '');
+        const matches = raw.match(/https?:\/\/[^\s<]+/gi) || [];
+        return Array.from(new Set(matches.map(trimTrailingUrlPunctuation).filter(Boolean)));
+    }
+
+    function firstUrlInText(text: string): string | null {
+        const first = extractMessageUrls(text)[0];
+        return first || null;
+    }
+
+    function normalizeLinkPreviewUrl(rawUrl: string): string {
+        try {
+            const parsed = new URL(rawUrl);
+            parsed.hash = '';
+            return parsed.toString();
+        } catch {
+            return String(rawUrl || '').trim();
+        }
+    }
+
+    function isSparsePreview(preview: LinkPreview | null | undefined): boolean {
+        if (!preview) return false;
+        return !String(preview.description || '').trim() &&
+            !String(preview.image || '').trim() &&
+            !String(preview.thumbnail || '').trim();
+    }
+
+    async function ensureLinkPreviewLoaded(rawUrl: string, forceRefresh = false) {
+        const normalizedUrl = normalizeLinkPreviewUrl(rawUrl);
+        if (!normalizedUrl) return;
+        const cachedPreview = linkPreviewCache[normalizedUrl];
+        if (!forceRefresh && cachedPreview !== undefined && !isSparsePreview(cachedPreview)) return;
+        if (linkPreviewRequests.has(normalizedUrl)) return;
+
+        linkPreviewRequests.add(normalizedUrl);
+        try {
+            const cacheBust = Date.now();
+            const res = await fetch(`/api/link-preview?url=${encodeURIComponent(normalizedUrl)}&v=2&_=${cacheBust}`, { cache: 'no-store' });
+            if (!res.ok) {
+                linkPreviewCache = { ...linkPreviewCache, [normalizedUrl]: null };
+                return;
+            }
+
+            const payload = await res.json().catch(() => ({}));
+            const preview = payload?.preview;
+            if (preview && preview.url) {
+                linkPreviewCache = { ...linkPreviewCache, [normalizedUrl]: preview as LinkPreview };
+            } else {
+                linkPreviewCache = { ...linkPreviewCache, [normalizedUrl]: null };
+            }
+        } catch {
+            linkPreviewCache = { ...linkPreviewCache, [normalizedUrl]: null };
+        } finally {
+            linkPreviewRequests.delete(normalizedUrl);
+        }
+    }
+
+    function prefetchIncomingMessageLinkPreviews(messageList: any[]) {
+        for (const msg of messageList) {
+            const isFromMe = Boolean(msg?.fromMe || msg?.from_me);
+            const isDeleted = String(msg?.status || '').startsWith('deleted');
+            const mediaKind = String(msg?.mediaType || msg?.media_type || '').trim();
+            if (isFromMe || isDeleted || mediaKind) continue;
+
+            const firstUrl = firstUrlInText(String(msg?.body || ''));
+            if (!firstUrl) continue;
+            const normalizedUrl = normalizeLinkPreviewUrl(firstUrl);
+            const existing = linkPreviewCache[normalizedUrl];
+            const shouldForceRefresh = isSparsePreview(existing);
+            void ensureLinkPreviewLoaded(firstUrl, shouldForceRefresh);
+        }
+    }
+
+    function isInstagramPreview(preview: LinkPreview | null | undefined): boolean {
+        const source = String(preview?.siteName || preview?.domain || '').toLowerCase();
+        return source.includes('instagram');
     }
 
     $effect(() => {
@@ -2391,6 +2494,9 @@
                         {@const mediaKind = msg.mediaType || msg.media_type}
                         {@const mediaUrl = `/api/messages/media/${encodeURIComponent(msg.id)}`}
                         {@const mediaThumbUrl = `/api/messages/media-thumb/${encodeURIComponent(msg.id)}`}
+                        {@const bodyText = String(msg.body || '').trim()}
+                        {@const messageLinkUrl = !isDeleted && !isFromMe && !mediaKind ? firstUrlInText(bodyText) : null}
+                        {@const messageLinkPreview = messageLinkUrl ? linkPreviewCache[normalizeLinkPreviewUrl(messageLinkUrl)] : null}
                         {@const reactions = parseMessageReactions(msg.reaction)}
                         {@const quotedPreview = String(msg.quotedMsgBody || '').trim()}
                         {@const quotedMediaKind = String(msg.quotedMediaType || msg.quoted_media_type || '').trim()}
@@ -2509,6 +2615,58 @@
                                         <span class="opacity-40">·</span>
                                         <a href={mediaUrl} download class="underline hover:text-primary transition-colors">İndir</a>
                                     </div>
+                                {/if}
+
+                                {#if messageLinkPreview}
+                                    <a
+                                        href={messageLinkPreview.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        class="mx-2 mt-2 block overflow-hidden rounded-xl border border-border/60 bg-background/90 text-foreground no-underline hover:bg-background transition-colors"
+                                    >
+                                        {#if messageLinkPreview.image}
+                                            <img
+                                                src={messageLinkPreview.image}
+                                                alt={messageLinkPreview.title || messageLinkPreview.domain || 'Link onizlemesi'}
+                                                class="h-36 w-full object-cover"
+                                                loading="lazy"
+                                                onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                                            />
+                                        {/if}
+                                        {#if isInstagramPreview(messageLinkPreview)}
+                                            <div class="px-3 py-2">
+                                                <p class="text-[13px] font-semibold leading-snug line-clamp-2">{messageLinkPreview.title || 'Instagram'}</p>
+                                                <p class="mt-1 text-[12px] leading-snug text-muted-foreground line-clamp-1">{messageLinkPreview.domain || messageLinkPreview.siteName || 'www.instagram.com'}</p>
+                                            </div>
+                                        {:else}
+                                            <div class="px-3 py-2">
+                                                <div class="flex items-start gap-2">
+                                                    {#if messageLinkPreview.thumbnail}
+                                                        <img
+                                                            src={messageLinkPreview.thumbnail}
+                                                            alt={messageLinkPreview.authorName || messageLinkPreview.domain || 'Profil'}
+                                                            class="mt-0.5 h-9 w-9 shrink-0 rounded-md object-cover border border-border/50"
+                                                            loading="lazy"
+                                                            onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                                                        />
+                                                    {/if}
+                                                    <div class="min-w-0 flex-1">
+                                                        <p class="text-xs font-semibold leading-snug line-clamp-2">{messageLinkPreview.title || messageLinkPreview.domain}</p>
+                                                        {#if messageLinkPreview.description}
+                                                            <p class="mt-1 text-[11px] leading-snug text-muted-foreground line-clamp-4 whitespace-pre-wrap">{messageLinkPreview.description}</p>
+                                                        {/if}
+                                                    </div>
+                                                </div>
+                                                {#if messageLinkPreview.authorName}
+                                                    <p class="mt-1 text-[11px] leading-snug text-foreground/80 line-clamp-1">{messageLinkPreview.authorName}</p>
+                                                {/if}
+                                                <div class="mt-1.5 flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                                                    <GlobeIcon class="w-3 h-3" />
+                                                    <span>{messageLinkPreview.siteName || messageLinkPreview.domain}</span>
+                                                </div>
+                                            </div>
+                                        {/if}
+                                    </a>
                                 {/if}
 
                                 <!-- Body text / caption -->

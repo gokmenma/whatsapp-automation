@@ -988,20 +988,12 @@
 	<!-- Header Section -->
 	<div class="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b pb-6 mb-2">
 		<div class="space-y-1">
-			<h1 class="text-3xl font-bold tracking-tight bg-linear-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">Mesaj Gönder</h1>
+			<h1 class="text-3xl font-bold tracking-tight bg-linear-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">Toplu Mesaj</h1>
 			<p class="text-muted-foreground text-sm flex items-center gap-1.5">
 				<Send class="w-3.5 h-3.5" /> Tekli veya toplu WhatsApp mesajları oluşturun ve gönderin.
 			</p>
 		</div>
 		<div class="flex flex-wrap items-center justify-end gap-3">
-			<div class="h-9 px-3 rounded-full border bg-background/80 shadow-sm flex items-center gap-2">
-				<span class="text-xs font-semibold text-muted-foreground whitespace-nowrap">Mesaj Red Kontrolü</span>
-				<Switch
-					checked={userSettings.rejectMessageCheckEnabled}
-					onCheckedChange={(checked) => setRejectMessageCheckEnabled(checked === true)}
-				/>
-			</div>
-
 			<Badge variant={userCredits > 5 ? "secondary" : "destructive"} class="h-9 px-4 flex items-center gap-2 rounded-full border shadow-sm font-bold text-sm">
 				<div class="w-2 h-2 rounded-full {userCredits > 5 ? 'bg-primary' : 'bg-destructive'} animate-pulse"></div>
 				Kalan Kredi: {userCredits}
@@ -1404,6 +1396,17 @@
 
 						{#if sendStatus === "idle"}
 							<div class="mt-4">
+								<div class="mb-3 rounded-xl border bg-muted/20 px-3 py-2 flex items-center justify-between gap-3">
+									<div>
+										<p class="text-sm font-semibold">Mesaj Red Kontrolü</p>
+										<p class="text-xs text-muted-foreground">Mesaj red yanıtı veren numaralara gönderim yapılmaz.</p>
+									</div>
+									<Switch
+										checked={userSettings.rejectMessageCheckEnabled}
+										onCheckedChange={(checked) => setRejectMessageCheckEnabled(checked === true)}
+									/>
+								</div>
+
 								<Button 
 									onclick={startSending} 
 									class="w-full h-11 rounded-xl shadow-lg shadow-primary/20 transition-all hover:-translate-y-px active:translate-y-0 font-semibold text-sm" 

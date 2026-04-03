@@ -32,7 +32,7 @@
 				icon: SquareTerminalIcon,
 			},
 			{
-				title: "Mesaj Gönder",
+				title: "Toplu Mesaj",
 				url: "/mesaj-gonder",
 				icon: BotIcon,
 			},

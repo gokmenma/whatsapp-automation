@@ -281,7 +281,7 @@
                             <div class="p-2.5 bg-background rounded-lg border group-hover:bg-primary/10 group-hover:text-primary transition-colors">
                                 <SendHorizontal class="w-5 h-5" />
                             </div>
-                            <span class="text-xs font-semibold group-hover:text-primary transition-colors">Mesaj Gönder</span>
+                            <span class="text-xs font-semibold group-hover:text-primary transition-colors">Toplu Mesaj</span>
                         </a>
                         <a href="/hesaplar" class="group flex flex-col items-center justify-center p-4 rounded-xl border bg-muted/20 hover:bg-primary/5 hover:border-primary/50 transition-all duration-300 gap-3 text-center">
                             <div class="p-2.5 bg-background rounded-lg border group-hover:bg-primary/10 group-hover:text-primary transition-colors">

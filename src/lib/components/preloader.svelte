@@ -24,7 +24,7 @@
 				loadingMessage = 'Mesajlaşma paneli yükleniyor';
 				subMessage = 'Mesaj geçmişi ve sohbetler hazırlanıyor...';
 			} else if (path.startsWith('/mesaj-gonder')) {
-				loadingMessage = 'Mesaj gönderim ekranı hazırlanıyor';
+				loadingMessage = 'Toplu mesaj ekranı hazırlanıyor';
 				subMessage = 'Akıllı şablonlar ve gönderim ayarları yükleniyor...';
 			} else if (path.startsWith('/hesaplar')) {
 				loadingMessage = 'WhatsApp hesaplarınız kontrol ediliyor';

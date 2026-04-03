@@ -20,7 +20,7 @@
 	);
 	function getRouteTitle(path: string) {
 		if (path === '/') return 'Genel Bakış';
-		if (path.startsWith('/mesaj-gonder')) return 'Mesaj Gönder';
+		if (path.startsWith('/mesaj-gonder')) return 'Toplu Mesaj';
 		if (path.startsWith('/mesajlar')) return 'Mesajlar';
 		if (path.startsWith('/hesaplar')) return 'Hesaplar';
 		if (path.startsWith('/ayarlar')) return 'Ayarlar';
