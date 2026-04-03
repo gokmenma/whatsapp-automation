@@ -1377,8 +1377,45 @@ export async function sendWhatsAppMessage(
     replyTo?: { id?: string; body?: string; fromMe?: boolean; senderJid?: string | null; senderName?: string | null; mediaType?: string | null }
 ) {
     const { db } = await import('./server/db');
-    const { accounts, users, logs } = await import('./server/db/schema');
-    const { eq, sql, and } = await import('drizzle-orm');
+    const { accounts, users, logs, userSettings, messages } = await import('./server/db/schema');
+    const { eq, sql, and, desc } = await import('drizzle-orm');
+
+    const normalizeRejectText = (value: string) => String(value || '')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLocaleLowerCase('tr-TR')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const parseRejectKeywords = (input: unknown): string[] => {
+        return Array.from(new Set(
+            String(input || '')
+                .split(/\r?\n|,/)
+                .map((item) => normalizeRejectText(item))
+                .filter((item) => item.length > 0)
+        )).slice(0, 100);
+    };
+
+    const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const hasRejectKeyword = (text: string, keywords: string[]): boolean => {
+        const normalizedText = normalizeRejectText(text);
+        if (!normalizedText) return false;
+
+        for (const keyword of keywords) {
+            if (!keyword) continue;
+
+            if (keyword.includes(' ')) {
+                if (normalizedText.includes(keyword)) return true;
+                continue;
+            }
+
+            const matcher = new RegExp(`(^|[^a-z0-9])${escapeRegExp(keyword)}([^a-z0-9]|$)`, 'i');
+            if (matcher.test(normalizedText)) return true;
+        }
+
+        return false;
+    };
 
     const account = await db.select().from(accounts).where(eq(accounts.id, accountId)).get();
     if (!account) throw new Error('Account not found');
@@ -1458,6 +1495,52 @@ export async function sendWhatsAppMessage(
             // On technical errors (timeout, connection issue), log warning but attempt to send anyway
             console.warn(`[${accountId}] ⚠️ WhatsApp verification failed for ${to} (technical error), attempting delivery anyway:`, verifyErr.message || verifyErr);
             // Keep the default jid and attempt to send - don't block valid numbers due to API hiccups
+        }
+    }
+
+    if (!isGroupTarget) {
+        const settings = await db.select().from(userSettings).where(eq(userSettings.userId, account.userId)).get();
+        const shouldCheckReject = Boolean(settings?.rejectMessageCheckEnabled);
+
+        if (shouldCheckReject) {
+            const fallbackKeywords = ['mesaj red', 'red', 'mesaj ret', 'ret', 'mesaj almak istemiyorum'];
+            const configuredKeywords = parseRejectKeywords(settings?.rejectKeywords);
+            const keywords = configuredKeywords.length > 0 ? configuredKeywords : fallbackKeywords;
+
+            const normalizedDirectJid = `${jid.split('@')[0].replace(/\D/g, '')}@s.whatsapp.net`;
+            const incomingRows = await db.select({ body: messages.body })
+                .from(messages)
+                .where(and(
+                    eq(messages.accountId, accountId),
+                    eq(messages.contactJid, normalizedDirectJid),
+                    eq(messages.fromMe, false)
+                ))
+                .orderBy(desc(messages.timestamp))
+                .limit(5);
+
+            const matched = incomingRows.find((row) => hasRejectKeyword(String(row.body || ''), keywords));
+            if (matched) {
+                await db.update(users).set({ credits: sql`${users.credits} + 1` }).where(eq(users.id, account.userId));
+                if (shouldPersistLog) {
+                    await db.insert(logs).values({
+                        id: Math.random().toString(36).substr(2, 9),
+                        batchId,
+                        accountId,
+                        timestamp: new Date(),
+                        recipient: to,
+                        status: 'error',
+                        message: message.substring(0, 100),
+                        error: 'Mesaj red ifadesi tespit edildi. Gönderim atlandı.'
+                    });
+                }
+
+                return {
+                    success: false,
+                    skipped: true,
+                    error: 'Mesaj red ifadesi tespit edildi. Gönderim atlandı.',
+                    remainingCredits: result[0].updatedCredits + 1
+                };
+            }
         }
     }
     

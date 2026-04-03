@@ -8,12 +8,24 @@
     import { SendHorizontal, Plus, Settings, FileSpreadsheet, History, Users, MessageSquare, Download } from "@lucide/svelte";
     import * as Tooltip from "$lib/components/ui/tooltip";
 
-    let { data } = $props();
+    type Props = {
+        data: {
+            user?: {
+                id: string;
+                name: string;
+                email: string;
+                credits?: number;
+            };
+        };
+    };
+
+    let { data }: Props = $props();
 
     let logs: any[] = $state([]);
     let groupedLogs: any[] = $state([]);
     let stats = $state({ total: 0, success: 0, error: 0 });
-    let credits = $state(data.user?.credits || 0);
+    let fetchedCredits = $state<number | null>(null);
+    let credits = $derived(fetchedCredits ?? data.user?.credits ?? 0);
     let selectedGroup = $state<any>(null);
     let isDialogOpen = $state(false);
 
@@ -22,7 +34,7 @@
             const res = await fetch('/api/whatsapp/logs');
             const data = await res.json();
             logs = data.logs || [];
-            credits = data.credits || 0;
+            fetchedCredits = data.credits || 0;
             
             // Grouping logic
             const groups: any[] = [];
@@ -243,11 +255,11 @@
                             </div>
                             <div class="shrink-0 flex items-center gap-2">
                                 {#if group.status === 'success'}
-                                    <Badge class="bg-green-600 hover:bg-green-600 min-w-[75px] justify-center">İletildi</Badge>
+                                    <Badge class="bg-green-600 hover:bg-green-600 min-w-18.75 justify-center">İletildi</Badge>
                                 {:else if group.status === 'error'}
-                                    <Badge variant="destructive" class="min-w-[75px] justify-center">İletilmedi</Badge>
+                                    <Badge variant="destructive" class="min-w-18.75 justify-center">İletilmedi</Badge>
                                 {:else}
-                                    <Badge variant="outline" class="bg-amber-50 text-amber-600 border-amber-200 hover:bg-amber-50 min-w-[75px] justify-center">Kısmi Başarı</Badge>
+                                    <Badge variant="outline" class="bg-amber-50 text-amber-600 border-amber-200 hover:bg-amber-50 min-w-18.75 justify-center">Kısmi Başarı</Badge>
                                 {/if}
                                 <Button variant="ghost" size="sm" class="h-8 px-2" onclick={() => showDetails(group)}>Detay</Button>
                             </div>
@@ -311,7 +323,7 @@
 </div>
 
 <Dialog.Root bind:open={isDialogOpen}>
-    <Dialog.Content class="sm:max-w-[600px] max-h-[85vh] flex flex-col p-0 overflow-hidden">
+    <Dialog.Content class="sm:max-w-150 max-h-[85vh] flex flex-col p-0 overflow-hidden">
         <Dialog.Header class="p-6 border-b flex flex-row items-center justify-between space-y-0">
             <div>
                 <Dialog.Title>İşlem Detayı</Dialog.Title>
@@ -383,7 +395,7 @@
                                                     {/if}
                                                 </div>
                                             </Tooltip.Trigger>
-                                            <Tooltip.Content class="max-w-[400px] whitespace-pre-wrap text-xs bg-popover text-popover-foreground shadow-xl border p-3 rounded-xl">
+                                            <Tooltip.Content class="max-w-100 whitespace-pre-wrap text-xs bg-popover text-popover-foreground shadow-xl border p-3 rounded-xl">
                                                 {log.message}
                                                 {#if log.error}
                                                     <p class="mt-2 text-red-500 font-semibold">Hata: {log.error}</p>
