@@ -199,13 +199,13 @@
 		try {
 			console.log(`[Frontend] Fetching contacts for account: ${selectedAccountId}`);
 			const res = await fetch(`/api/whatsapp/contacts?accountId=${selectedAccountId}`);
-			const resData = await res.json();
+			const resData: any = await res.json();
 			if (resData.success) {
 				allContacts = resData.contacts;
 				lastLoadedAccountId = selectedAccountId;
 				filterContacts();
 			} else {
-				alert(data.error || "Rehber alınamadı");
+				alert(resData.error || "Rehber alınamadı");
 			}
 		} catch (e) {
 			console.error("Fetch contacts error:", e);
@@ -578,11 +578,6 @@
 	async function fetchUserSettings() {
 		try {
 			const res = await fetch('/api/settings');
-<<<<<<< HEAD
-			const resData = await res.json();
-			if (resData && resData.messageDelay) {
-				userSettings.messageDelay = resData.messageDelay;
-=======
 			const data = await res.json();
 			if (data) {
 				if (typeof data.messageDelay === 'number') userSettings.messageDelay = data.messageDelay;
@@ -592,7 +587,6 @@
 				if (typeof data.useGreetingVariations === 'boolean') antiBan.useGreetingVariations = data.useGreetingVariations;
 				if (typeof data.useIntroVariations === 'boolean') antiBan.useIntroVariations = data.useIntroVariations;
 				if (typeof data.useClosingVariations === 'boolean') antiBan.useClosingVariations = data.useClosingVariations;
->>>>>>> 3c373e0d27d8c8243fca97a5e367a6c564845336
 			}
 		} catch (e) {
 			console.error("Settings fetch error:", e);
@@ -706,18 +700,18 @@
                         batchId: batchId
 					})
 				});
-				const resData = await res.json();
+				const resData: any = await res.json();
 				if (resData.success) {
 					sentCount++;
 					sendingResults.push({ to: item.to, message: item.message, status: "Başarılı" });
 					if (resData.remainingCredits !== undefined) {
 						userCredits = resData.remainingCredits;
 					}
-				} else if (data.skipped) {
+				} else if (resData.skipped) {
 					errorCount++;
-					sendingResults.push({ to: item.to, message: item.message, status: "Atlandı", error: data.error || "Mesaj red kontrolü nedeniyle atlandı" });
-					if (data.remainingCredits !== undefined) {
-						userCredits = data.remainingCredits;
+					sendingResults.push({ to: item.to, message: item.message, status: "Atlandı", error: resData.error || "Mesaj red kontrolü nedeniyle atlandı" });
+					if (resData.remainingCredits !== undefined) {
+						userCredits = resData.remainingCredits;
 					}
 				} else {
 					errorCount++;
