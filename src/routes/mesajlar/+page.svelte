@@ -73,6 +73,8 @@
     let conversationsFetchInFlight = false;
     let conversationsReloadQueued = false;
     const conversationsFetchTimeoutMs = 15000;
+    let lastHandledAccountId = '';
+    let pendingInitialContactJid = $state('');
     let messageTextareaEl = $state<HTMLTextAreaElement | null>(null);
     let showFormattingToolbar = $state(false);
     let isEmojiPickerOpen = $state(false);
@@ -1599,15 +1601,22 @@
     });
 
     $effect(() => {
-        if (!selectedAccountId) {
+        const nextAccountId = String(selectedAccountId || '').trim();
+
+        if (!nextAccountId) {
+            lastHandledAccountId = '';
             conversations = [];
             selectedContact = null;
             messages = [];
             loadingConversations = false;
             exitSelectionMode();
             stopPolling();
+            stopConversationsStream();
             return;
         }
+
+        if (lastHandledAccountId === nextAccountId) return;
+        lastHandledAccountId = nextAccountId;
 
         // Invalidate any in-flight request and reset fetch gate so new request starts immediately.
         conversationsRequestSeq += 1;
@@ -1625,23 +1634,31 @@
         contextMenu = null;
         messageMenu = null;
         topActionsMenuOpen = false;
-        const activeAccountId = selectedAccountId;
+        const activeAccountId = nextAccountId;
         void (async () => {
-            await loadConversations();
+            await loadConversations(activeAccountId);
             if (selectedAccountId === activeAccountId) {
                 startConversationsStream(activeAccountId, { skipInitialSnapshot: true });
+
+                if (pendingInitialContactJid) {
+                    const conv = conversations.find((c) => c.contactJid === pendingInitialContactJid);
+                    if (conv) {
+                        pendingInitialContactJid = '';
+                        await selectConversation(conv);
+                    }
+                }
             }
         })();
 
         if (typeof window !== 'undefined') {
             const url = new URL(window.location.href);
-            url.searchParams.set('account', selectedAccountId);
+            url.searchParams.set('account', activeAccountId);
             url.searchParams.delete('contact');
             window.history.replaceState({}, '', url.toString());
 
-            window.localStorage.setItem('activeUiAccountId', selectedAccountId);
+            window.localStorage.setItem('activeUiAccountId', activeAccountId);
             window.dispatchEvent(new CustomEvent('account:selected', {
-                detail: { accountId: selectedAccountId }
+                detail: { accountId: activeAccountId }
             }));
         }
     });
@@ -1668,13 +1685,7 @@
         if (urlAccount && data.accounts.some((a: any) => a.id === urlAccount)) {
             selectedAccountId = urlAccount;
         }
-
-        resetConversationTracking();
-        await loadConversations();
-        if (urlContact) {
-            const conv = conversations.find(c => c.contactJid === urlContact);
-            if (conv) await selectConversation(conv);
-        }
+        pendingInitialContactJid = String(urlContact || '').trim();
     });
 
     onMount(() => {

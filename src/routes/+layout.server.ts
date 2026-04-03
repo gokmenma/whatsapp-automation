@@ -9,7 +9,11 @@ export const load = async ({ locals }) => {
     const dbAccounts = await db.select().from(accounts).where(eq(accounts.userId, locals.user.id)).all();
     const liveAccounts = await getAllAccounts(dbAccounts);
     const user = await db.select().from(users).where(eq(users.id, locals.user.id)).get();
-    const settings = await db.select().from(userSettings).where(eq(userSettings.userId, locals.user.id)).get();
+    const settings = await db
+        .select({ darkMode: userSettings.darkMode })
+        .from(userSettings)
+        .where(eq(userSettings.userId, locals.user.id))
+        .get();
 
     return {
         user: locals.user,
