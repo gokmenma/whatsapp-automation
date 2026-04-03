@@ -1632,9 +1632,11 @@ export async function sendWhatsAppMessage(
             ) : null;
             
             // Preserve group JIDs; normalize only direct chat JIDs.
-            const normalizedJid = jid.endsWith('@g.us')
-                ? jid
-                : `${jid.split('@')[0].replace(/\D/g, '')}@s.whatsapp.net`;
+            // Prefer the server-confirmed remote JID to avoid splitting threads by local number format.
+            const persistedRemoteJid = String(sentMsg?.key?.remoteJid || jid || '').trim();
+            const normalizedJid = persistedRemoteJid.endsWith('@g.us')
+                ? persistedRemoteJid
+                : `${(getCanonicalContactNumber(accountId, persistedRemoteJid) || normalizeDigits(persistedRemoteJid))}@s.whatsapp.net`;
             
             await db.insert(messagesTable).values({
                 id: `${accountId}:${sentMsg.key.id}`,

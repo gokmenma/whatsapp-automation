@@ -59,6 +59,7 @@
     let conversationsStreamFingerprint = $state('');
     let contextMenu = $state<{ x: number; y: number; conv: any } | null>(null);
     let messageMenu = $state<{ x: number; y: number; msg: any } | null>(null);
+    let contactInfoOpen = $state(false);
     let replyingTo = $state<{ id: string; body: string; fromMe: boolean; senderJid: string | null; senderName: string | null; mediaType: string | null } | null>(null);
     let editingMessageId = $state<string | null>(null);
     let locallyEditedMessageIds = $state<Set<string>>(new Set());
@@ -188,6 +189,10 @@
 
     let isImageAttachment = $derived(Boolean(attachedMedia?.mimetype?.startsWith('image/')));
     let isVideoAttachment = $derived(Boolean(attachedMedia?.mimetype?.startsWith('video/')));
+    let isPdfAttachment = $derived(Boolean(
+        attachedMedia?.mimetype === 'application/pdf' ||
+        String(attachedMedia?.filename || '').toLowerCase().endsWith('.pdf')
+    ));
 
     function resolvePreferredAccountId(accounts: any[], currentId = '') {
         if (!accounts || accounts.length === 0) return '';
@@ -1467,11 +1472,20 @@
         return String(msg?.senderName || msg?.sender_name || msg?.senderJid || msg?.sender_jid || '').trim();
     }
 
+    function openContactInfo() {
+        if (!selectedContact) return;
+        contactInfoOpen = true;
+    }
+
     function openMediaViewer(url: string, type: 'image' | 'document', filename = '') {
         mediaViewerUrl = url;
         mediaViewerType = type;
         mediaViewerFilename = filename;
         mediaViewerOpen = true;
+    }
+
+    function isPdfFilename(name: unknown) {
+        return /\.pdf(?:$|[?#])/i.test(String(name || '').trim());
     }
 
     function parseMessageReactions(raw: unknown) {
@@ -2437,10 +2451,19 @@
 
         {:else}
             <!-- Chat Header -->
-            <div class="flex items-center gap-3 px-4 py-3 border-b border-border bg-muted/30">
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+                class="flex items-center gap-3 px-4 py-3 border-b border-border bg-muted/30 text-left hover:bg-muted/45 transition-colors"
+                onclick={openContactInfo}
+            >
                 <button
                     class="md:hidden p-1 rounded-md hover:bg-muted"
-                    onclick={() => { selectedContact = null; stopPolling(); }}
+                    onclick={(e) => {
+                        e.stopPropagation();
+                        selectedContact = null;
+                        stopPolling();
+                    }}
                 >
                     <ArrowLeftIcon class="w-5 h-5" />
                 </button>
@@ -2464,6 +2487,52 @@
                     <p class="text-xs text-muted-foreground">+{selectedContact.number}</p>
                 </div>
             </div>
+
+            <Dialog.Root bind:open={contactInfoOpen}>
+                <Dialog.Content class="sm:max-w-md">
+                    <Dialog.Header>
+                        <Dialog.Title>Kişi bilgisi</Dialog.Title>
+                        <Dialog.Description>Sohbetteki kişi bilgileri</Dialog.Description>
+                    </Dialog.Header>
+
+                    {#if selectedContact}
+                        <div class="mt-2 space-y-4">
+                            <div class="flex items-center gap-3 rounded-xl border border-border bg-muted/25 px-3 py-3">
+                                {#if avatarUrls[selectedContact.jid]}
+                                    <img
+                                        src={avatarUrls[selectedContact.jid] || ''}
+                                        alt={selectedContact.name}
+                                        class="w-12 h-12 rounded-full object-cover shrink-0"
+                                        onerror={() => clearAvatarUrl(selectedContact?.jid || '')}
+                                    />
+                                {:else}
+                                    <div
+                                        class="w-12 h-12 rounded-full flex items-center justify-center text-white text-sm font-semibold shrink-0"
+                                        style="background-color: {avatarColor(selectedContact.name)};"
+                                    >
+                                        {getInitials(selectedContact.name)}
+                                    </div>
+                                {/if}
+                                <div class="min-w-0">
+                                    <p class="font-semibold text-sm truncate">{selectedContact.name}</p>
+                                    <p class="text-xs text-muted-foreground">+{selectedContact.number}</p>
+                                </div>
+                            </div>
+
+                            <div class="space-y-2 text-sm">
+                                <div class="rounded-lg border border-border/70 px-3 py-2">
+                                    <p class="text-[11px] uppercase tracking-wide text-muted-foreground">Numara</p>
+                                    <p class="font-medium break-all">+{selectedContact.number}</p>
+                                </div>
+                                <div class="rounded-lg border border-border/70 px-3 py-2">
+                                    <p class="text-[11px] uppercase tracking-wide text-muted-foreground">WhatsApp JID</p>
+                                    <p class="font-medium break-all">{selectedContact.jid}</p>
+                                </div>
+                            </div>
+                        </div>
+                    {/if}
+                </Dialog.Content>
+            </Dialog.Root>
 
             <!-- Messages Area -->
               <div class="flex-1 overflow-y-auto px-4 py-3 space-y-1"
@@ -2495,6 +2564,8 @@
                         {@const mediaUrl = `/api/messages/media/${encodeURIComponent(msg.id)}`}
                         {@const mediaThumbUrl = `/api/messages/media-thumb/${encodeURIComponent(msg.id)}`}
                         {@const bodyText = String(msg.body || '').trim()}
+                        {@const isPdfDocument = mediaKind === 'document' && isPdfFilename(bodyText)}
+                        {@const documentLabel = bodyText || (isPdfDocument ? 'PDF dosyası' : 'Belge')}
                         {@const messageLinkUrl = !isDeleted && !isFromMe && !mediaKind ? firstUrlInText(bodyText) : null}
                         {@const messageLinkPreview = messageLinkUrl ? linkPreviewCache[normalizeLinkPreviewUrl(messageLinkUrl)] : null}
                         {@const reactions = parseMessageReactions(msg.reaction)}
@@ -2598,20 +2669,34 @@
                                         </audio>
                                     </div>
                                 {:else if !isDeleted && mediaKind === 'document'}
-                                    <!-- svelte-ignore a11y_click_events_have_key_events -->
-                                    <!-- svelte-ignore a11y_no_static_element_interactions -->
-                                    <div class="px-3 pt-2 cursor-pointer" onclick={() => openMediaViewer(mediaUrl, 'document', msg.body || 'Belge')}>
-                                        <img
-                                            src={mediaThumbUrl}
-                                            alt="Belge onizlemesi"
-                                            class="max-w-full max-h-48 rounded-md border border-border/40 mb-2 object-cover"
-                                            loading="lazy"
-                                            onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-                                        />
+                                    <div class="px-3 pt-2">
+                                        <button
+                                            type="button"
+                                            class="w-full rounded-xl border border-border/60 bg-background/55 px-2.5 py-2 text-left transition-colors hover:bg-background"
+                                            onclick={() => openMediaViewer(mediaUrl, 'document', documentLabel)}
+                                            aria-label={(isPdfDocument ? 'PDF' : 'Belge') + ' aç'}
+                                        >
+                                            <div class="flex items-center gap-2.5">
+                                                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border/60 bg-muted/60 text-[10px] font-bold tracking-wide {isPdfDocument ? 'text-rose-600' : 'text-muted-foreground'}">
+                                                    {isPdfDocument ? 'PDF' : 'DOC'}
+                                                </div>
+                                                <div class="min-w-0 flex-1">
+                                                    <p class="truncate text-xs font-medium">{documentLabel}</p>
+                                                    <p class="text-[10px] text-muted-foreground">Dokunarak aç</p>
+                                                </div>
+                                                <img
+                                                    src={mediaThumbUrl}
+                                                    alt={isPdfDocument ? 'PDF onizlemesi' : 'Belge onizlemesi'}
+                                                    class="h-12 w-12 shrink-0 rounded-md border border-border/40 object-cover"
+                                                    loading="lazy"
+                                                    onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                                                />
+                                            </div>
+                                        </button>
                                     </div>
                                     <div class="flex items-center gap-2 px-3 py-2 opacity-80 text-xs font-medium">
                                         <FileIcon class="w-3.5 h-3.5 shrink-0" />
-                                        <button onclick={() => openMediaViewer(mediaUrl, 'document', msg.body || 'Belge')} class="underline hover:text-primary transition-colors">Görüntüle</button>
+                                        <button onclick={() => openMediaViewer(mediaUrl, 'document', documentLabel)} class="underline hover:text-primary transition-colors">Görüntüle</button>
                                         <span class="opacity-40">·</span>
                                         <a href={mediaUrl} download class="underline hover:text-primary transition-colors">İndir</a>
                                     </div>
@@ -2887,13 +2972,26 @@
                         </button>
                     </div>
                 {/if}
-                {#if attachedMedia && (isImageAttachment || isVideoAttachment)}
+                {#if attachedMedia && (isImageAttachment || isVideoAttachment || isPdfAttachment)}
                     <div class="mb-2 inline-block rounded-lg border border-border bg-muted/30 p-1">
                         {#if isImageAttachment}
-                            <img src={attachedMedia.data} alt={attachedMedia.filename} class="max-h-28 max-w-56 rounded-md object-cover" />
+                            <img src={attachedMedia?.data || ''} alt={attachedMedia?.filename || 'Gorsel'} class="max-h-28 max-w-56 rounded-md object-cover" />
                         {:else if isVideoAttachment}
                             <!-- svelte-ignore a11y_media_has_caption -->
-                            <video src={attachedMedia.data} class="max-h-28 max-w-56 rounded-md" controls preload="metadata"></video>
+                            <video src={attachedMedia?.data || ''} class="max-h-28 max-w-56 rounded-md" controls preload="metadata"></video>
+                        {:else if isPdfAttachment}
+                            <button
+                                type="button"
+                                class="flex w-56 items-center gap-2 rounded-md border border-border/60 bg-background px-2.5 py-2 text-left hover:bg-muted/50 transition-colors"
+                                onclick={() => openMediaViewer(attachedMedia?.data || '', 'document', attachedMedia?.filename || 'PDF dosyası')}
+                                aria-label="PDF önizlemesini aç"
+                            >
+                                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border/60 bg-rose-50 text-[10px] font-bold tracking-wide text-rose-600">PDF</div>
+                                <div class="min-w-0 flex-1">
+                                    <p class="truncate text-xs font-medium">{attachedMedia?.filename || 'PDF dosyası'}</p>
+                                    <p class="text-[10px] text-muted-foreground">Dokunarak aç</p>
+                                </div>
+                            </button>
                         {/if}
                     </div>
                 {/if}
