@@ -9,6 +9,7 @@
 	import ThemeToggle from "$lib/components/theme-toggle.svelte";
 	import { invalidateAll } from '$app/navigation';
 	import { Toaster, toast } from "svelte-sonner";
+	import Preloader from "$lib/components/preloader.svelte";
 	import './layout.css';
 
 	let { children, data } = $props();
@@ -176,6 +177,7 @@
 
 <ModeWatcher />
 <Toaster position="top-right" richColors />
+<Preloader />
 
 {#if isAuthPage}
 	{@render children()}
