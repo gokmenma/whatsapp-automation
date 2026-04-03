@@ -104,6 +104,9 @@ export const GET: RequestHandler = async ({ url, locals }) => {
                 ROW_NUMBER() OVER (PARTITION BY contact_jid ORDER BY timestamp DESC) AS rn
             FROM messages
             WHERE account_id = ${accountId}
+              AND contact_jid NOT LIKE '%@newsletter'
+              AND contact_jid NOT LIKE '%@broadcast'
+              AND contact_jid NOT LIKE '120363%@s.whatsapp.net'
               AND (
                   (body IS NOT NULL AND body != '')
                   OR media_type IS NOT NULL
@@ -122,6 +125,9 @@ export const GET: RequestHandler = async ({ url, locals }) => {
             FROM messages
             WHERE account_id = ${accountId}
               AND from_me = 0
+              AND contact_jid NOT LIKE '%@newsletter'
+              AND contact_jid NOT LIKE '%@broadcast'
+              AND contact_jid NOT LIKE '120363%@s.whatsapp.net'
               AND status NOT IN ('read', 'played', 'deleted_me', 'deleted_everyone')
               AND (
                   (body IS NOT NULL AND body != '')
@@ -230,18 +236,6 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 
     const conversations = Array.from(byCanonical.values())
         .sort((a, b) => Number(b.lastMessageAt || 0) - Number(a.lastMessageAt || 0));
-
-    if (process.env.NODE_ENV !== 'production') {
-        const probe = conversations.find((item) => String(item?.contactJid || '').includes('905409432723'));
-        console.log('[messages-api] account=%s conversations=%d probe=%j', accountId, conversations.length, probe ? {
-            contactJid: probe.contactJid,
-            lastMessage: probe.lastMessage,
-            lastMessageStatus: probe.lastMessageStatus,
-            lastMessageAt: probe.lastMessageAt,
-            unreadCount: probe.unreadCount,
-            unreadPreview: probe.unreadPreview
-        } : null);
-    }
 
     return json({ conversations });
 };

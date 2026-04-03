@@ -30,6 +30,10 @@
     import ItalicIcon from '@lucide/svelte/icons/italic';
     import StrikethroughIcon from '@lucide/svelte/icons/strikethrough';
     import CodeIcon from '@lucide/svelte/icons/code';
+    import GlobeIcon from '@lucide/svelte/icons/globe';
+    import Languages from '@lucide/svelte/icons/languages';
+    import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+    import CheckIcon from '@lucide/svelte/icons/check';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as Dialog from '$lib/components/ui/dialog';
 
@@ -50,7 +54,9 @@
     let messagesContainerEl = $state<HTMLDivElement | null>(null);
     let messagesEndEl = $state<HTMLDivElement | null>(null);
     let pollInterval: ReturnType<typeof setInterval> | null = null;
-    let conversationsPollInterval: ReturnType<typeof setInterval> | null = null;
+    let conversationsEventSource = $state<EventSource | null>(null);
+    let conversationsStreamAccountId = $state('');
+    let conversationsStreamFingerprint = $state('');
     let contextMenu = $state<{ x: number; y: number; conv: any } | null>(null);
     let messageMenu = $state<{ x: number; y: number; msg: any } | null>(null);
     let replyingTo = $state<{ id: string; body: string; fromMe: boolean; senderJid: string | null; senderName: string | null; mediaType: string | null } | null>(null);
@@ -70,6 +76,9 @@
     let conversationsRequestSeq = 0;
     let conversationsFetchInFlight = false;
     let conversationsReloadQueued = false;
+    const conversationsFetchTimeoutMs = 15000;
+    let lastHandledAccountId = '';
+    let pendingInitialContactJid = $state('');
     let messageTextareaEl = $state<HTMLTextAreaElement | null>(null);
     let showFormattingToolbar = $state(false);
     let isEmojiPickerOpen = $state(false);
@@ -89,6 +98,73 @@
         let mediaViewerType = $state<'image' | 'document'>('image');
         let mediaViewerFilename = $state('');
 
+    // Translation
+    let translationEnabled = $state(false);
+    let translationTargetLang = $state('en');
+    let isTranslating = $state(false);
+    let translationPreview = $state('');
+    let langPickerOpen = $state(false);
+
+    // Per-message translation
+    let translatedMessages = $state<Map<string, { text: string; lang: string }>>(new Map());
+    let translatingMessageIds = $state<Set<string>>(new Set());
+    let msgTranslateLang = $state('tr');
+    let msgLangPickerOpen = $state(false);
+
+    async function translateMessage(msg: any) {
+        const id = String(msg.id);
+        const body = msg.body;
+        if (!body?.trim()) return;
+        translatingMessageIds = new Set([...translatingMessageIds, id]);
+        try {
+            const translated = await translateText(body.trim(), msgTranslateLang);
+            const next = new Map(translatedMessages);
+            next.set(id, { text: translated, lang: msgTranslateLang });
+            translatedMessages = next;
+        } catch {
+            toast.error('Çeviri yapılamadı');
+        } finally {
+            const next = new Set(translatingMessageIds);
+            next.delete(id);
+            translatingMessageIds = next;
+        }
+        messageMenu = null;
+        msgLangPickerOpen = false;
+    }
+
+    function revertMessageTranslation(id: string) {
+        const next = new Map(translatedMessages);
+        next.delete(id);
+        translatedMessages = next;
+    }
+
+    const translationLanguages = [
+        { code: 'tr', label: 'Türkçe' },
+        { code: 'en', label: 'İngilizce' },
+        { code: 'de', label: 'Almanca' },
+        { code: 'fr', label: 'Fransızca' },
+        { code: 'es', label: 'İspanyolca' },
+        { code: 'it', label: 'İtalyanca' },
+        { code: 'pt', label: 'Portekizce' },
+        { code: 'ru', label: 'Rusça' },
+        { code: 'ar', label: 'Arapça' },
+        { code: 'zh', label: 'Çince' },
+        { code: 'ja', label: 'Japonca' },
+        { code: 'ko', label: 'Korece' },
+        { code: 'nl', label: 'Hollandaca' },
+        { code: 'pl', label: 'Lehçe' },
+        { code: 'uk', label: 'Ukraynaca' },
+    ];
+
+    async function translateText(text: string, targetLang: string): Promise<string> {
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Çeviri başarısız');
+        const data = await res.json();
+        const translated = (data[0] as any[]).map((seg: any) => seg[0]).join('');
+        return translated;
+    }
+
     const quickEmojis = ['😀', '😄', '😂', '🤣', '😊', '😉', '😍', '😘', '😎', '🤝', '🙏', '💪', '🔥', '✅', '🎉', '❤️', '👍', '👋', '😅', '😇', '🤔', '😢', '😡', '👏'];
 
     let notificationAudio: HTMLAudioElement | null = null;
@@ -104,12 +180,12 @@
     function resolvePreferredAccountId(accounts: any[], currentId = '') {
         if (!accounts || accounts.length === 0) return '';
 
-        // Follow sidebar/default selection first, regardless of connection status.
-        const defaultAccount = accounts.find((a: any) => a.isDefault);
-        if (defaultAccount) return defaultAccount.id;
-
         const current = accounts.find((a: any) => a.id === currentId);
         if (current) return current.id;
+
+        // Fall back to default account when current selection is unavailable.
+        const defaultAccount = accounts.find((a: any) => a.isDefault);
+        if (defaultAccount) return defaultAccount.id;
 
         const firstReady = accounts.find((a: any) => a.status === 'ready');
         if (firstReady) return firstReady.id;
@@ -429,8 +505,9 @@
     }
 
     // Load conversations for selected account
-    async function loadConversations() {
-        if (!selectedAccountId) {
+    async function loadConversations(targetAccountId?: string) {
+        const activeAccountId = String(targetAccountId || selectedAccountId || '').trim();
+        if (!activeAccountId) {
             conversations = [];
             loadingConversations = false;
             return;
@@ -441,13 +518,19 @@
             return;
         }
 
-        const accountId = selectedAccountId;
+        const accountId = activeAccountId;
         const requestId = ++conversationsRequestSeq;
         conversationsFetchInFlight = true;
         loadingConversations = true;
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => {
+            abortController.abort();
+        }, conversationsFetchTimeoutMs);
 
         try {
-            const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accountId)}`);
+            const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accountId)}`, {
+                signal: abortController.signal
+            });
             if (requestId !== conversationsRequestSeq || accountId !== selectedAccountId) return;
 
             if (res.ok) {
@@ -475,10 +558,10 @@
                 conversations = [];
             }
         } finally {
+            clearTimeout(timeoutId);
             conversationsFetchInFlight = false;
-            if (requestId === conversationsRequestSeq && accountId === selectedAccountId) {
+            if (requestId === conversationsRequestSeq) {
                 loadingConversations = false;
-                startConversationsPolling(); // restart 3s timer only after load completes
             }
 
             if (conversationsReloadQueued) {
@@ -582,6 +665,8 @@
 
         selectedContact = { jid: conv.contactJid, name: conv.name, number: conv.number };
         messages = [];
+        translatedMessages = new Map();
+        translatingMessageIds = new Set();
         stopPolling();
         contextMenu = null;
 
@@ -1179,7 +1264,20 @@
     async function sendMessage() {
         if ((!messageText.trim() && !attachedMedia) || !selectedContact || !selectedAccountId || sendingMessage) return;
         sendingMessage = true;
-        const text = messageText.trim();
+
+        let rawText = messageText.trim();
+        if (translationEnabled && rawText) {
+            isTranslating = true;
+            try {
+                rawText = await translateText(rawText, translationTargetLang);
+            } catch {
+                toast.error('Çeviri yapılamadı, orijinal metin gönderiliyor');
+            } finally {
+                isTranslating = false;
+            }
+        }
+
+        const text = rawText;
         const media = attachedMedia;
         const replyTo = replyingTo;
         const editTargetId = editingMessageId;
@@ -1404,20 +1502,64 @@
         if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     }
 
-    function startConversationsPolling() {
-        if (conversationsPollInterval) clearInterval(conversationsPollInterval);
-        if (!selectedAccountId) return;
-
-        conversationsPollInterval = setInterval(async () => {
-            await loadConversations();
-        }, 3000);
+    function stopConversationsStream() {
+        if (conversationsEventSource) {
+            conversationsEventSource.close();
+            conversationsEventSource = null;
+        }
+        conversationsStreamAccountId = '';
+        conversationsStreamFingerprint = '';
     }
 
-    function stopConversationsPolling() {
-        if (conversationsPollInterval) {
-            clearInterval(conversationsPollInterval);
-            conversationsPollInterval = null;
+    function startConversationsStream(accountId: string, options?: { skipInitialSnapshot?: boolean }) {
+        if (typeof window === 'undefined') return;
+
+        const nextAccountId = String(accountId || '').trim();
+        if (!nextAccountId) {
+            stopConversationsStream();
+            return;
         }
+
+        const sameAccountOpen =
+            conversationsEventSource && conversationsStreamAccountId === nextAccountId;
+        if (sameAccountOpen) return;
+
+        stopConversationsStream();
+
+        conversationsStreamAccountId = nextAccountId;
+        let skipInitialSnapshot = Boolean(options?.skipInitialSnapshot);
+
+        const stream = new EventSource(`/api/messages/stream?accountId=${encodeURIComponent(nextAccountId)}`);
+        conversationsEventSource = stream;
+
+        stream.addEventListener('messages', (event) => {
+            if (stream !== conversationsEventSource) return;
+            if (!selectedAccountId || selectedAccountId !== nextAccountId) return;
+
+            let payload: any = null;
+            try {
+                payload = JSON.parse(String((event as MessageEvent).data || '{}'));
+            } catch {
+                payload = null;
+            }
+
+            const fingerprint = String(payload?.fingerprint || '').trim();
+            if (fingerprint && fingerprint === conversationsStreamFingerprint) return;
+
+            if (skipInitialSnapshot) {
+                skipInitialSnapshot = false;
+                if (fingerprint) conversationsStreamFingerprint = fingerprint;
+                return;
+            }
+
+            if (fingerprint) conversationsStreamFingerprint = fingerprint;
+            void loadConversations();
+        });
+
+        stream.onerror = () => {
+            if (stream !== conversationsEventSource) return;
+            // Native EventSource auto-reconnect is more stable than manual close/reopen.
+        };
     }
 
     // Control polling based on selectedContact and messages state
@@ -1430,11 +1572,24 @@
         return () => stopPolling();
     });
 
+    // Live translation preview
+    let translationDebounceTimer: ReturnType<typeof setTimeout> | null = null;
     $effect(() => {
-        if (!selectedAccountId) {
-            stopConversationsPolling();
+        const text = messageText;
+        const enabled = translationEnabled;
+        const lang = translationTargetLang;
+        if (translationDebounceTimer) clearTimeout(translationDebounceTimer);
+        if (!enabled || !text.trim()) {
+            translationPreview = '';
+            return;
         }
-        return () => stopConversationsPolling();
+        translationDebounceTimer = setTimeout(async () => {
+            try {
+                translationPreview = await translateText(text.trim(), lang);
+            } catch {
+                translationPreview = '';
+            }
+        }, 600);
     });
 
     $effect(() => {
@@ -1552,15 +1707,22 @@
     });
 
     $effect(() => {
-        if (!selectedAccountId) {
+        const nextAccountId = String(selectedAccountId || '').trim();
+
+        if (!nextAccountId) {
+            lastHandledAccountId = '';
             conversations = [];
             selectedContact = null;
             messages = [];
             loadingConversations = false;
             exitSelectionMode();
             stopPolling();
+            stopConversationsStream();
             return;
         }
+
+        if (lastHandledAccountId === nextAccountId) return;
+        lastHandledAccountId = nextAccountId;
 
         // Invalidate any in-flight request and reset fetch gate so new request starts immediately.
         conversationsRequestSeq += 1;
@@ -1573,18 +1735,37 @@
         isArchivedView = false;
         exitSelectionMode();
         stopPolling();
-        stopConversationsPolling();
+        stopConversationsStream();
         resetConversationTracking();
         contextMenu = null;
         messageMenu = null;
         topActionsMenuOpen = false;
-        void loadConversations();
+        const activeAccountId = nextAccountId;
+        void (async () => {
+            await loadConversations(activeAccountId);
+            if (selectedAccountId === activeAccountId) {
+                startConversationsStream(activeAccountId, { skipInitialSnapshot: true });
+
+                if (pendingInitialContactJid) {
+                    const conv = conversations.find((c) => c.contactJid === pendingInitialContactJid);
+                    if (conv) {
+                        pendingInitialContactJid = '';
+                        await selectConversation(conv);
+                    }
+                }
+            }
+        })();
 
         if (typeof window !== 'undefined') {
             const url = new URL(window.location.href);
-            url.searchParams.set('account', selectedAccountId);
+            url.searchParams.set('account', activeAccountId);
             url.searchParams.delete('contact');
             window.history.replaceState({}, '', url.toString());
+
+            window.localStorage.setItem('activeUiAccountId', activeAccountId);
+            window.dispatchEvent(new CustomEvent('account:selected', {
+                detail: { accountId: activeAccountId }
+            }));
         }
     });
 
@@ -1595,6 +1776,13 @@
             void requestBrowserNotificationPermission();
         }
 
+        if (typeof window !== 'undefined') {
+            const stored = String(window.localStorage.getItem('activeUiAccountId') || '').trim();
+            if (stored && data.accounts.some((a: any) => a.id === stored)) {
+                selectedAccountId = stored;
+            }
+        }
+
         selectedAccountId = resolvePreferredAccountId(data.accounts, selectedAccountId);
         // Restore from URL params
         const urlParams = new URLSearchParams(window.location.search);
@@ -1603,13 +1791,7 @@
         if (urlAccount && data.accounts.some((a: any) => a.id === urlAccount)) {
             selectedAccountId = urlAccount;
         }
-
-        resetConversationTracking();
-        await loadConversations();
-        if (urlContact) {
-            const conv = conversations.find(c => c.contactJid === urlContact);
-            if (conv) await selectConversation(conv);
-        }
+        pendingInitialContactJid = String(urlContact || '').trim();
     });
 
     onMount(() => {
@@ -1632,7 +1814,7 @@
 
     onDestroy(() => {
         stopPolling();
-        stopConversationsPolling();
+        stopConversationsStream();
     });
 
     // Close context menu on document click
@@ -1641,6 +1823,7 @@
         function handleDocClick() {
             contextMenu = null;
             messageMenu = null;
+            msgLangPickerOpen = false;
             topActionsMenuOpen = false;
             selectionActionsMenuOpen = false;
         }
@@ -2330,9 +2513,33 @@
 
                                 <!-- Body text / caption -->
                                 {#if msg.body}
-                                    <p class="px-3 py-1.5 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">
-                                        {@html parseMessageFormatting(msg.body)}
-                                    </p>
+                                    {#if translatedMessages.has(String(msg.id))}
+                                        {@const msgTranslation = translatedMessages.get(String(msg.id))!}
+                                        <p class="px-3 py-1.5 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">
+                                            {@html parseMessageFormatting(msgTranslation.text)}
+                                        </p>
+                                        <div class="px-3 pb-1.5 flex items-center gap-1.5">
+                                            <Languages class="w-3 h-3 {isFromMe ? 'text-primary-foreground/50' : 'text-muted-foreground'}" />
+                                            <span class="text-[10px] {isFromMe ? 'text-primary-foreground/50' : 'text-muted-foreground'}">{translationLanguages.find(l => l.code === msgTranslation.lang)?.label ?? msgTranslation.lang} · </span>
+                                            <button
+                                                type="button"
+                                                onclick={() => revertMessageTranslation(String(msg.id))}
+                                                class="text-[10px] underline underline-offset-2 {isFromMe ? 'text-primary-foreground/70 hover:text-primary-foreground' : 'text-muted-foreground hover:text-foreground'} transition-colors"
+                                            >Orijinali göster</button>
+                                        </div>
+                                    {:else if translatingMessageIds.has(String(msg.id))}
+                                        <p class="px-3 py-1.5 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">
+                                            {@html parseMessageFormatting(msg.body)}
+                                        </p>
+                                        <div class="px-3 pb-1.5 flex items-center gap-1.5">
+                                            <div class="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin {isFromMe ? 'text-primary-foreground/50' : 'text-muted-foreground'}"></div>
+                                            <span class="text-[10px] {isFromMe ? 'text-primary-foreground/50' : 'text-muted-foreground'}">Çevriliyor...</span>
+                                        </div>
+                                    {:else}
+                                        <p class="px-3 py-1.5 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">
+                                            {@html parseMessageFormatting(msg.body)}
+                                        </p>
+                                    {/if}
                                 {:else if !mediaKind}
                                     <div class="px-3 py-1.5"></div>
                                 {/if}
@@ -2421,6 +2628,45 @@
                             Duzenle
                         </button>
                     {/if}
+                    <!-- Çevir row with inline language picker -->
+                    <div class="relative">
+                        <div class="flex items-center">
+                            <button
+                                class="flex-1 flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors"
+                                onclick={() => translateMessage(messageMenu!.msg)}
+                                role="menuitem"
+                            >
+                                <Languages class="w-4 h-4 shrink-0" />
+                                <span class="flex-1">Çevir</span>
+                            </button>
+                            <button
+                                type="button"
+                                class="flex items-center gap-1 px-2 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors border-l border-border/50"
+                                onclick={(e) => { e.stopPropagation(); msgLangPickerOpen = !msgLangPickerOpen; }}
+                                role="menuitem"
+                                aria-label="Çeviri dili seç"
+                            >
+                                <span class="font-medium">{translationLanguages.find(l => l.code === msgTranslateLang)?.label ?? msgTranslateLang}</span>
+                                <ChevronDownIcon class="w-3 h-3 transition-transform {msgLangPickerOpen ? 'rotate-180' : ''}" />
+                            </button>
+                        </div>
+                        {#if msgLangPickerOpen}
+                            <div class="border-t border-border/50 bg-muted/30 py-1 max-h-48 overflow-y-auto">
+                                {#each translationLanguages as lang}
+                                    <button
+                                        type="button"
+                                        class="w-full flex items-center justify-between px-4 py-1.5 text-xs hover:bg-muted transition-colors {msgTranslateLang === lang.code ? 'text-primary font-semibold' : 'text-foreground'}"
+                                        onclick={(e) => { e.stopPropagation(); msgTranslateLang = lang.code; msgLangPickerOpen = false; }}
+                                    >
+                                        {lang.label}
+                                        {#if msgTranslateLang === lang.code}
+                                            <CheckIcon class="w-3 h-3 text-primary" />
+                                        {/if}
+                                    </button>
+                                {/each}
+                            </div>
+                        {/if}
+                    </div>
                     <div class="mx-2 my-1 h-px bg-border/70"></div>
                     <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={openMessageDeleteDialog} role="menuitem">
                         <TrashIcon class="w-4 h-4" />
@@ -2548,6 +2794,67 @@
                             accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
                             onchange={handleMediaSelect}
                         />
+                        <!-- Translation toggle & language picker -->
+                        <div class="relative shrink-0">
+                            {#if translationEnabled}
+                                <!-- Active pill: icon + language name + chevron -->
+                                <button
+                                    type="button"
+                                    onclick={() => { langPickerOpen = !langPickerOpen; }}
+                                    class="flex items-center gap-1 h-7 pl-2 pr-1.5 rounded-full border border-primary/40 bg-primary/10 text-primary text-xs font-medium hover:bg-primary/15 transition-all"
+                                    aria-label="Dil seç"
+                                >
+                                    <Languages class="w-3.5 h-3.5 shrink-0" />
+                                    <span>{translationLanguages.find(l => l.code === translationTargetLang)?.label ?? translationTargetLang}</span>
+                                    <ChevronDownIcon class="w-3 h-3 shrink-0 opacity-60 transition-transform {langPickerOpen ? 'rotate-180' : ''}" />
+                                </button>
+                            {:else}
+                                <!-- Inactive icon button -->
+                                <button
+                                    type="button"
+                                    onclick={() => { translationEnabled = true; langPickerOpen = true; translationPreview = ''; }}
+                                    class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105 text-muted-foreground"
+                                    title="Çeviriyi etkinleştir"
+                                    aria-label="Çeviriyi etkinleştir"
+                                >
+                                    <Languages class="w-4 h-4" />
+                                </button>
+                            {/if}
+
+                            <!-- Custom language picker dropdown -->
+                            {#if langPickerOpen}
+                                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                                <div
+                                    class="fixed inset-0 z-20"
+                                    onclick={() => { langPickerOpen = false; }}
+                                ></div>
+                                <div class="absolute bottom-full left-0 mb-2 w-48 rounded-xl border border-border bg-background shadow-xl z-30 overflow-hidden">
+                                    <div class="flex items-center justify-between px-3 py-2 border-b border-border">
+                                        <span class="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Hedef dil</span>
+                                        <button
+                                            type="button"
+                                            class="text-[10px] text-destructive/70 hover:text-destructive px-1.5 py-0.5 rounded hover:bg-destructive/10 transition-colors"
+                                            onclick={(e) => { e.stopPropagation(); translationEnabled = false; langPickerOpen = false; translationPreview = ''; }}
+                                        >Kapat</button>
+                                    </div>
+                                    <div class="py-1 max-h-64 overflow-y-auto">
+                                        {#each translationLanguages as lang}
+                                            <button
+                                                type="button"
+                                                onclick={(e) => { e.stopPropagation(); translationTargetLang = lang.code; langPickerOpen = false; }}
+                                                class="w-full flex items-center justify-between px-3 py-1.5 text-sm hover:bg-muted transition-colors {translationTargetLang === lang.code ? 'text-primary font-medium bg-primary/5' : 'text-foreground'}"
+                                            >
+                                                {lang.label}
+                                                {#if translationTargetLang === lang.code}
+                                                    <CheckIcon class="w-3.5 h-3.5 text-primary" />
+                                                {/if}
+                                            </button>
+                                        {/each}
+                                    </div>
+                                </div>
+                            {/if}
+                        </div>
                         <div class="flex-1 relative">
                             <textarea
                                 bind:this={messageTextareaEl}
@@ -2562,6 +2869,12 @@
                                 class="flex-1 w-full bg-transparent resize-none outline-none text-sm leading-relaxed placeholder:text-muted-foreground max-h-32"
                                 style="field-sizing: content;"
                             ></textarea>
+                            {#if translationEnabled && translationPreview && translationPreview !== messageText.trim()}
+                                <div class="mt-1.5 flex items-start gap-1.5 px-2 py-1.5 rounded-lg bg-primary/8 border border-primary/15 text-xs text-foreground/80 leading-snug">
+                                    <Languages class="w-3 h-3 shrink-0 mt-0.5 text-primary/60" />
+                                    <span>{translationPreview}</span>
+                                </div>
+                            {/if}
 
                             {#if showFormattingToolbar && messageTextareaEl && (messageTextareaEl.selectionStart ?? 0) !== (messageTextareaEl.selectionEnd ?? 0)}
                                 <div class="absolute -top-10 left-0 flex gap-1 bg-muted border border-border rounded-lg p-1 shadow-md">
@@ -2607,10 +2920,10 @@
                     </div>
                     <button
                         onclick={sendMessage}
-                        disabled={(!messageText.trim() && !attachedMedia) || sendingMessage}
+                        disabled={(!messageText.trim() && !attachedMedia) || sendingMessage || isTranslating}
                         class="shrink-0 w-10 h-10 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground rounded-full flex items-center justify-center transition-all active:scale-95"
                     >
-                        {#if sendingMessage}
+                        {#if sendingMessage || isTranslating}
                             <div class="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin"></div>
                         {:else}
                             <SendIcon class="w-4 h-4" />
@@ -2627,7 +2940,7 @@
                     </div>
                 {/if}
                 <p class="text-[10px] text-muted-foreground mt-1.5 text-center">
-                    Enter ile gönder · Shift+Enter yeni satır · 1 kredi / mesaj
+                    Enter ile gönder · Shift+Enter yeni satır · 1 kredi / mesaj{translationEnabled ? ` · Çeviri: ${translationLanguages.find(l => l.code === translationTargetLang)?.label ?? translationTargetLang}` : ''}
                 </p>
             </div>
         {/if}

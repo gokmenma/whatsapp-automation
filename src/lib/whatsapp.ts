@@ -13,6 +13,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode from 'qrcode';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { building } from '$app/environment';
@@ -39,8 +40,14 @@ if (!globalRef.baileysAvatarCache) globalRef.baileysAvatarCache = new Map<string
 if (!globalRef.baileysBadMacHandlerRegistered) globalRef.baileysBadMacHandlerRegistered = false;
 if (!globalRef.baileysBadMacRecoveryRunning) globalRef.baileysBadMacRecoveryRunning = false;
 if (!globalRef.baileysBadMacRecoveryLastAt) globalRef.baileysBadMacRecoveryLastAt = 0;
+<<<<<<< HEAD
 if (!globalRef.baileysManualStops) globalRef.baileysManualStops = new Set<string>();
 if (!globalRef.baileysReconnectTimers) globalRef.baileysReconnectTimers = new Map<string, NodeJS.Timeout>();
+=======
+if (!globalRef.messageEventEmitter) globalRef.messageEventEmitter = new EventEmitter();
+
+export const getMessageEmitter = () => globalRef.messageEventEmitter as EventEmitter;
+>>>>>>> 2c01e99c80923f29c49cfa09b6a44d427e4f3d74
 
 interface AccountStatus {
     id: string;
@@ -48,6 +55,25 @@ interface AccountStatus {
     qr: string | null;
     qrRaw?: string | null;
     user?: any;
+    lastError?: string | null;
+    connectionIssue?: "dns" | "offline" | "unknown" | null;
+}
+
+function classifyConnectionIssue(reason: unknown): "dns" | "offline" | "unknown" | null {
+    const text = String((reason as any)?.message || reason || '').toLowerCase();
+    if (!text) return null;
+    if (text.includes('enotfound') || text.includes('getaddrinfo')) return 'dns';
+    if (
+        text.includes('enetunreach') ||
+        text.includes('ehostunreach') ||
+        text.includes('etimedout') ||
+        text.includes('econnreset') ||
+        text.includes('network') ||
+        text.includes('internet')
+    ) {
+        return 'offline';
+    }
+    return 'unknown';
 }
 
 const clients: Map<string, any> = globalRef.baileysClients;
@@ -320,6 +346,8 @@ export async function initializeWhatsApp(accountId: string) {
         existing.status = 'disconnected';
         existing.qr = null;
         existing.qrRaw = null;
+        existing.lastError = null;
+        existing.connectionIssue = null;
         statuses.set(accountId, existing);
         return;
     }
@@ -349,7 +377,9 @@ export async function initializeWhatsApp(accountId: string) {
     const status: AccountStatus = {
         id: accountId,
         status: "loading",
-        qr: null
+        qr: null,
+        lastError: null,
+        connectionIssue: null
     };
     statuses.set(accountId, status);
 
@@ -430,6 +460,27 @@ export async function initializeWhatsApp(accountId: string) {
             if (u.id) {
                 const existing = store!.chats.get(u.id);
                 if (existing) store!.chats.set(u.id, { ...existing, ...u });
+
+                const hasUnreadField =
+                    Object.prototype.hasOwnProperty.call(u, 'unreadCount') ||
+                    Object.prototype.hasOwnProperty.call(u, 'unread') ||
+                    Object.prototype.hasOwnProperty.call(u, 'unreadCounter') ||
+                    Object.prototype.hasOwnProperty.call(u, 'unreadMessagesCount');
+
+                if (hasUnreadField) {
+                    const nextUnread = Number(
+                        (u as any).unreadCount ??
+                        (u as any).unread ??
+                        (u as any).unreadCounter ??
+                        (u as any).unreadMessagesCount ??
+                        0
+                    );
+
+                    // If WA reports this chat as read on the device, mirror it to local DB.
+                    if (Number.isFinite(nextUnread) && nextUnread <= 0) {
+                        void markConversationReadInDbFromRemoteJid(String(u.id || ''));
+                    }
+                }
             }
         });
     });
@@ -459,9 +510,13 @@ export async function initializeWhatsApp(accountId: string) {
             status.qr = await qrcode.toDataURL(qr);
             status.qrRaw = qr;
             status.status = "connecting";
+            status.lastError = null;
+            status.connectionIssue = null;
         }
 
         if (connection === 'close') {
+            const closeReason = (lastDisconnect?.error as any)?.message || String(lastDisconnect?.error || '');
+            const connectionIssue = classifyConnectionIssue(closeReason);
             const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
             const wasManuallyStopped = manualStops.has(accountId);
             console.log(`[${accountId}] Connection closed due to ${lastDisconnect?.error}, reconnecting: ${shouldReconnect}`);
@@ -469,6 +524,8 @@ export async function initializeWhatsApp(accountId: string) {
             status.status = "disconnected";
             status.qr = null;
             status.qrRaw = null;
+            status.lastError = closeReason || null;
+            status.connectionIssue = connectionIssue;
             
             if (shouldReconnect && !wasManuallyStopped) {
                 // Short delay to avoid infinite retry loops on network issues
@@ -499,6 +556,8 @@ export async function initializeWhatsApp(accountId: string) {
             status.qr = null;
             status.qrRaw = null;
             status.user = sock.user;
+            status.lastError = null;
+            status.connectionIssue = null;
         }
     });
 
@@ -899,6 +958,64 @@ export async function initializeWhatsApp(accountId: string) {
         }
     });
 
+    async function markConversationReadInDbFromRemoteJid(remoteJid: string) {
+        const normalizedRemoteJid = String(remoteJid || '').trim();
+        if (!normalizedRemoteJid) return;
+
+        try {
+            const { db: dbInst } = await import('./server/db');
+            const { sql } = await import('drizzle-orm');
+
+            if (normalizedRemoteJid.endsWith('@g.us')) {
+                await dbInst.run(sql`
+                    UPDATE messages
+                    SET status = CASE WHEN status IN ('received', 'delivered') THEN 'read' ELSE status END,
+                        is_read = 1
+                    WHERE account_id = ${accountId}
+                      AND contact_jid = ${normalizedRemoteJid}
+                      AND from_me = 0
+                      AND is_read = 0
+                `);
+                return;
+            }
+
+            const remoteNumber = getCanonicalContactNumber(accountId, normalizedRemoteJid) || normalizeDigits(normalizedRemoteJid);
+            if (!remoteNumber) return;
+
+            const rows = await dbInst.all(sql`
+                SELECT DISTINCT contact_jid
+                FROM messages
+                WHERE account_id = ${accountId}
+                  AND from_me = 0
+                  AND is_read = 0
+            `);
+
+            const targetJids = Array.from(new Set(
+                (rows as any[])
+                    .map((r) => String(r.contact_jid || '').trim())
+                    .filter(Boolean)
+                    .filter((jid) => {
+                        const jidNumber = getCanonicalContactNumber(accountId, jid) || normalizeDigits(jid);
+                        return Boolean(jidNumber) && jidNumber === remoteNumber;
+                    })
+            ));
+
+            for (const jid of targetJids) {
+                await dbInst.run(sql`
+                    UPDATE messages
+                    SET status = CASE WHEN status IN ('received', 'delivered') THEN 'read' ELSE status END,
+                        is_read = 1
+                    WHERE account_id = ${accountId}
+                      AND contact_jid = ${jid}
+                      AND from_me = 0
+                      AND is_read = 0
+                `);
+            }
+        } catch (e: any) {
+            console.error(`[${accountId}] Sync incoming read->DB error:`, e?.message || e);
+        }
+    }
+
     // Messaging Upsert - Auto Reply Logic + Contact Harvesting + Message Persistence
     sock.ev.on('messages.upsert', async (m) => {
         const isNotify = m.type === 'notify';
@@ -1040,6 +1157,14 @@ export async function initializeWhatsApp(accountId: string) {
                         : `${accountId}:fallback:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 
                     const isGroupJid = jidForSave.endsWith('@g.us');
+                    const isNewsletter = jidForSave.endsWith('@newsletter');
+                    const isBroadcast = jidForSave.endsWith('@broadcast');
+
+                    // Skip saving messages from newsletters/channels and broadcast lists as requested.
+                    if (isNewsletter || isBroadcast) {
+                        continue;
+                    }
+
                     const participantJid = String((msg.key as any)?.participant || (msg as any)?.participant || '').trim();
                     const selfJids = [String(status?.user?.id || '').trim(), String(sock.user?.id || '').trim()].filter(Boolean);
                     const selfUsers = new Set(
@@ -1106,8 +1231,21 @@ export async function initializeWhatsApp(accountId: string) {
                         quotedMsgBody: quotedMsgBody || null,
                         reaction: null,
                         timestamp: safeTimestamp,
-                        status: isFromMe ? (consumePendingStatus(accountId, msg.key.id || '') || 'sent') : 'received'
+                        status: isFromMe ? (consumePendingStatus(accountId, msg.key.id || '') || 'sent') : 'received',
+                        isRead: isFromMe
                     }).onConflictDoNothing();
+
+                    if (!isFromMe) {
+                        const emitter = getMessageEmitter();
+                        console.log(`[${accountId}] New incoming message from ${msg.pushName || 'unknown'}: ${body || '[Medya]'}`);
+                        emitter.emit('new_message', {
+                            accountId,
+                            id: messageId,
+                            jid: normalizedJid,
+                            body: body || (mediaType ? `[${mediaType}]` : 'Yeni mesaj'),
+                            pushName: msg.pushName || getContactName(accountId, normalizedJid)
+                        });
+                    }
 
                     // Save raw proto bytes so we can lazy-download later
                     if (mediaType && msg.key.id) {
@@ -1218,9 +1356,26 @@ export function getAccountStatus(accountId: string) {
     return statuses.get(accountId) || { id: accountId, status: "disconnected", qr: null };
 }
 
-export function getAllAccounts(storedAccounts: any[]) {
-    return storedAccounts.map(acc => {
+export async function getAllAccounts(storedAccounts: any[]) {
+    const { db } = await import('./server/db');
+    const { messages } = await import('./server/db/schema');
+    const { eq, and, count, sql } = await import('drizzle-orm');
+
+    return Promise.all(storedAccounts.map(async acc => {
         const liveStatus = statuses.get(acc.id);
+        
+        // Fetch unread count from DB
+        const unreadRes = await db.select({ value: count() })
+            .from(messages)
+            .where(and(
+                eq(messages.accountId, acc.id),
+                eq(messages.fromMe, false),
+                eq(messages.isRead, false),
+                sql`contact_jid NOT LIKE '%@newsletter'`,
+                sql`contact_jid NOT LIKE '%@broadcast'`,
+                sql`contact_jid NOT LIKE '120363%@s.whatsapp.net'`
+            )).get();
+            
         return {
             id: acc.id,
             name: acc.name,
@@ -1230,9 +1385,12 @@ export function getAllAccounts(storedAccounts: any[]) {
             status: liveStatus?.status || "disconnected",
             qr: liveStatus?.qr || null,
             qrRaw: liveStatus?.qrRaw || null,
-            user: liveStatus?.user
+            user: liveStatus?.user,
+            lastError: liveStatus?.lastError || null,
+            connectionIssue: liveStatus?.connectionIssue || null,
+            unreadCount: Number((unreadRes as any)?.value || 0)
         };
-    });
+    }));
 }
 
 export async function sendWhatsAppMessage(
@@ -1492,7 +1650,8 @@ export async function sendWhatsAppMessage(
                 quotedMsgId: rawQuotedId ? `${accountId}:${rawQuotedId}` : null,
                 quotedMsgBody: quotedBody || null,
                 timestamp: new Date(),
-                status: consumePendingStatus(accountId, sentMsg.key.id) || 'sent'
+                status: consumePendingStatus(accountId, sentMsg.key.id) || 'sent',
+                isRead: true
             }).onConflictDoNothing();
         }
 
@@ -1870,6 +2029,60 @@ export function getContactName(accountId: string, jid: string): string {
 
 export function getWhatsAppClient(accountId: string) {
     return clients.get(accountId);
+}
+
+export async function markConversationAsReadOnWhatsApp(accountId: string, targetJids: string[]) {
+    const client = clients.get(accountId) as any;
+    const status = statuses.get(accountId);
+    if (!client || status?.status !== 'ready') return;
+
+    const normalizedTargetJids = Array.from(new Set(
+        (targetJids || [])
+            .map((jid) => String(jid || '').trim())
+            .filter(Boolean)
+    ));
+    if (normalizedTargetJids.length === 0) return;
+
+    try {
+        const { db: dbInst } = await import('./server/db');
+        const { sql } = await import('drizzle-orm');
+
+        const readKeys: any[] = [];
+        for (const jid of normalizedTargetJids) {
+            const rows = await dbInst.all(sql`
+                SELECT id, contact_jid, sender_jid
+                FROM messages
+                WHERE account_id = ${accountId}
+                  AND contact_jid = ${jid}
+                  AND from_me = 0
+                  AND is_read = 0
+                ORDER BY timestamp DESC
+                LIMIT 200
+            `);
+
+            for (const row of rows as any[]) {
+                const rawId = String(row?.id || '').split(':').slice(1).join(':') || String(row?.id || '');
+                if (!rawId) continue;
+
+                const remoteJid = String(row?.contact_jid || '').trim();
+                if (!remoteJid) continue;
+
+                const participant = String(row?.sender_jid || '').trim();
+                readKeys.push({
+                    remoteJid,
+                    id: rawId,
+                    fromMe: false,
+                    ...(remoteJid.endsWith('@g.us') && participant ? { participant } : {})
+                });
+            }
+        }
+
+        if (readKeys.length > 0) {
+            await client.readMessages(readKeys);
+        }
+    } catch (e: any) {
+        console.error(`[${accountId}] Sync DB read->WA error:`, e?.message || e);
+    }
 }
 
 export async function getWhatsAppAvatarUrl(accountId: string, jid: string) {

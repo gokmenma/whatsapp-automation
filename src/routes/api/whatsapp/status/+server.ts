@@ -25,7 +25,7 @@ export const GET = async ({ locals }) => {
     const limit = purchaseHistory.some(p => p.packageName === "Pro Aylık") ? 3 : 1;
     
     return json({ 
-        accounts: getAllAccounts(userAccounts),
+        accounts: await getAllAccounts(userAccounts),
         credits: user?.credits ?? 0,
         limit: limit
     });

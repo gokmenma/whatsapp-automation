@@ -57,7 +57,49 @@ function ensureConversationPreferencesTable() {
     `);
 }
 
+function ensureUserSettingsColumns() {
+    sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id TEXT PRIMARY KEY,
+            read_receipt INTEGER NOT NULL DEFAULT 1,
+            dark_mode INTEGER NOT NULL DEFAULT 1,
+            message_delay INTEGER NOT NULL DEFAULT 2000,
+            batch_size INTEGER NOT NULL DEFAULT 25,
+            batch_wait_minutes INTEGER NOT NULL DEFAULT 5,
+            use_greeting_variations INTEGER NOT NULL DEFAULT 1,
+            use_intro_variations INTEGER NOT NULL DEFAULT 1,
+            use_closing_variations INTEGER NOT NULL DEFAULT 1,
+            reject_message_check_enabled INTEGER NOT NULL DEFAULT 0,
+            reject_keywords TEXT NOT NULL DEFAULT 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum',
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    `);
+
+    const columns = sqlite.prepare('PRAGMA table_info(user_settings)').all() as Array<{ name: string }>;
+    const names = new Set(columns.map((column) => column.name));
+
+    const requiredColumns: Array<[string, string]> = [
+        ['read_receipt', 'ALTER TABLE user_settings ADD COLUMN read_receipt INTEGER NOT NULL DEFAULT 1'],
+        ['dark_mode', 'ALTER TABLE user_settings ADD COLUMN dark_mode INTEGER NOT NULL DEFAULT 1'],
+        ['message_delay', 'ALTER TABLE user_settings ADD COLUMN message_delay INTEGER NOT NULL DEFAULT 2000'],
+        ['batch_size', 'ALTER TABLE user_settings ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 25'],
+        ['batch_wait_minutes', 'ALTER TABLE user_settings ADD COLUMN batch_wait_minutes INTEGER NOT NULL DEFAULT 5'],
+        ['use_greeting_variations', 'ALTER TABLE user_settings ADD COLUMN use_greeting_variations INTEGER NOT NULL DEFAULT 1'],
+        ['use_intro_variations', 'ALTER TABLE user_settings ADD COLUMN use_intro_variations INTEGER NOT NULL DEFAULT 1'],
+        ['use_closing_variations', 'ALTER TABLE user_settings ADD COLUMN use_closing_variations INTEGER NOT NULL DEFAULT 1'],
+        ['reject_message_check_enabled', 'ALTER TABLE user_settings ADD COLUMN reject_message_check_enabled INTEGER NOT NULL DEFAULT 0'],
+        ['reject_keywords', "ALTER TABLE user_settings ADD COLUMN reject_keywords TEXT NOT NULL DEFAULT 'mesaj red\\nred\\nmesaj ret\\nret\\nmesaj almak istemiyorum'"]
+    ];
+
+    for (const [name, statement] of requiredColumns) {
+        if (!names.has(name)) {
+            sqlite.exec(statement);
+        }
+    }
+}
+
 ensureMessageColumns();
 ensureConversationPreferencesTable();
+ensureUserSettingsColumns();
 
 export const db = drizzle(sqlite, { schema });

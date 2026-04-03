@@ -25,6 +25,8 @@ export const GET: RequestHandler = async ({ url, locals }) => {
     if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
 
     const textEncoder = encoder();
+    let pollId: ReturnType<typeof setInterval> | null = null;
+    let keepAliveId: ReturnType<typeof setInterval> | null = null;
 
     const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -69,18 +71,23 @@ export const GET: RequestHandler = async ({ url, locals }) => {
             pushEvent('ready', { accountId });
             void sendSnapshotIfChanged();
 
-            const pollId = setInterval(() => {
+            pollId = setInterval(() => {
                 void sendSnapshotIfChanged();
             }, 1500);
 
-            const keepAliveId = setInterval(() => {
+            keepAliveId = setInterval(() => {
                 controller.enqueue(textEncoder.encode(': keepalive\n\n'));
             }, 15000);
-
-            return () => {
+        },
+        cancel() {
+            if (pollId) {
                 clearInterval(pollId);
+                pollId = null;
+            }
+            if (keepAliveId) {
                 clearInterval(keepAliveId);
-            };
+                keepAliveId = null;
+            }
         }
     });
 

@@ -118,7 +118,8 @@ export const messages = sqliteTable('messages', {
     reaction: text('reaction'),
     editedAt: integer('edited_at', { mode: 'timestamp' }),
     timestamp: integer('timestamp', { mode: 'timestamp' }).notNull(),
-    status: text('status').notNull().default('sent') // 'sent' | 'failed' | 'received'
+    status: text('status').notNull().default('sent'), // 'sent' | 'failed' | 'received'
+    isRead: integer('is_read', { mode: 'boolean' }).notNull().default(false)
 }, (t) => ({
     accountContactIdx: index('messages_account_contact_idx').on(t.accountId, t.contactJid),
     timestampIdx: index('messages_timestamp_idx').on(t.timestamp)
