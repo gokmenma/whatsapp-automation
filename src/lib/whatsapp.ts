@@ -39,6 +39,8 @@ if (!globalRef.baileysAvatarCache) globalRef.baileysAvatarCache = new Map<string
 if (!globalRef.baileysBadMacHandlerRegistered) globalRef.baileysBadMacHandlerRegistered = false;
 if (!globalRef.baileysBadMacRecoveryRunning) globalRef.baileysBadMacRecoveryRunning = false;
 if (!globalRef.baileysBadMacRecoveryLastAt) globalRef.baileysBadMacRecoveryLastAt = 0;
+if (!globalRef.baileysManualStops) globalRef.baileysManualStops = new Set<string>();
+if (!globalRef.baileysReconnectTimers) globalRef.baileysReconnectTimers = new Map<string, NodeJS.Timeout>();
 
 interface AccountStatus {
     id: string;
@@ -53,6 +55,8 @@ const statuses: Map<string, AccountStatus> = globalRef.baileysStatuses;
 const heldSessionLocks: Set<string> = globalRef.baileysSessionLocks;
 const pendingMessageStatuses: Map<string, Map<string, string>> = globalRef.baileysPendingMessageStatuses;
 const avatarCache: Map<string, { url: string | null; expiresAt: number }> = globalRef.baileysAvatarCache;
+const manualStops: Set<string> = globalRef.baileysManualStops;
+const reconnectTimers: Map<string, NodeJS.Timeout> = globalRef.baileysReconnectTimers;
 
 function isBadMacSignalError(reason: unknown) {
     const errorObj = reason as any;
@@ -304,6 +308,13 @@ function isUsableAvatarUrl(value: string | undefined | null) {
 }
 
 export async function initializeWhatsApp(accountId: string) {
+    manualStops.delete(accountId);
+    const pendingReconnect = reconnectTimers.get(accountId);
+    if (pendingReconnect) {
+        clearTimeout(pendingReconnect);
+        reconnectTimers.delete(accountId);
+    }
+
     if (!acquireSessionLock(accountId)) {
         const existing = statuses.get(accountId) || { id: accountId, status: 'disconnected', qr: null };
         existing.status = 'disconnected';
@@ -452,24 +463,35 @@ export async function initializeWhatsApp(accountId: string) {
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
+            const wasManuallyStopped = manualStops.has(accountId);
             console.log(`[${accountId}] Connection closed due to ${lastDisconnect?.error}, reconnecting: ${shouldReconnect}`);
             
             status.status = "disconnected";
             status.qr = null;
             status.qrRaw = null;
             
-            if (shouldReconnect) {
+            if (shouldReconnect && !wasManuallyStopped) {
                 // Short delay to avoid infinite retry loops on network issues
-                setTimeout(() => initializeWhatsApp(accountId).catch(e => console.error(`[${accountId}] Reconnect error:`, e)), 3000);
+                const timer = setTimeout(() => {
+                    reconnectTimers.delete(accountId);
+                    initializeWhatsApp(accountId).catch(e => console.error(`[${accountId}] Reconnect error:`, e));
+                }, 3000);
+                reconnectTimers.set(accountId, timer);
             } else {
-                console.log(`[${accountId}] Connection closed. Device logged out.`);
+                if (wasManuallyStopped) {
+                    console.log(`[${accountId}] Connection closed by manual stop. Auto reconnect disabled until explicit start.`);
+                } else {
+                    console.log(`[${accountId}] Connection closed. Device logged out.`);
+                }
                 clients.delete(accountId);
                 stores.delete(accountId);
                 releaseSessionLock(accountId);
-                // Remove session folder on logout
-                try {
-                    fs.rmSync(path.join(AUTH_PATH, `session-${accountId}`), { recursive: true, force: true });
-                } catch (e) {}
+                if (!wasManuallyStopped) {
+                    // Remove session folder on logout
+                    try {
+                        fs.rmSync(path.join(AUTH_PATH, `session-${accountId}`), { recursive: true, force: true });
+                    } catch (e) {}
+                }
             }
         } else if (connection === 'open') {
             console.log(`[${accountId}] SUCCESS: WHATSAPP READY (BAILEYS)!`);
@@ -1652,6 +1674,13 @@ export async function resyncWhatsAppAccount(accountId: string) {
 }
 
 export async function stopWhatsApp(accountId: string) {
+    manualStops.add(accountId);
+    const reconnectTimer = reconnectTimers.get(accountId);
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimers.delete(accountId);
+    }
+
     const client = clients.get(accountId);
     if (client) {
         try {
@@ -1941,6 +1970,7 @@ export function getCanonicalContactNumber(accountId: string, jidOrNumber: string
 }
 
 export async function initAllAccounts() {
+    if (globalRef.baileysInitialized) return;
     globalRef.baileysInitialized = true;
     
     try {
@@ -1950,6 +1980,10 @@ export async function initAllAccounts() {
         
         console.log(`Auto-initializing ${storedAccounts.length} accounts with Baileys...`);
         for (const account of storedAccounts) {
+            if (manualStops.has(account.id)) {
+                console.log(`[${account.id}] Skipping auto-init because account was manually stopped.`);
+                continue;
+            }
             await initializeWhatsApp(account.id);
             await delay(2000); 
         }
@@ -1959,7 +1993,10 @@ export async function initAllAccounts() {
 if (!building) {
     // Check if we are in dev mode to avoid multiple initializations during HMR
     // SvelteKit re-imports this file often in dev mode
-    setTimeout(() => {
-        initAllAccounts().catch(e => console.error(e));
-    }, 3000); // 3-second delay to let the server start properly
+    if (!globalRef.baileysInitScheduled) {
+        globalRef.baileysInitScheduled = true;
+        setTimeout(() => {
+            initAllAccounts().catch(e => console.error(e));
+        }, 3000); // 3-second delay to let the server start properly
+    }
 }
