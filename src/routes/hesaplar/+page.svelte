@@ -360,9 +360,9 @@
     {/if}
 
     {#if isLoading}
-        <div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        <div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3 justify-items-start">
             {#each Array(3) as _}
-                <Skeleton class="h-[250px] w-full rounded-xl" />
+                <Skeleton class="h-62.5 w-full max-w-72 rounded-xl" />
             {/each}
         </div>
     {:else if accounts.length === 0}
@@ -382,9 +382,9 @@
         </Card.Root>
     {/if}
 
-	<div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+	<div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3 justify-items-start">
         {#each accounts as acc (acc.id)}
-            <Card.Root class="overflow-hidden border-none shadow-md ring-1 ring-border/50 flex flex-col group">
+            <Card.Root class="w-full sm:w-72 min-w-0 overflow-hidden border-none shadow-md ring-1 ring-border/50 flex flex-col group">
                 <Card.Header class="flex flex-row items-start justify-between bg-muted/30 pb-4">
                     <div class="space-y-1 min-w-0 pr-2">
                         <div class="flex items-center gap-1.5">
