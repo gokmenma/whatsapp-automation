@@ -40,14 +40,11 @@ if (!globalRef.baileysAvatarCache) globalRef.baileysAvatarCache = new Map<string
 if (!globalRef.baileysBadMacHandlerRegistered) globalRef.baileysBadMacHandlerRegistered = false;
 if (!globalRef.baileysBadMacRecoveryRunning) globalRef.baileysBadMacRecoveryRunning = false;
 if (!globalRef.baileysBadMacRecoveryLastAt) globalRef.baileysBadMacRecoveryLastAt = 0;
-<<<<<<< HEAD
 if (!globalRef.baileysManualStops) globalRef.baileysManualStops = new Set<string>();
 if (!globalRef.baileysReconnectTimers) globalRef.baileysReconnectTimers = new Map<string, NodeJS.Timeout>();
-=======
 if (!globalRef.messageEventEmitter) globalRef.messageEventEmitter = new EventEmitter();
 
 export const getMessageEmitter = () => globalRef.messageEventEmitter as EventEmitter;
->>>>>>> 2c01e99c80923f29c49cfa09b6a44d427e4f3d74
 
 interface AccountStatus {
     id: string;
