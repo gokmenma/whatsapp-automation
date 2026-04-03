@@ -2237,12 +2237,10 @@
     onDestroy(() => {
         stopPolling();
         stopConversationsStream();
-<<<<<<< HEAD
         if (mediaRecorder && mediaRecorder.state !== 'inactive') {
             mediaRecorder.stop();
         }
         resetRecorderResources();
-=======
         stopTypingStream();
     });
 
@@ -2281,7 +2279,6 @@
         }, 1000);
 
         return () => clearInterval(timer);
->>>>>>> 58e49a6ed22d3b84ca983af11b6098d8d470ae4b
     });
 
     // Close context menu on document click

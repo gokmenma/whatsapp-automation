@@ -1436,18 +1436,11 @@ export async function initializeWhatsApp(accountId: string) {
                             const filePath = path.join(mediaDir, `${rawMsgId}.${ext}`);
 
                             if (!fs.existsSync(filePath)) {
-<<<<<<< HEAD
-                                const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
-                                    logger,
-                                    reuploadRequest: sock.updateMediaMessage
-                                });
-=======
                                 const mediaDownloadContext: any = {
                                     reuploadRequest: sock.updateMediaMessage,
                                     logger
                                 };
                                 const buffer = await downloadMediaMessage(msg as any, 'buffer', {}, mediaDownloadContext);
->>>>>>> 58e49a6ed22d3b84ca983af11b6098d8d470ae4b
                                 fs.writeFileSync(filePath, buffer as Buffer);
                             }
                         } catch (dlErr: any) {
