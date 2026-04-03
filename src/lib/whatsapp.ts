@@ -73,6 +73,31 @@ function classifyConnectionIssue(reason: unknown): "dns" | "offline" | "unknown"
     return 'unknown';
 }
 
+async function simulateTypingPresence(client: any, jid: string, text: string, minMs = 700, maxMs = 2200) {
+    const targetJid = String(jid || '').trim();
+    if (!targetJid || targetJid.endsWith('@g.us')) return;
+
+    const contentLength = Math.max(1, String(text || '').trim().length);
+    const estimated = Math.max(minMs, Math.min(maxMs, Math.round(contentLength * 35)));
+
+    try {
+        await client.presenceSubscribe(targetJid);
+    } catch {
+        // Presence subscribe can fail for some contacts; typing hint is optional.
+    }
+
+    try {
+        await client.sendPresenceUpdate('composing', targetJid);
+        await delay(estimated);
+    } finally {
+        try {
+            await client.sendPresenceUpdate('paused', targetJid);
+        } catch {
+            // Ignore presence errors; sending message should continue.
+        }
+    }
+}
+
 const clients: Map<string, any> = globalRef.baileysClients;
 const statuses: Map<string, AccountStatus> = globalRef.baileysStatuses;
 const heldSessionLocks: Set<string> = globalRef.baileysSessionLocks;
@@ -1382,6 +1407,7 @@ export async function initializeWhatsApp(accountId: string) {
                     .returning();
                 
                 if (res.length > 0) {
+                    await simulateTypingPresence(sock, from, account.autoReplyMessage, 500, 1500);
                     await sock.sendMessage(from, { text: account.autoReplyMessage });
                     await db.insert(autoReplyHistory).values({
                         accountId: accountId,
@@ -1632,6 +1658,10 @@ export async function sendWhatsAppMessage(
                 pushName: String(replyTo?.senderName || '').trim() || undefined
             }
             : undefined;
+
+        if (!batchId && !isGroupTarget) {
+            await simulateTypingPresence(client, jid, message);
+        }
 
         if (media) {
             // Baileys media sending (Accepts Buffers or URLs)

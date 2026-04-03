@@ -1403,7 +1403,33 @@
         }
     }
 
+    function clearSelectedConversation() {
+        selectedContact = null;
+        messages = [];
+        messageText = '';
+        clearAttachedMedia();
+        replyingTo = null;
+        editingMessageId = null;
+        stopPolling();
+        contextMenu = null;
+        messageMenu = null;
+        showFormattingToolbar = false;
+        isEmojiPickerOpen = false;
+
+        if (typeof window !== 'undefined') {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('contact');
+            window.history.replaceState({}, '', url.toString());
+        }
+    }
+
     function handleKeydown(e: KeyboardEvent) {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            clearSelectedConversation();
+            return;
+        }
+
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             sendMessage();
@@ -2655,8 +2681,7 @@
                     class="md:hidden p-1 rounded-md hover:bg-muted"
                     onclick={(e) => {
                         e.stopPropagation();
-                        selectedContact = null;
-                        stopPolling();
+                        clearSelectedConversation();
                     }}
                 >
                     <ArrowLeftIcon class="w-5 h-5" />

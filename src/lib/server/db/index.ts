@@ -28,7 +28,8 @@ function ensureMessageColumns() {
         ['quoted_msg_id', 'ALTER TABLE messages ADD COLUMN quoted_msg_id TEXT'],
         ['quoted_msg_body', 'ALTER TABLE messages ADD COLUMN quoted_msg_body TEXT'],
         ['reaction', 'ALTER TABLE messages ADD COLUMN reaction TEXT'],
-        ['edited_at', 'ALTER TABLE messages ADD COLUMN edited_at INTEGER']
+        ['edited_at', 'ALTER TABLE messages ADD COLUMN edited_at INTEGER'],
+        ['is_read', 'ALTER TABLE messages ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0']
     ];
 
     for (const [name, statement] of requiredColumns) {
