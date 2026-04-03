@@ -58,10 +58,12 @@
     let sendingMessage = $state(false);
     let loadingConversations = $state(false);
     let loadingMessages = $state(false);
+    let chatLayoutEl = $state<HTMLDivElement | null>(null);
     let messagesContainerEl = $state<HTMLDivElement | null>(null);
     let messagesEndEl = $state<HTMLDivElement | null>(null);
     let pollInterval: ReturnType<typeof setInterval> | null = null;
     let conversationsEventSource = $state<EventSource | null>(null);
+    let typingEventSource = $state<EventSource | null>(null);
     let conversationsStreamAccountId = $state('');
     let conversationsStreamFingerprint = $state('');
     let contextMenu = $state<{ x: number; y: number; conv: any } | null>(null);
@@ -100,7 +102,13 @@
     let selectionActionsMenuPosition = $state({ x: 0, y: 0 });
     let selectionMode = $state(false);
     let selectedConversationJids = $state<Set<string>>(new Set());
+    let conversationsPaneWidth = $state(340);
+    let resizingConversationsPane = $state(false);
     let avatarUrls = $state<Record<string, string | null>>({});
+    let typingIndicatorText = $state('');
+    let typingIndicatorUntil = $state(0);
+    let typingIndicatorChatJid = $state('');
+    let typingByChat = $state<Record<string, { text: string; until: number }>>({});
     type LinkPreview = {
         url: string;
         title: string;
@@ -689,6 +697,14 @@
         );
 
         selectedContact = { jid: conv.contactJid, name: conv.name, number: conv.number };
+        clearTypingIndicator();
+        if (selectedAccountId && conv.contactJid) {
+            void fetch('/api/whatsapp/presence-subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ accountId: selectedAccountId, jid: conv.contactJid })
+            }).catch(() => undefined);
+        }
         messages = [];
         translatedMessages = new Map();
         translatingMessageIds = new Set();
@@ -1641,6 +1657,122 @@
         contactInfoOpen = true;
     }
 
+    function formatTypingText(payload: any) {
+        const presence = String(payload?.presence || '').toLowerCase();
+        const participantName = String(payload?.participantName || '').trim();
+        const baseText = presence === 'recording' ? 'ses kaydediyor...' : 'yazıyor...';
+        if (isGroupJid(selectedContact?.jid) && participantName) return `${participantName} ${baseText}`;
+        return baseText;
+    }
+
+    function normalizeTypingChatKey(jidLike: unknown) {
+        const raw = String(jidLike || '').trim().toLowerCase();
+        if (!raw) return '';
+        if (raw.endsWith('@g.us')) return raw;
+        return raw.split('@')[0].split(':')[0].replace(/\D/g, '');
+    }
+
+    function clearTypingIndicator() {
+        typingIndicatorText = '';
+        typingIndicatorUntil = 0;
+        typingIndicatorChatJid = '';
+    }
+
+    function getTypingPreview(chatJid: string) {
+        const key = normalizeTypingChatKey(chatJid);
+        if (!key) return '';
+        const item = typingByChat[key];
+        if (!item) return '';
+        if (item.until <= Date.now()) return '';
+        return item.text;
+    }
+
+    function setTypingIndicator(payload: any) {
+        const chatJid = String(payload?.chatJid || '').trim();
+        const chatKey = normalizeTypingChatKey(chatJid);
+        if (!chatKey) return;
+        const selectedKey = normalizeTypingChatKey(selectedContact?.jid);
+
+        const presence = String(payload?.presence || '').toLowerCase();
+        if (presence === 'paused') {
+            const next = { ...typingByChat };
+            delete next[chatKey];
+            typingByChat = next;
+            if (selectedKey && selectedKey === chatKey) clearTypingIndicator();
+            return;
+        }
+
+        const nextText = formatTypingText(payload);
+        const until = Date.now() + 6000;
+        typingByChat = { ...typingByChat, [chatKey]: { text: nextText, until } };
+
+        if (selectedKey && selectedKey === chatKey) {
+            typingIndicatorText = nextText;
+            typingIndicatorChatJid = String(selectedContact?.jid || chatJid).trim();
+            typingIndicatorUntil = until;
+        }
+    }
+
+    function stopTypingStream() {
+        if (typingEventSource) {
+            typingEventSource.close();
+            typingEventSource = null;
+        }
+    }
+
+    function startTypingStream() {
+        if (typeof window === 'undefined') return;
+        if (typingEventSource) return;
+
+        const stream = new EventSource('/api/whatsapp/events');
+        typingEventSource = stream;
+
+        stream.addEventListener('typing', (event) => {
+            let payload: any = null;
+            try {
+                payload = JSON.parse(String((event as MessageEvent).data || '{}'));
+            } catch {
+                payload = null;
+            }
+            if (!payload) return;
+            if (String(payload.accountId || '') !== String(selectedAccountId || '')) return;
+            setTypingIndicator(payload);
+        });
+
+        stream.onerror = () => {
+            // Native SSE retry is enough.
+        };
+    }
+
+    function clampConversationsPaneWidth(value: number) {
+        return Math.max(280, Math.min(560, Math.round(value)));
+    }
+
+    function startResizeConversationsPane(event: MouseEvent) {
+        if (typeof window === 'undefined') return;
+        event.preventDefault();
+        resizingConversationsPane = true;
+        const layoutLeft = chatLayoutEl?.getBoundingClientRect().left ?? 0;
+
+        const onMove = (moveEvent: MouseEvent) => {
+            conversationsPaneWidth = clampConversationsPaneWidth(moveEvent.clientX - layoutLeft);
+        };
+
+        const onUp = () => {
+            resizingConversationsPane = false;
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            try {
+                window.localStorage.setItem('messagesConversationsPaneWidth', String(conversationsPaneWidth));
+            } catch {
+                // Ignore storage errors.
+            }
+        };
+
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    }
+
     function openMediaViewer(url: string, type: 'image' | 'document', filename = '') {
         mediaViewerUrl = url;
         mediaViewerType = type;
@@ -1999,6 +2131,7 @@
             exitSelectionMode();
             stopPolling();
             stopConversationsStream();
+            clearTypingIndicator();
             return;
         }
 
@@ -2017,6 +2150,7 @@
         exitSelectionMode();
         stopPolling();
         stopConversationsStream();
+        clearTypingIndicator();
         resetConversationTracking();
         contextMenu = null;
         messageMenu = null;
@@ -2062,6 +2196,11 @@
             if (stored && data.accounts.some((a: any) => a.id === stored)) {
                 selectedAccountId = stored;
             }
+
+            const paneWidthStored = Number(window.localStorage.getItem('messagesConversationsPaneWidth') || 340);
+            if (Number.isFinite(paneWidthStored)) {
+                conversationsPaneWidth = clampConversationsPaneWidth(paneWidthStored);
+            }
         }
 
         selectedAccountId = resolvePreferredAccountId(data.accounts, selectedAccountId);
@@ -2073,6 +2212,8 @@
             selectedAccountId = urlAccount;
         }
         pendingInitialContactJid = String(urlContact || '').trim();
+
+        startTypingStream();
     });
 
     onMount(() => {
@@ -2096,10 +2237,51 @@
     onDestroy(() => {
         stopPolling();
         stopConversationsStream();
+<<<<<<< HEAD
         if (mediaRecorder && mediaRecorder.state !== 'inactive') {
             mediaRecorder.stop();
         }
         resetRecorderResources();
+=======
+        stopTypingStream();
+    });
+
+    $effect(() => {
+        if (!typingIndicatorUntil) return;
+        const timeout = Math.max(0, typingIndicatorUntil - Date.now());
+        const timer = setTimeout(() => {
+            if (Date.now() >= typingIndicatorUntil) clearTypingIndicator();
+        }, timeout + 20);
+
+        return () => clearTimeout(timer);
+    });
+
+    $effect(() => {
+        const keys = Object.keys(typingByChat);
+        if (keys.length === 0) return;
+
+        const timer = setInterval(() => {
+            const now = Date.now();
+            let changed = false;
+            const next = { ...typingByChat };
+
+            for (const key of Object.keys(next)) {
+                if (next[key].until <= now) {
+                    delete next[key];
+                    changed = true;
+                }
+            }
+
+            if (changed) {
+                typingByChat = next;
+                if (typingIndicatorChatJid && !next[typingIndicatorChatJid]) {
+                    clearTypingIndicator();
+                }
+            }
+        }, 1000);
+
+        return () => clearInterval(timer);
+>>>>>>> 58e49a6ed22d3b84ca983af11b6098d8d470ae4b
     });
 
     // Close context menu on document click
@@ -2133,10 +2315,10 @@
     });
 </script>
 
-<div class="flex h-[calc(100vh-4rem)] overflow-hidden bg-background -mx-4 -mb-4">
+<div class="flex h-[calc(100vh-4rem)] overflow-hidden bg-background -mx-4 -mb-4" bind:this={chatLayoutEl}>
     <!-- LEFT PANEL: Conversation List -->
     <div class="flex flex-col border-r border-border {selectedContact ? 'hidden md:flex' : 'flex'}"
-         style="min-width: 320px; max-width: 380px; flex-basis: 340px;">
+         style={`min-width: 280px; max-width: 560px; flex-basis: ${conversationsPaneWidth}px; width: ${conversationsPaneWidth}px;`}>
 
         <!-- Header -->
         <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
@@ -2362,6 +2544,7 @@
                     {@const previewStatus = useUnreadPreview ? String(conv.unreadPreviewStatus || '') : String(conv.lastMessageStatus || '')}
                     {@const previewMediaType = useUnreadPreview ? (conv.unreadPreviewMediaType || null) : (conv.lastMessageMediaType || null)}
                     {@const previewText = useUnreadPreview ? String(conv.unreadPreview || '').trim() : String(conv.lastMessage || '').trim()}
+                    {@const typingPreview = getTypingPreview(String(conv.contactJid || ''))}
                     <button
                         class="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors text-left border-b border-border/50 cursor-pointer {selectionMode && isSelected ? 'bg-primary/8 border-l-2 border-l-primary' : ''} {(!selectionMode && isActive) ? 'bg-primary/10 border-l-2 border-l-primary' : ''}"
                         onclick={() => selectConversation(conv)}
@@ -2414,8 +2597,12 @@
                                             {/if}
                                         </span>
                                     {/if}
-                                    <span class="text-xs truncate {unreadCount > 0 ? 'text-emerald-600 font-medium' : 'text-muted-foreground'}">
-                                        {previewMediaType ? mediaIcon(previewMediaType) : previewText}
+                                    <span class="text-xs truncate {typingPreview ? 'text-emerald-600 font-medium' : (unreadCount > 0 ? 'text-emerald-600 font-medium' : 'text-muted-foreground')}">
+                                        {#if typingPreview}
+                                            {typingPreview}
+                                        {:else}
+                                            {previewMediaType ? mediaIcon(previewMediaType) : previewText}
+                                        {/if}
                                     </span>
                                 </div>
                                 {#if unreadCount > 0}
@@ -2602,6 +2789,16 @@
         </Dialog.Root>
     </div>
 
+    <!-- Desktop splitter -->
+    <button
+        type="button"
+        class="hidden md:flex w-2 shrink-0 cursor-col-resize items-stretch select-none bg-transparent"
+        onmousedown={startResizeConversationsPane}
+        aria-label="Konuşma paneli genişliğini ayarla"
+    >
+        <div class="mx-auto my-2 w-0.5 rounded-full transition-colors {resizingConversationsPane ? 'bg-primary' : 'bg-border/80 hover:bg-primary/70'}"></div>
+    </button>
+
     <!-- RIGHT PANEL: Chat View -->
     <div class="flex-1 flex-col min-w-0 {selectedContact ? 'flex' : 'hidden md:flex'}">
 
@@ -2651,50 +2848,77 @@
                 {/if}
                 <div class="flex-1 min-w-0">
                     <p class="font-semibold text-sm truncate">{selectedContact.name}</p>
-                    <p class="text-xs text-muted-foreground">+{selectedContact.number}</p>
+                    <p class="text-xs {typingIndicatorText && typingIndicatorChatJid === selectedContact.jid ? 'text-emerald-600 font-medium' : 'text-muted-foreground'}">
+                        {#if typingIndicatorText && typingIndicatorChatJid === selectedContact.jid}
+                            {typingIndicatorText}
+                        {:else}
+                            +{selectedContact.number}
+                        {/if}
+                    </p>
                 </div>
             </div>
 
             <Dialog.Root bind:open={contactInfoOpen}>
-                <Dialog.Content class="sm:max-w-md">
+                <Dialog.Content class="sm:max-w-md bg-[#f7f7f6] border-[#e5e5e3]">
                     <Dialog.Header>
                         <Dialog.Title>Kişi bilgisi</Dialog.Title>
-                        <Dialog.Description>Sohbetteki kişi bilgileri</Dialog.Description>
                     </Dialog.Header>
 
                     {#if selectedContact}
-                        <div class="mt-2 space-y-4">
-                            <div class="flex items-center gap-3 rounded-xl border border-border bg-muted/25 px-3 py-3">
+                        {@const mediaCount = messages.filter((m) => Boolean(m?.mediaType || m?.media_type)).length}
+                        <div class="mt-1 space-y-3">
+                            <div class="rounded-2xl border border-border/60 bg-background px-4 py-4 text-center">
                                 {#if avatarUrls[selectedContact.jid]}
                                     <img
                                         src={avatarUrls[selectedContact.jid] || ''}
                                         alt={selectedContact.name}
-                                        class="w-12 h-12 rounded-full object-cover shrink-0"
+                                        class="mx-auto h-24 w-24 rounded-full object-cover"
                                         onerror={() => clearAvatarUrl(selectedContact?.jid || '')}
                                     />
                                 {:else}
                                     <div
-                                        class="w-12 h-12 rounded-full flex items-center justify-center text-white text-sm font-semibold shrink-0"
+                                        class="mx-auto h-24 w-24 rounded-full flex items-center justify-center text-white text-2xl font-semibold"
                                         style="background-color: {avatarColor(selectedContact.name)};"
                                     >
                                         {getInitials(selectedContact.name)}
                                     </div>
                                 {/if}
-                                <div class="min-w-0">
-                                    <p class="font-semibold text-sm truncate">{selectedContact.name}</p>
-                                    <p class="text-xs text-muted-foreground">+{selectedContact.number}</p>
+                                <p class="mt-3 text-2xl font-semibold leading-tight">{selectedContact.name}</p>
+                                <p class="mt-1 text-sm text-muted-foreground">+{selectedContact.number}</p>
+                                <button class="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/50 px-4 py-2 text-sm hover:bg-muted" type="button">
+                                    <SearchIcon class="w-4 h-4" /> Ara
+                                </button>
+                            </div>
+
+                            <div class="rounded-2xl border border-border/60 bg-background overflow-hidden">
+                                <div class="flex items-center justify-between px-4 py-3 text-sm">
+                                    <div class="flex items-center gap-2">
+                                        <FileIcon class="w-4 h-4 text-muted-foreground" />
+                                        <span>Medya, bağlantı ve belgeler</span>
+                                    </div>
+                                    <span class="text-muted-foreground">{mediaCount}</span>
+                                </div>
+                                <div class="h-px bg-border/70"></div>
+                                <div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground">
+                                    <div class="flex items-center gap-2">
+                                        <HeartIcon class="w-4 h-4" />
+                                        <span>Yıldızlı mesajlar</span>
+                                    </div>
+                                    <span>0</span>
+                                </div>
+                                <div class="h-px bg-border/70"></div>
+                                <div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground">
+                                    <div class="flex items-center gap-2">
+                                        <BellOffIcon class="w-4 h-4" />
+                                        <span>Bildirimleri sessize al</span>
+                                    </div>
+                                    <span>Kapalı</span>
                                 </div>
                             </div>
 
-                            <div class="space-y-2 text-sm">
-                                <div class="rounded-lg border border-border/70 px-3 py-2">
-                                    <p class="text-[11px] uppercase tracking-wide text-muted-foreground">Numara</p>
-                                    <p class="font-medium break-all">+{selectedContact.number}</p>
-                                </div>
-                                <div class="rounded-lg border border-border/70 px-3 py-2">
-                                    <p class="text-[11px] uppercase tracking-wide text-muted-foreground">WhatsApp JID</p>
-                                    <p class="font-medium break-all">{selectedContact.jid}</p>
-                                </div>
+                            <div class="rounded-2xl border border-border/60 bg-background px-4 py-3 text-xs text-muted-foreground">
+                                <div class="font-medium text-foreground mb-1">WhatsApp JID</div>
+                                <div class="break-all">{selectedContact.jid}</div>
                             </div>
                         </div>
                     {/if}
@@ -2922,7 +3146,7 @@
                                 {/if}
 
                                 <!-- Body text / caption -->
-                                {#if msg.body}
+                                {#if msg.body && !(mediaKind && !isDeleted && ['[Medya]', '[Ses mesaji]', '[Cikartma]'].includes(String(msg.body || '')))}
                                     {#if translatedMessages.has(String(msg.id))}
                                         {@const msgTranslation = translatedMessages.get(String(msg.id))!}
                                         <p class="px-3 py-1.5 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">

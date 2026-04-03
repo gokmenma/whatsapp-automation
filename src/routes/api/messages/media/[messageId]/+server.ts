@@ -2,11 +2,13 @@ import type { RequestHandler } from './$types';
 import fs from 'node:fs';
 import path from 'node:path';
 import { downloadMediaMessage, proto } from '@whiskeysockets/baileys';
+import pino from 'pino';
 import { getWhatsAppClient } from '$lib/whatsapp';
 
 const MEDIA_PATH = process.env.USER_DATA_PATH
     ? path.join(process.env.USER_DATA_PATH, 'media')
     : './media';
+const mediaLogger = pino({ level: 'silent' });
 
 const MIME_TYPES: Record<string, string> = {
     jpg: 'image/jpeg',
@@ -123,7 +125,8 @@ export const GET: RequestHandler = async ({ params, locals }) => {
             const client = getWhatsAppClient(accountId) as any;
             const decoded = proto.WebMessageInfo.decode(fs.readFileSync(rawPath)) as any;
             const buffer = await downloadMediaMessage(decoded, 'buffer', {}, {
-                reuploadRequest: client?.updateMediaMessage
+                reuploadRequest: client?.updateMediaMessage,
+                logger: mediaLogger
             }) as Buffer;
 
             const filePath = path.join(MEDIA_PATH, accountId, `${rawMsgId}.${ext}`);

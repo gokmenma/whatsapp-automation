@@ -1068,6 +1068,52 @@ export async function initializeWhatsApp(accountId: string) {
         }
     });
 
+    sock.ev.on('presence.update', (update: any) => {
+        try {
+            const chatJidRaw = String(update?.id || '').trim();
+            if (!chatJidRaw) return;
+
+            const isGroupChat = chatJidRaw.endsWith('@g.us');
+            const canonicalChatNumber = getCanonicalContactNumber(accountId, chatJidRaw) || normalizeDigits(chatJidRaw);
+            const normalizedChatJid = isGroupChat
+                ? chatJidRaw
+                : (canonicalChatNumber ? `${canonicalChatNumber}@s.whatsapp.net` : chatJidRaw);
+
+            const selfJids = [String(status?.user?.id || '').trim(), String(sock.user?.id || '').trim()].filter(Boolean);
+            const selfUsers = new Set(
+                selfJids
+                    .map((jid) => String(jidDecode(jid)?.user || jid.split('@')[0].split(':')[0] || '').trim().toLowerCase())
+                    .filter(Boolean)
+            );
+
+            const presences = update?.presences || {};
+            const entries = Object.entries(presences);
+            if (entries.length === 0) return;
+
+            const emitter = getMessageEmitter();
+            for (const [participantKey, presenceInfo] of entries) {
+                const participantJid = String(participantKey || '').trim() || chatJidRaw;
+                const participantUser = String(jidDecode(participantJid)?.user || participantJid.split('@')[0].split(':')[0] || '').trim().toLowerCase();
+                if (participantUser && selfUsers.has(participantUser)) continue;
+
+                const presenceRaw = String((presenceInfo as any)?.lastKnownPresence || (presenceInfo as any)?.presence || '').trim().toLowerCase();
+                if (!presenceRaw) continue;
+                if (presenceRaw !== 'composing' && presenceRaw !== 'recording' && presenceRaw !== 'paused') continue;
+
+                emitter.emit('typing', {
+                    accountId,
+                    chatJid: normalizedChatJid,
+                    participantJid: isGroupChat ? participantJid : null,
+                    participantName: isGroupChat ? (getContactName(accountId, participantJid) || null) : null,
+                    presence: presenceRaw,
+                    timestamp: Date.now()
+                });
+            }
+        } catch (presenceErr: any) {
+            console.error(`[${accountId}] Presence update parse error:`, presenceErr?.message || presenceErr);
+        }
+    });
+
     async function markConversationReadInDbFromRemoteJid(remoteJid: string) {
         const normalizedRemoteJid = String(remoteJid || '').trim();
         if (!normalizedRemoteJid) return;
@@ -1390,10 +1436,18 @@ export async function initializeWhatsApp(accountId: string) {
                             const filePath = path.join(mediaDir, `${rawMsgId}.${ext}`);
 
                             if (!fs.existsSync(filePath)) {
+<<<<<<< HEAD
                                 const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
                                     logger,
                                     reuploadRequest: sock.updateMediaMessage
                                 });
+=======
+                                const mediaDownloadContext: any = {
+                                    reuploadRequest: sock.updateMediaMessage,
+                                    logger
+                                };
+                                const buffer = await downloadMediaMessage(msg as any, 'buffer', {}, mediaDownloadContext);
+>>>>>>> 58e49a6ed22d3b84ca983af11b6098d8d470ae4b
                                 fs.writeFileSync(filePath, buffer as Buffer);
                             }
                         } catch (dlErr: any) {
@@ -2278,6 +2332,21 @@ export function getContactName(accountId: string, jid: string): string {
 
 export function getWhatsAppClient(accountId: string) {
     return clients.get(accountId);
+}
+
+export async function subscribeToPresence(accountId: string, chatJid: string) {
+    const client = clients.get(accountId) as any;
+    const status = statuses.get(accountId);
+    const targetJid = String(chatJid || '').trim();
+    if (!client || status?.status !== 'ready' || !targetJid) return false;
+
+    try {
+        await client.presenceSubscribe(targetJid);
+        return true;
+    } catch (err: any) {
+        console.warn(`[${accountId}] presenceSubscribe failed for ${targetJid}:`, err?.message || err);
+        return false;
+    }
 }
 
 export async function markConversationAsReadOnWhatsApp(accountId: string, targetJids: string[]) {
