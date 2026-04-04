@@ -48,6 +48,8 @@ if (!globalRef.messageEventEmitter) globalRef.messageEventEmitter = new EventEmi
 
 export const getMessageEmitter = () => globalRef.messageEventEmitter as EventEmitter;
 
+type HumanBehaviorLevel = 'light' | 'balanced' | 'aggressive';
+
 interface AccountStatus {
     id: string;
     status: "disconnected" | "connecting" | "ready" | "loading";
@@ -75,12 +77,71 @@ function classifyConnectionIssue(reason: unknown): "dns" | "offline" | "unknown"
     return 'unknown';
 }
 
-async function simulateTypingPresence(client: any, jid: string, text: string, minMs = 700, maxMs = 2200) {
+async function simulateTypingPresence(
+    client: any,
+    jid: string,
+    text: string,
+    minMs = 700,
+    maxMs = 2200,
+    behaviorLevel: HumanBehaviorLevel = 'balanced'
+) {
     const targetJid = String(jid || '').trim();
     if (!targetJid || targetJid.endsWith('@g.us')) return;
 
-    const contentLength = Math.max(1, String(text || '').trim().length);
-    const estimated = Math.max(minMs, Math.min(maxMs, Math.round(contentLength * 35)));
+    const normalized = String(text || '').trim();
+    const compact = normalized.replace(/\s+/g, ' ');
+    const contentLength = Math.max(1, compact.length);
+    const wordCount = Math.max(1, compact.split(' ').filter(Boolean).length);
+    const punctuationCount = (compact.match(/[.,!?;:]/g) || []).length;
+    const lineBreakCount = (normalized.match(/\r?\n/g) || []).length;
+
+    const randomInt = (min: number, max: number) =>
+        Math.floor(Math.random() * (max - min + 1)) + min;
+
+    const profile = {
+        light: {
+            perCharMin: 22, perCharMax: 40,
+            punctuationMin: 35, punctuationMax: 90,
+            lineMin: 80, lineMax: 170,
+            wordMin: 6, wordMax: 16,
+            jitterMin: 60, jitterMax: 320,
+            burstMin: 240, burstMax: 760,
+            gapMin: 40, gapMax: 140
+        },
+        balanced: {
+            perCharMin: 30, perCharMax: 56,
+            punctuationMin: 55, punctuationMax: 120,
+            lineMin: 120, lineMax: 260,
+            wordMin: 10, wordMax: 24,
+            jitterMin: 120, jitterMax: 520,
+            burstMin: 320, burstMax: 980,
+            gapMin: 70, gapMax: 230
+        },
+        aggressive: {
+            perCharMin: 42, perCharMax: 76,
+            punctuationMin: 90, punctuationMax: 190,
+            lineMin: 180, lineMax: 360,
+            wordMin: 16, wordMax: 34,
+            jitterMin: 200, jitterMax: 850,
+            burstMin: 420, burstMax: 1300,
+            gapMin: 110, gapMax: 320
+        }
+    }[behaviorLevel];
+
+    // Human-like estimate: character typing + short pauses at punctuation/new lines + jitter.
+    const perCharMs = randomInt(profile.perCharMin, profile.perCharMax);
+    const punctuationPauseMs = punctuationCount * randomInt(profile.punctuationMin, profile.punctuationMax);
+    const linePauseMs = lineBreakCount * randomInt(profile.lineMin, profile.lineMax);
+    const wordCadenceMs = wordCount * randomInt(profile.wordMin, profile.wordMax);
+    const jitterMs = randomInt(profile.jitterMin, profile.jitterMax);
+
+    const estimated = Math.max(
+        minMs,
+        Math.min(
+            maxMs,
+            Math.round(contentLength * perCharMs + punctuationPauseMs + linePauseMs + wordCadenceMs + jitterMs)
+        )
+    );
 
     try {
         await client.presenceSubscribe(targetJid);
@@ -90,7 +151,20 @@ async function simulateTypingPresence(client: any, jid: string, text: string, mi
 
     try {
         await client.sendPresenceUpdate('composing', targetJid);
-        await delay(estimated);
+
+        // Split typing into short bursts to avoid robotic constant-composing duration.
+        let remaining = estimated;
+        while (remaining > 0) {
+            const burst = Math.min(remaining, randomInt(profile.burstMin, profile.burstMax));
+            await delay(burst);
+            remaining -= burst;
+
+            if (remaining > 0) {
+                await client.sendPresenceUpdate('paused', targetJid);
+                await delay(randomInt(profile.gapMin, profile.gapMax));
+                await client.sendPresenceUpdate('composing', targetJid);
+            }
+        }
     } finally {
         try {
             await client.sendPresenceUpdate('paused', targetJid);
@@ -1620,6 +1694,13 @@ export async function sendWhatsAppMessage(
     }
 
     const shouldPersistLog = Boolean(batchId);
+    const settings = await db.select().from(userSettings).where(eq(userSettings.userId, account.userId)).get();
+    const humanBehaviorEnabled = Boolean(settings?.humanBehaviorEnabled);
+    const rawBehaviorLevel = String(settings?.humanBehaviorLevel || 'balanced').toLowerCase();
+    const humanBehaviorLevel: HumanBehaviorLevel =
+        rawBehaviorLevel === 'light' || rawBehaviorLevel === 'aggressive'
+            ? (rawBehaviorLevel as HumanBehaviorLevel)
+            : 'balanced';
 
     let jid = toJid(to);
     const isGroupTarget = jid.endsWith('@g.us');
@@ -1683,7 +1764,6 @@ export async function sendWhatsAppMessage(
     }
 
     if (!isGroupTarget) {
-        const settings = await db.select().from(userSettings).where(eq(userSettings.userId, account.userId)).get();
         const shouldCheckReject = Boolean(settings?.rejectMessageCheckEnabled);
 
         if (shouldCheckReject) {
@@ -1747,8 +1827,15 @@ export async function sendWhatsAppMessage(
             }
             : undefined;
 
-        if (!batchId && !isGroupTarget) {
-            await simulateTypingPresence(client, jid, message);
+        if (!isGroupTarget && (humanBehaviorEnabled || !batchId)) {
+            await simulateTypingPresence(
+                client,
+                jid,
+                message,
+                humanBehaviorEnabled ? 1200 : 700,
+                humanBehaviorEnabled ? 4200 : 2200,
+                humanBehaviorEnabled ? humanBehaviorLevel : 'balanced'
+            );
         }
 
         if (media) {

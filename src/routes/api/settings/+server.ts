@@ -14,6 +14,8 @@ export const GET = async ({ locals }) => {
             userId: locals.user.id,
             readReceipt: true,
             darkMode: true,
+            humanBehaviorEnabled: false,
+            humanBehaviorLevel: 'balanced',
             messageDelay: 2000,
             batchSize: 25,
             batchWaitMinutes: 5,
@@ -52,6 +54,14 @@ export const POST = async ({ request, locals }) => {
         if (body.batchWaitMinutes < 3 || body.batchWaitMinutes > 30) {
             return json({ error: 'Batch wait time must be between 3 and 30 minutes' }, { status: 400 });
         }
+    }
+
+    if (body.humanBehaviorLevel !== undefined) {
+        const level = String(body.humanBehaviorLevel || '').toLowerCase();
+        if (!['light', 'balanced', 'aggressive'].includes(level)) {
+            return json({ error: 'Invalid human behavior level' }, { status: 400 });
+        }
+        body.humanBehaviorLevel = level;
     }
 
     if (body.rejectKeywords !== undefined) {

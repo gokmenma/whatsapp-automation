@@ -15,6 +15,8 @@
 	let settings = $state({
 		readReceipt: true,
 		darkMode: true,
+		humanBehaviorEnabled: false,
+		humanBehaviorLevel: 'balanced',
 		messageDelay: 2000,
 		batchSize: 25,
 		batchWaitMinutes: 5,
@@ -67,6 +69,10 @@
 				settings = {
 					readReceipt: readBooleanFlag(data.readReceipt),
 					darkMode: readBooleanFlag(data.darkMode),
+					humanBehaviorEnabled: readBooleanFlag(data.humanBehaviorEnabled),
+					humanBehaviorLevel: ['light', 'balanced', 'aggressive'].includes(String(data.humanBehaviorLevel || '').toLowerCase())
+						? String(data.humanBehaviorLevel).toLowerCase()
+						: 'balanced',
 					messageDelay: data.messageDelay || 2000,
 					batchSize: data.batchSize || 25,
 					batchWaitMinutes: data.batchWaitMinutes || 5,
@@ -117,6 +123,13 @@
 		if (key === 'darkMode') {
 			setMode(nextValue ? 'dark' : 'light');
 		}
+		saveSettings();
+	}
+
+	function setHumanBehaviorLevel(level: 'light' | 'balanced' | 'aggressive') {
+		if (!settings.humanBehaviorEnabled) return;
+		if (settings.humanBehaviorLevel === level) return;
+		settings.humanBehaviorLevel = level;
 		saveSettings();
 	}
 
@@ -452,9 +465,45 @@
 						<Switch checked={settings.darkMode} onCheckedChange={(checked) => setBooleanValue('darkMode', checked === true)} />
 					</div>
 
+					<div class="flex items-center justify-between">
+						<div class="space-y-0.5">
+							<Label>İnsan Davranışı Ekle</Label>
+							<p class="text-sm text-muted-foreground">Açıksa mesaj öncesi yazıyor simülasyonu uygulanır.</p>
+						</div>
+						<Switch checked={settings.humanBehaviorEnabled} onCheckedChange={(checked) => setBooleanValue('humanBehaviorEnabled', checked === true)} />
+					</div>
+
+					{#if settings.humanBehaviorEnabled}
+						<div class="rounded-lg border p-2 -mt-2.5">
+							<div class="flex items-center gap-1.5">
+								<button
+									type="button"
+									onclick={() => setHumanBehaviorLevel('light')}
+									class={`h-6 px-2 text-[10px] rounded-md border transition-colors ${settings.humanBehaviorLevel === 'light' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted/60 border-border'}`}
+								>
+									Hafif
+								</button>
+								<button
+									type="button"
+									onclick={() => setHumanBehaviorLevel('balanced')}
+									class={`h-6 px-2 text-[10px] rounded-md border transition-colors ${settings.humanBehaviorLevel === 'balanced' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted/60 border-border'}`}
+								>
+									Dengeli
+								</button>
+								<button
+									type="button"
+									onclick={() => setHumanBehaviorLevel('aggressive')}
+									class={`h-6 px-2 text-[10px] rounded-md border transition-colors ${settings.humanBehaviorLevel === 'aggressive' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted/60 border-border'}`}
+								>
+									Agresif
+								</button>
+							</div>
+						</div>
+					{/if}
+
 					<div class="rounded-lg border p-3 space-y-3">
 						<div class="flex items-center justify-between">
-							<Label class="text-sm">Toplu Mesaj Gecikmesi</Label>
+							<Label class="text-sm">Mesajlar Arası Gecikme</Label>
 							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.messageDelay} ms</span>
 						</div>
 						<div class="flex items-center gap-3">

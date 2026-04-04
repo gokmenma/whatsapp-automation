@@ -32,6 +32,8 @@ export const userSettings = sqliteTable('user_settings', {
     userId: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
     readReceipt: integer('read_receipt', { mode: 'boolean' }).notNull().default(true),
     darkMode: integer('dark_mode', { mode: 'boolean' }).notNull().default(true),
+    humanBehaviorEnabled: integer('human_behavior_enabled', { mode: 'boolean' }).notNull().default(false),
+    humanBehaviorLevel: text('human_behavior_level').notNull().default('balanced'),
     messageDelay: integer('message_delay').notNull().default(2000), // Default 2 seconds
     batchSize: integer('batch_size').notNull().default(25), // Random batch upper bound (20-300)
     batchWaitMinutes: integer('batch_wait_minutes').notNull().default(5), // Random wait upper bound minutes (3-30)

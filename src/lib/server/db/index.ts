@@ -64,6 +64,8 @@ function ensureUserSettingsColumns() {
             user_id TEXT PRIMARY KEY,
             read_receipt INTEGER NOT NULL DEFAULT 1,
             dark_mode INTEGER NOT NULL DEFAULT 1,
+            human_behavior_enabled INTEGER NOT NULL DEFAULT 0,
+            human_behavior_level TEXT NOT NULL DEFAULT 'balanced',
             message_delay INTEGER NOT NULL DEFAULT 2000,
             batch_size INTEGER NOT NULL DEFAULT 25,
             batch_wait_minutes INTEGER NOT NULL DEFAULT 5,
@@ -82,6 +84,8 @@ function ensureUserSettingsColumns() {
     const requiredColumns: Array<[string, string]> = [
         ['read_receipt', 'ALTER TABLE user_settings ADD COLUMN read_receipt INTEGER NOT NULL DEFAULT 1'],
         ['dark_mode', 'ALTER TABLE user_settings ADD COLUMN dark_mode INTEGER NOT NULL DEFAULT 1'],
+        ['human_behavior_enabled', 'ALTER TABLE user_settings ADD COLUMN human_behavior_enabled INTEGER NOT NULL DEFAULT 0'],
+        ['human_behavior_level', "ALTER TABLE user_settings ADD COLUMN human_behavior_level TEXT NOT NULL DEFAULT 'balanced'"],
         ['message_delay', 'ALTER TABLE user_settings ADD COLUMN message_delay INTEGER NOT NULL DEFAULT 2000'],
         ['batch_size', 'ALTER TABLE user_settings ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 25'],
         ['batch_wait_minutes', 'ALTER TABLE user_settings ADD COLUMN batch_wait_minutes INTEGER NOT NULL DEFAULT 5'],
