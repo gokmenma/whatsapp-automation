@@ -384,6 +384,8 @@
 		messageDelay: 2000,
 		batchSize: 25,
 		batchWaitMinutes: 5,
+		accountRotationEnabled: false,
+		accountRotationMessageCount: 0,
 		rejectMessageCheckEnabled: false,
 		useGreetingVariations: true,
 		useIntroVariations: true,
@@ -578,6 +580,10 @@
 				if (typeof data.messageDelay === 'number') userSettings.messageDelay = data.messageDelay;
 				if (typeof data.batchSize === 'number') userSettings.batchSize = data.batchSize;
 				if (typeof data.batchWaitMinutes === 'number') userSettings.batchWaitMinutes = data.batchWaitMinutes;
+				if (typeof data.accountRotationEnabled === 'boolean') userSettings.accountRotationEnabled = data.accountRotationEnabled;
+				if (typeof data.accountRotationMessageCount === 'number') {
+					userSettings.accountRotationMessageCount = Math.max(1, Math.min(100, Math.floor(data.accountRotationMessageCount)));
+				}
 				if (typeof data.rejectMessageCheckEnabled === 'boolean') userSettings.rejectMessageCheckEnabled = data.rejectMessageCheckEnabled;
 				if (typeof data.useGreetingVariations === 'boolean') antiBan.useGreetingVariations = data.useGreetingVariations;
 				if (typeof data.useIntroVariations === 'boolean') antiBan.useIntroVariations = data.useIntroVariations;
@@ -671,6 +677,10 @@
 		);
 		let sentInCurrentBatch = 0;
 		let randomBatchTarget = getRandomBatchTarget(maxBatchSize);
+		const rotationEvery = userSettings.accountRotationEnabled
+			? Math.max(1, Math.floor(Number(userSettings.accountRotationMessageCount || 1)))
+			: 0;
+		let sentOnCurrentAccount = 0;
 
 		for (let i = 0; i < finalRecipients.length; i++) {
 			const item = finalRecipients[i];
@@ -797,12 +807,33 @@
 
 			if (sendStatus !== "sending") break;
 
+			sentOnCurrentAccount++;
+			const hasMoreRecipients = i < finalRecipients.length - 1;
+			if (rotationEvery > 0 && hasMoreRecipients) {
+				const readyIds = accounts
+					.map((acc: any) => String(acc?.id || '').trim())
+					.filter((id) => id.length > 0);
+
+				if (readyIds.length > 1 && sentOnCurrentAccount >= rotationEvery) {
+					const currentIndex = readyIds.indexOf(String(selectedAccountId || '').trim());
+					const nextId = currentIndex >= 0
+						? readyIds[(currentIndex + 1) % readyIds.length]
+						: readyIds[0];
+
+					if (nextId && nextId !== selectedAccountId) {
+						selectedAccountId = nextId;
+						const switchedTo = accounts.find((acc: any) => acc.id === nextId);
+						toast.success(`Döngü: ${switchedTo?.name || nextId} hesabına geçildi.`);
+					}
+					sentOnCurrentAccount = 0;
+				}
+			}
+
 			// Batch içindeki mesajlar için 600 ms ile kullanıcı max gecikmesi arasında rastgele bekleme
 			const finalDelay = getRandomMessageDelayMs(maxMessageDelayMs);
 			await new Promise(r => setTimeout(r, finalDelay));
 
 			sentInCurrentBatch++;
-			const hasMoreRecipients = i < finalRecipients.length - 1;
 			if (antiBan.batchPauseEnabled && hasMoreRecipients && sentInCurrentBatch >= randomBatchTarget) {
 				const randomPauseMs = getRandomPauseDurationMs(maxWaitMinutes);
 				currentRecipient = `⏸ ${sentInCurrentBatch} mesaj gönderildi - ${Math.round(randomPauseMs / 60000)} dk bekleniyor...`;

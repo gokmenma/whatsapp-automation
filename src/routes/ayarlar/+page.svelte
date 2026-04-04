@@ -17,6 +17,8 @@
 		darkMode: true,
 		humanBehaviorEnabled: false,
 		humanBehaviorLevel: 'balanced',
+		accountRotationEnabled: false,
+		accountRotationMessageCount: 1,
 		messageDelay: 2000,
 		batchSize: 25,
 		batchWaitMinutes: 5,
@@ -73,6 +75,8 @@
 					humanBehaviorLevel: ['light', 'balanced', 'aggressive'].includes(String(data.humanBehaviorLevel || '').toLowerCase())
 						? String(data.humanBehaviorLevel).toLowerCase()
 						: 'balanced',
+					accountRotationEnabled: readBooleanFlag(data.accountRotationEnabled),
+					accountRotationMessageCount: Math.max(1, Math.min(100, Math.floor(Number(data.accountRotationMessageCount || 1)))),
 					messageDelay: data.messageDelay || 2000,
 					batchSize: data.batchSize || 25,
 					batchWaitMinutes: data.batchWaitMinutes || 5,
@@ -130,6 +134,20 @@
 		if (!settings.humanBehaviorEnabled) return;
 		if (settings.humanBehaviorLevel === level) return;
 		settings.humanBehaviorLevel = level;
+		saveSettings();
+	}
+
+	function handleAccountRotationMessageCountChange(value: number) {
+		const next = Math.max(1, Math.min(100, Math.floor(Number(value) || 1)));
+		settings.accountRotationMessageCount = next;
+		saveSettings();
+	}
+
+	function setAccountRotationEnabled(nextValue: boolean) {
+		settings.accountRotationEnabled = nextValue;
+		if (nextValue && settings.accountRotationMessageCount < 1) {
+			settings.accountRotationMessageCount = 1;
+		}
 		saveSettings();
 	}
 
@@ -632,6 +650,31 @@
 								</div>
 
 								<div class="space-y-2 rounded-lg border p-3">
+									<div class="flex items-start justify-between gap-3">
+										<div>
+											<Label class="text-sm">Hesap Başına Mesaj</Label>
+											<p class="text-xs text-muted-foreground mt-2.5">Aktifse her hesap bu sayı kadar mesaj gönderir, sonra sıradaki bağlı hesaba geçilir.</p>
+										</div>
+										<div class="flex flex-col items-end gap-2">
+											<Switch checked={settings.accountRotationEnabled} onCheckedChange={(checked) => setAccountRotationEnabled(checked === true)} />
+											{#if settings.accountRotationEnabled}
+												<Input
+													type="number"
+													min="1"
+													max="100"
+													step="1"
+													value={settings.accountRotationMessageCount}
+													onchange={(e) => handleAccountRotationMessageCountChange(parseInt((e.target as HTMLInputElement).value))}
+													class="h-7 w-18 text-[11px] font-mono text-center"
+												/>
+											{/if}
+										</div>
+									</div>
+								</div>
+							</div>
+
+							<div class="space-y-3">
+								<div class="space-y-2 rounded-lg border p-3">
 									<div class="flex items-center justify-between">
 										<Label class="text-sm">Selamlama Varyasyonu</Label>
 										<Switch checked={antiBan.useGreetingVariations} onCheckedChange={(checked) => antiBan.useGreetingVariations = checked === true} />
@@ -643,9 +686,7 @@
 										class="text-sm"
 									/>
 								</div>
-							</div>
 
-							<div class="space-y-3">
 								<div class="space-y-2 rounded-lg border p-3">
 									<div class="flex items-center justify-between">
 										<Label class="text-sm">Giriş Varyasyonu</Label>

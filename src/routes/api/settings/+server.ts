@@ -16,6 +16,8 @@ export const GET = async ({ locals }) => {
             darkMode: true,
             humanBehaviorEnabled: false,
             humanBehaviorLevel: 'balanced',
+            accountRotationEnabled: false,
+            accountRotationMessageCount: 1,
             messageDelay: 2000,
             batchSize: 25,
             batchWaitMinutes: 5,
@@ -62,6 +64,18 @@ export const POST = async ({ request, locals }) => {
             return json({ error: 'Invalid human behavior level' }, { status: 400 });
         }
         body.humanBehaviorLevel = level;
+    }
+
+    if (body.accountRotationMessageCount !== undefined) {
+        const count = Number(body.accountRotationMessageCount);
+        if (!Number.isFinite(count) || count < 1 || count > 100) {
+            return json({ error: 'Account rotation count must be between 1 and 100' }, { status: 400 });
+        }
+        body.accountRotationMessageCount = Math.floor(count);
+    }
+
+    if (body.accountRotationEnabled !== undefined) {
+        body.accountRotationEnabled = Boolean(body.accountRotationEnabled);
     }
 
     if (body.rejectKeywords !== undefined) {
