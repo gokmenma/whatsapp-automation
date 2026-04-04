@@ -665,7 +665,7 @@
 													step="1"
 													value={settings.accountRotationMessageCount}
 													onchange={(e) => handleAccountRotationMessageCountChange(parseInt((e.target as HTMLInputElement).value))}
-													class="h-7 w-18 text-[11px] font-mono text-center"
+													class="h-7 w-18 text-[11px] font-mono text-center mr-4 -mt-1.5"
 												/>
 											{/if}
 										</div>
