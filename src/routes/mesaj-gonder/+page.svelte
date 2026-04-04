@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, untrack } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { building } from '$app/environment';
 	import { toast } from 'svelte-sonner';
@@ -588,6 +588,39 @@
 		}
 	}
 
+	function isAccountNotReadyError(errorText: unknown) {
+		const text = String(errorText || '').toLowerCase();
+		if (!text) return false;
+		return (
+			text.includes('is not ready') ||
+			text.includes('hesap bagli degil') ||
+			text.includes('hesap bağlı değil')
+		);
+	}
+
+	async function switchToAnotherReadyAccount(currentAccountId: string) {
+		const previousId = String(currentAccountId || '').trim();
+
+		await fetchAccounts();
+		await tick();
+
+		const readyIds = accounts
+			.map((acc: any) => String(acc?.id || '').trim())
+			.filter((id) => id.length > 0);
+
+		if (readyIds.length === 0) return null;
+
+		const currentIndex = readyIds.indexOf(previousId);
+		const nextId = currentIndex >= 0
+			? readyIds[(currentIndex + 1) % readyIds.length]
+			: readyIds[0];
+
+		if (!nextId || nextId === previousId) return null;
+
+		selectedAccountId = nextId;
+		return accounts.find((acc: any) => acc.id === nextId) || null;
+	}
+
 	async function startSending() {
 		const finalRecipients = phoneNumberText.split(/\r?\n/)
 			.filter(line => line.trim().length > 0)
@@ -682,43 +715,87 @@
 			}
 
 			currentRecipient = item.to;
-			try {
-				const res = await fetch('/api/whatsapp/send', {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						accountId: selectedAccountId,
-						to: item.to,
-						message: finalMessage,
-						media: useFileMedia ? null : mediaData,
-                        filePath: item.filePath,
-                        batchId: batchId
-					})
-				});
-				const resData: any = await res.json();
-				if (resData.success) {
-					sentCount++;
-					sendingResults.push({ to: item.to, message: item.message, status: "Başarılı" });
-					if (resData.remainingCredits !== undefined) {
-						userCredits = resData.remainingCredits;
+			let failoverTried = false;
+			while (true) {
+				try {
+					const res = await fetch('/api/whatsapp/send', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({
+							accountId: selectedAccountId,
+							to: item.to,
+							message: finalMessage,
+							media: useFileMedia ? null : mediaData,
+							filePath: item.filePath,
+							batchId: batchId
+						})
+					});
+					const resData: any = await res.json();
+
+					if (resData.success) {
+						sentCount++;
+						sendingResults.push({ to: item.to, message: item.message, status: "Başarılı" });
+						if (resData.remainingCredits !== undefined) {
+							userCredits = resData.remainingCredits;
+						}
+						break;
 					}
-				} else if (resData.skipped) {
+
+					if (resData.skipped) {
+						errorCount++;
+						sendingResults.push({ to: item.to, message: item.message, status: "Atlandı", error: resData.error || "Mesaj red kontrolü nedeniyle atlandı" });
+						if (resData.remainingCredits !== undefined) {
+							userCredits = resData.remainingCredits;
+						}
+						break;
+					}
+
+					const errorText = String(resData.error || "Bilinmeyen hata");
+					if (!failoverTried && isAccountNotReadyError(errorText)) {
+						const previousAccountId = selectedAccountId;
+						const switchedAccount = await switchToAnotherReadyAccount(previousAccountId);
+						if (switchedAccount) {
+							failoverTried = true;
+							toast.success(`${switchedAccount.name || switchedAccount.id} hesabina gecildi.`);
+							currentRecipient = `${item.to} (hesap değiştirildi: ${switchedAccount.name || switchedAccount.id})`;
+							continue;
+						}
+
+						toast.error('Hazir baska hesap bulunamadi. Toplu gonderim durduruldu.');
+						sendStatus = "finished";
+						break;
+					}
+
 					errorCount++;
-					sendingResults.push({ to: item.to, message: item.message, status: "Atlandı", error: resData.error || "Mesaj red kontrolü nedeniyle atlandı" });
+					sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: errorText });
 					if (resData.remainingCredits !== undefined) {
 						userCredits = resData.remainingCredits;
 					}
-				} else {
+					break;
+				} catch (e: any) {
+					const errorText = e?.message || "Bağlantı hatası";
+					if (!failoverTried && isAccountNotReadyError(errorText)) {
+						const previousAccountId = selectedAccountId;
+						const switchedAccount = await switchToAnotherReadyAccount(previousAccountId);
+						if (switchedAccount) {
+							failoverTried = true;
+							toast.success(`${switchedAccount.name || switchedAccount.id} hesabina gecildi.`);
+							currentRecipient = `${item.to} (hesap değiştirildi: ${switchedAccount.name || switchedAccount.id})`;
+							continue;
+						}
+
+						toast.error('Hazir baska hesap bulunamadi. Toplu gonderim durduruldu.');
+						sendStatus = "finished";
+						break;
+					}
+
 					errorCount++;
-					sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: resData.error || "Bilinmeyen hata" });
-					if (resData.remainingCredits !== undefined) {
-						userCredits = resData.remainingCredits;
-					}
+					sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: errorText });
+					break;
 				}
-			} catch (e: any) {
-				errorCount++;
-				sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: e.message || "Bağlantı hatası" });
 			}
+
+			if (sendStatus !== "sending") break;
 
 			// Batch içindeki mesajlar için 600 ms ile kullanıcı max gecikmesi arasında rastgele bekleme
 			const finalDelay = getRandomMessageDelayMs(maxMessageDelayMs);
