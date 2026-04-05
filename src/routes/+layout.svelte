@@ -103,7 +103,7 @@
 					if ("Notification" in window && Notification.permission === "granted") {
 						const notification = new Notification(`${msg.pushName || 'WhatsApp'}`, {
 							body: msg.body,
-							icon: '/favicon.png'
+							icon: '/favicon.svg'
 						});
 						notification.onclick = () => {
 							window.focus();
@@ -151,7 +151,7 @@
 						if ("Notification" in window && Notification.permission === "granted") {
 							const notification = new Notification(`WhatsApp (${String(acc?.name || 'Hesap')})`, {
 								body: 'Yeni okunmamis mesaj var',
-								icon: '/favicon.png'
+								icon: '/favicon.svg'
 							});
 							notification.onclick = () => window.focus();
 						}

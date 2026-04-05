@@ -1827,13 +1827,18 @@ export async function sendWhatsAppMessage(
             }
             : undefined;
 
-        if (!isGroupTarget && (humanBehaviorEnabled || !batchId)) {
+        if (!isGroupTarget) {
+            // Always show a minimal typing presence for direct chats.
+            // When human behavior is enabled, keep the richer and longer simulation profile.
+            const minTypingMs = humanBehaviorEnabled ? 1200 : (batchId ? 500 : 700);
+            const maxTypingMs = humanBehaviorEnabled ? 4200 : (batchId ? 1400 : 2200);
+
             await simulateTypingPresence(
                 client,
                 jid,
                 message,
-                humanBehaviorEnabled ? 1200 : 700,
-                humanBehaviorEnabled ? 4200 : 2200,
+                minTypingMs,
+                maxTypingMs,
                 humanBehaviorEnabled ? humanBehaviorLevel : 'balanced'
             );
         }
