@@ -613,12 +613,37 @@
 		if (!text) return false;
 		return (
 			text.includes('is not ready') ||
+			text.includes('logged out') ||
+			text.includes('connection closed') ||
+			text.includes('oturum kapandi') ||
+			text.includes('oturum kapandı') ||
+			text.includes('kisit') ||
+			text.includes('kısıt') ||
+			text.includes('banned') ||
 			text.includes('hesap bagli degil') ||
 			text.includes('hesap bağlı değil')
 		);
 	}
 
-	async function switchToAnotherReadyAccount(currentAccountId: string) {
+	async function ensureSelectedAccountReadyForSend() {
+		await fetchAccounts();
+		await tick();
+
+		if (!accounts.length) {
+			selectedAccountId = '';
+			return false;
+		}
+
+		const selectedId = String(selectedAccountId || '').trim();
+		const currentIsReady = accounts.find((acc: any) => String(acc?.id || '').trim() === selectedId);
+		if (currentIsReady) return true;
+
+		const defaultAccount = accounts.find((acc: any) => acc.isDefault);
+		selectedAccountId = String(defaultAccount?.id || accounts[0]?.id || '').trim();
+		return Boolean(selectedAccountId);
+	}
+
+	async function switchToAnotherReadyAccount(currentAccountId: string, excludedIds: Set<string> = new Set()) {
 		const previousId = String(currentAccountId || '').trim();
 
 		await fetchAccounts();
@@ -626,7 +651,7 @@
 
 		const readyIds = accounts
 			.map((acc: any) => String(acc?.id || '').trim())
-			.filter((id) => id.length > 0);
+			.filter((id) => id.length > 0 && !excludedIds.has(id));
 
 		if (readyIds.length === 0) return null;
 
@@ -642,6 +667,11 @@
 	}
 
 	async function startSending() {
+		const hasReadyAccount = await ensureSelectedAccountReadyForSend();
+		if (!hasReadyAccount) {
+			return alert('Gönderime başlamak için hazır en az bir hesap olmalı.');
+		}
+
 		const finalRecipients = phoneNumberText.split(/\r?\n/)
 			.filter(line => line.trim().length > 0)
 			.map(line => {
@@ -695,6 +725,7 @@
 			? Math.max(1, Math.floor(Number(userSettings.accountRotationMessageCount || 1)))
 			: 0;
 		let sentOnCurrentAccount = 0;
+		const disabledAccountIds = new Set<string>();
 
 		console.log('[SEND] Rotation Config:', {
 			accountRotationEnabled: userSettings.accountRotationEnabled,
@@ -785,7 +816,8 @@
 					const errorText = String(resData.error || "Bilinmeyen hata");
 					if (!failoverTried && isAccountNotReadyError(errorText)) {
 						const previousAccountId = selectedAccountId;
-						const switchedAccount = await switchToAnotherReadyAccount(previousAccountId);
+						disabledAccountIds.add(String(previousAccountId || '').trim());
+						const switchedAccount = await switchToAnotherReadyAccount(previousAccountId, disabledAccountIds);
 						if (switchedAccount) {
 							failoverTried = true;
 							toast.success(`${switchedAccount.name || switchedAccount.id} hesabina gecildi.`);
@@ -808,7 +840,8 @@
 					const errorText = e?.message || "Bağlantı hatası";
 					if (!failoverTried && isAccountNotReadyError(errorText)) {
 						const previousAccountId = selectedAccountId;
-						const switchedAccount = await switchToAnotherReadyAccount(previousAccountId);
+						disabledAccountIds.add(String(previousAccountId || '').trim());
+						const switchedAccount = await switchToAnotherReadyAccount(previousAccountId, disabledAccountIds);
 						if (switchedAccount) {
 							failoverTried = true;
 							toast.success(`${switchedAccount.name || switchedAccount.id} hesabina gecildi.`);
@@ -842,7 +875,7 @@
 			if (rotationEvery > 0 && hasMoreRecipients) {
 				const readyIds = accounts
 					.map((acc: any) => String(acc?.id || '').trim())
-					.filter((id) => id.length > 0);
+					.filter((id) => id.length > 0 && !disabledAccountIds.has(id));
 
 				console.log('[SEND] Ready IDs for rotation:', {
 					readyIds,
@@ -853,23 +886,11 @@
 				});
 
 				if (readyIds.length > 1 && sentOnCurrentAccount >= rotationEvery) {
-					const currentIndex = readyIds.indexOf(String(selectedAccountId || '').trim());
-					const nextId = currentIndex >= 0
-						? readyIds[(currentIndex + 1) % readyIds.length]
-						: readyIds[0];
-
-					console.log('[SEND] Rotating account:', {
-						currentAccountId: selectedAccountId,
-						currentIndex,
-						nextId,
-						willSwitch: nextId !== selectedAccountId
-					});
-
-					if (nextId && nextId !== selectedAccountId) {
-						selectedAccountId = nextId;
-						const switchedTo = accounts.find((acc: any) => acc.id === nextId);
-						console.log('[SEND] Account switched successfully to:', switchedTo?.name || nextId);
-						toast.success(`Döngü: ${switchedTo?.name || nextId} hesabına geçildi.`);
+					const previousAccountId = selectedAccountId;
+					const switchedTo = await switchToAnotherReadyAccount(previousAccountId, disabledAccountIds);
+					if (switchedTo) {
+						console.log('[SEND] Account switched successfully to:', switchedTo?.name || switchedTo.id);
+						toast.success(`Döngü: ${switchedTo?.name || switchedTo.id} hesabına geçildi.`);
 					}
 					sentOnCurrentAccount = 0;
 				}
