@@ -165,6 +165,13 @@
 				const defaultAccount = accounts.find((a: any) => a.isDefault);
 				selectedAccountId = defaultAccount ? defaultAccount.id : (accounts[0]?.id || "");
 			}
+
+			console.log('[ACCOUNTS] Loaded accounts:', {
+				totalReady: accounts.length,
+				accountIds: accounts.map(a => a.id),
+				selectedAccountId,
+				hasDefault: !!accounts.find((a: any) => a.isDefault)
+			});
 		});
 	});
 
@@ -588,6 +595,13 @@
 				if (typeof data.useGreetingVariations === 'boolean') antiBan.useGreetingVariations = data.useGreetingVariations;
 				if (typeof data.useIntroVariations === 'boolean') antiBan.useIntroVariations = data.useIntroVariations;
 				if (typeof data.useClosingVariations === 'boolean') antiBan.useClosingVariations = data.useClosingVariations;
+				
+				console.log('[SETTINGS] Loaded user settings:', {
+					accountRotationEnabled: userSettings.accountRotationEnabled,
+					accountRotationMessageCount: userSettings.accountRotationMessageCount,
+					messageDelay: userSettings.messageDelay,
+					batchSize: userSettings.batchSize
+				});
 			}
 		} catch (e) {
 			console.error("Settings fetch error:", e);
@@ -681,6 +695,14 @@
 			? Math.max(1, Math.floor(Number(userSettings.accountRotationMessageCount || 1)))
 			: 0;
 		let sentOnCurrentAccount = 0;
+
+		console.log('[SEND] Rotation Config:', {
+			accountRotationEnabled: userSettings.accountRotationEnabled,
+			accountRotationMessageCount: userSettings.accountRotationMessageCount,
+			rotationEvery,
+			readyAccountCount: accounts.length,
+			readyAccountIds: accounts.map(a => a.id)
+		});
 
 		for (let i = 0; i < finalRecipients.length; i++) {
 			const item = finalRecipients[i];
@@ -809,10 +831,26 @@
 
 			sentOnCurrentAccount++;
 			const hasMoreRecipients = i < finalRecipients.length - 1;
+			
+			console.log(`[SEND] After message #${sentCount + 1}:`, {
+				sentOnCurrentAccount,
+				rotationEvery,
+				hasMoreRecipients,
+				shouldCheckRotation: rotationEvery > 0 && hasMoreRecipients
+			});
+
 			if (rotationEvery > 0 && hasMoreRecipients) {
 				const readyIds = accounts
 					.map((acc: any) => String(acc?.id || '').trim())
 					.filter((id) => id.length > 0);
+
+				console.log('[SEND] Ready IDs for rotation:', {
+					readyIds,
+					readyCount: readyIds.length,
+					canRotate: readyIds.length > 1,
+					sentOnCurrentAccount,
+					shouldRotate: sentOnCurrentAccount >= rotationEvery
+				});
 
 				if (readyIds.length > 1 && sentOnCurrentAccount >= rotationEvery) {
 					const currentIndex = readyIds.indexOf(String(selectedAccountId || '').trim());
@@ -820,9 +858,17 @@
 						? readyIds[(currentIndex + 1) % readyIds.length]
 						: readyIds[0];
 
+					console.log('[SEND] Rotating account:', {
+						currentAccountId: selectedAccountId,
+						currentIndex,
+						nextId,
+						willSwitch: nextId !== selectedAccountId
+					});
+
 					if (nextId && nextId !== selectedAccountId) {
 						selectedAccountId = nextId;
 						const switchedTo = accounts.find((acc: any) => acc.id === nextId);
+						console.log('[SEND] Account switched successfully to:', switchedTo?.name || nextId);
 						toast.success(`Döngü: ${switchedTo?.name || nextId} hesabına geçildi.`);
 					}
 					sentOnCurrentAccount = 0;
