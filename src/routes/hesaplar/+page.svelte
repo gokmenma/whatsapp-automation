@@ -286,7 +286,7 @@
                         />
                     </div>
                     <Dialog.Footer>
-                        <Button onclick={addAccount} disabled={!newAccountName || accounts.length >= limit || isAddingAccount} class="min-w-[120px]">
+                        <Button onclick={addAccount} disabled={!newAccountName || accounts.length >= limit || isAddingAccount} class="min-w-30">
                             {#if isAddingAccount}
                                 <Loader2 class="w-4 h-4 animate-spin mr-2" />
                             {/if}
@@ -410,7 +410,7 @@
                         {/if}
                     </div>
                 </Card.Header>
-                <Card.Content class="flex-1 flex flex-col items-center justify-center py-8 min-h-[220px]">
+                <Card.Content class="flex-1 flex flex-col items-center justify-center py-8 min-h-55">
                     {#if acc.status === "ready"}
                         <div class="flex flex-col items-center space-y-6 w-full animate-in zoom-in-95 duration-300">
                             <div class="relative">
@@ -552,7 +552,7 @@
                         id="auto-msg" 
                         bind:value={accountToSettings.autoReplyMessage}
                         placeholder="Yanıt mesajınızı yazın..."
-                        class="min-h-[120px] bg-muted/30 border-none rounded-xl focus:ring-1 focus:ring-primary/20"
+                        class="min-h-30 bg-muted/30 border-none rounded-xl focus:ring-1 focus:ring-primary/20"
                     />
                     <p class="text-[10px] text-muted-foreground italic">Bu mesaj, bu hesaba <b>ilk kez</b> mesaj gönderen kişilere bir defaya mahsus iletilecektir.</p>
                 </div>
@@ -560,7 +560,7 @@
         </div>
         <Dialog.Footer class="gap-2">
             <Button variant="outline" onclick={() => settingsDialogOpen = false}>Vazgeç</Button>
-            <Button onclick={saveAccountSettings} class="gap-2 min-w-[100px]">
+            <Button onclick={saveAccountSettings} class="gap-2 min-w-25">
                 {#if isSavingSettings}
                     <Loader2 class="w-4 h-4 animate-spin" />
                 {/if}
@@ -581,7 +581,7 @@
         </AlertDialog.Header>
         <AlertDialog.Footer>
             <AlertDialog.Cancel disabled={isDeleting}>Vazgeç</AlertDialog.Cancel>
-            <AlertDialog.Action onclick={deleteAccount} class="bg-destructive text-white hover:bg-destructive/90 min-w-[100px]" disabled={isDeleting}>
+            <AlertDialog.Action onclick={deleteAccount} class="bg-destructive text-white hover:bg-destructive/90 min-w-25" disabled={isDeleting}>
                 {#if isDeleting}
                     <Loader2 class="w-4 h-4 animate-spin mr-2" />
                 {/if}
@@ -608,7 +608,7 @@
         </div>
         <Dialog.Footer>
             <Button variant="outline" onclick={() => editDialogOpen = false} disabled={isSavingName}>Vazgeç</Button>
-            <Button onclick={saveAccountName} disabled={!editedName.trim() || isSavingName} class="min-w-[100px]">
+            <Button onclick={saveAccountName} disabled={!editedName.trim() || isSavingName} class="min-w-25">
                 {#if isSavingName}
                     <Loader2 class="w-4 h-4 animate-spin mr-2" />
                 {/if}

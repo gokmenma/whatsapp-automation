@@ -39,7 +39,7 @@ export const POST = async ({ request, locals }) => {
         let finalName = existing?.name || inputIdOrName;
 
         if (!existing) {
-            // New account - Check Limit (Standard: 1, Pro: 3)
+            // New account - Check Limit (Standard: 1, Pro: 10)
             const countRes = await db.select({ count: sql`count(*)` }).from(accounts)
                 .where(eq(accounts.userId, locals.user.id)).get();
             
@@ -51,7 +51,7 @@ export const POST = async ({ request, locals }) => {
                 .where(eq(purchases.userId, locals.user.id))
                 .all();
             
-            const limit = purchaseHistory.some(p => p.packageName === "Pro Aylık") ? 3 : 1;
+            const limit = purchaseHistory.some(p => p.packageName === "Pro Aylık") ? 10 : 1;
 
             if (count >= limit) {
                 return json({ 

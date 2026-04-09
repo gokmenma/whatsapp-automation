@@ -21,8 +21,8 @@ export const GET = async ({ locals }) => {
         .where(eq(purchases.userId, locals.user.id))
         .all();
     
-    // If they have any purchase of "Pro Aylık", limit is 3, otherwise 1
-    const limit = purchaseHistory.some(p => p.packageName === "Pro Aylık") ? 3 : 1;
+    // If they have any purchase of "Pro Aylık", limit is 10, otherwise 1
+    const limit = purchaseHistory.some(p => p.packageName === "Pro Aylık") ? 10 : 1;
     
     return json({ 
         accounts: await getAllAccounts(userAccounts),
