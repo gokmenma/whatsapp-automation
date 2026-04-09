@@ -1249,6 +1249,7 @@ export async function initializeWhatsApp(accountId: string) {
     // Messaging Upsert - Auto Reply Logic + Contact Harvesting + Message Persistence
     sock.ev.on('messages.upsert', async (m) => {
         const isNotify = m.type === 'notify';
+        const isAppend = m.type === 'append';
 
         for (const msg of m.messages) {
             // Harvest/update contact names from incoming message metadata.
@@ -1526,7 +1527,23 @@ export async function initializeWhatsApp(accountId: string) {
                 }
             }
 
-            if (!isNotify) continue; // Auto-reply only for real-time notifications
+            // Some fresh inbound messages can arrive as "append" depending on sync state.
+            // Allow recent append events so auto-reply does not get skipped unexpectedly.
+            if (!isNotify && !isAppend) continue;
+
+            if (isAppend) {
+                const rawTs: any = (msg as any).messageTimestamp;
+                const tsSeconds = typeof rawTs === 'number'
+                    ? rawTs
+                    : typeof rawTs === 'string'
+                        ? Number(rawTs)
+                        : typeof rawTs?.toNumber === 'function'
+                            ? rawTs.toNumber()
+                            : Number(rawTs ?? 0);
+
+                // Avoid sending auto-replies for old history sync payloads.
+                if (!tsSeconds || Date.now() - tsSeconds * 1000 > 120000) continue;
+            }
 
             if (!msg.message || msg.key.fromMe) continue;
             
