@@ -21,6 +21,9 @@ export const GET = async ({ locals }) => {
             messageDelay: 2000,
             batchSize: 25,
             batchWaitMinutes: 5,
+            useMessageDelay: true,
+            useBatchSizeLimit: true,
+            useBatchWait: true,
             useGreetingVariations: true,
             useIntroVariations: true,
             useClosingVariations: true,
@@ -76,6 +79,18 @@ export const POST = async ({ request, locals }) => {
 
     if (body.accountRotationEnabled !== undefined) {
         body.accountRotationEnabled = Boolean(body.accountRotationEnabled);
+    }
+
+    if (body.useMessageDelay !== undefined) {
+        body.useMessageDelay = Boolean(body.useMessageDelay);
+    }
+
+    if (body.useBatchSizeLimit !== undefined) {
+        body.useBatchSizeLimit = Boolean(body.useBatchSizeLimit);
+    }
+
+    if (body.useBatchWait !== undefined) {
+        body.useBatchWait = Boolean(body.useBatchWait);
     }
 
     if (body.rejectKeywords !== undefined) {

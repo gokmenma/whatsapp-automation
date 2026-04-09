@@ -39,6 +39,9 @@ export const userSettings = sqliteTable('user_settings', {
     messageDelay: integer('message_delay').notNull().default(2000), // Default 2 seconds
     batchSize: integer('batch_size').notNull().default(25), // Random batch upper bound (20-300)
     batchWaitMinutes: integer('batch_wait_minutes').notNull().default(5), // Random wait upper bound minutes (3-30)
+    useMessageDelay: integer('use_message_delay', { mode: 'boolean' }).notNull().default(true),
+    useBatchSizeLimit: integer('use_batch_size_limit', { mode: 'boolean' }).notNull().default(true),
+    useBatchWait: integer('use_batch_wait', { mode: 'boolean' }).notNull().default(true),
     useGreetingVariations: integer('use_greeting_variations', { mode: 'boolean' }).notNull().default(true),
     useIntroVariations: integer('use_intro_variations', { mode: 'boolean' }).notNull().default(true),
     useClosingVariations: integer('use_closing_variations', { mode: 'boolean' }).notNull().default(true),

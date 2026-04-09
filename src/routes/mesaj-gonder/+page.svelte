@@ -389,8 +389,11 @@
 
 	let userSettings = $state({
 		messageDelay: 2000,
+		useMessageDelay: true,
 		batchSize: 25,
+		useBatchSizeLimit: true,
 		batchWaitMinutes: 5,
+		useBatchWait: true,
 		accountRotationEnabled: false,
 		accountRotationMessageCount: 0,
 		rejectMessageCheckEnabled: false,
@@ -585,8 +588,11 @@
 			const data = await res.json();
 			if (data) {
 				if (typeof data.messageDelay === 'number') userSettings.messageDelay = data.messageDelay;
+				if (typeof data.useMessageDelay === 'boolean') userSettings.useMessageDelay = data.useMessageDelay;
 				if (typeof data.batchSize === 'number') userSettings.batchSize = data.batchSize;
+				if (typeof data.useBatchSizeLimit === 'boolean') userSettings.useBatchSizeLimit = data.useBatchSizeLimit;
 				if (typeof data.batchWaitMinutes === 'number') userSettings.batchWaitMinutes = data.batchWaitMinutes;
+				if (typeof data.useBatchWait === 'boolean') userSettings.useBatchWait = data.useBatchWait;
 				if (typeof data.accountRotationEnabled === 'boolean') userSettings.accountRotationEnabled = data.accountRotationEnabled;
 				if (typeof data.accountRotationMessageCount === 'number') {
 					userSettings.accountRotationMessageCount = Math.max(1, Math.min(100, Math.floor(data.accountRotationMessageCount)));
@@ -710,6 +716,10 @@
         const batchId = finalRecipients.length > 1 ? Math.random().toString(36).substr(2, 9) : undefined;
 
 		antiBan = normalizeAntiBanSettings(antiBan);
+		const useMessageDelay = Boolean(userSettings.useMessageDelay);
+		const useBatchSizeLimit = Boolean(userSettings.useBatchSizeLimit);
+		const useBatchWait = Boolean(userSettings.useBatchWait);
+		const effectiveBatchPauseEnabled = Boolean(antiBan.batchPauseEnabled && useBatchSizeLimit && useBatchWait);
 		const maxMessageDelayMs = Math.max(
 			MIN_MESSAGE_DELAY_MS,
 			Math.floor(Number(userSettings.messageDelay || MIN_MESSAGE_DELAY_MS))
@@ -896,12 +906,12 @@
 				}
 			}
 
-			// Batch içindeki mesajlar için 600 ms ile kullanıcı max gecikmesi arasında rastgele bekleme
-			const finalDelay = getRandomMessageDelayMs(maxMessageDelayMs);
+			// Delay switch kapalıysa sabit 10ms kullan.
+			const finalDelay = useMessageDelay ? getRandomMessageDelayMs(maxMessageDelayMs) : 10;
 			await new Promise(r => setTimeout(r, finalDelay));
 
 			sentInCurrentBatch++;
-			if (antiBan.batchPauseEnabled && hasMoreRecipients && sentInCurrentBatch >= randomBatchTarget) {
+			if (effectiveBatchPauseEnabled && hasMoreRecipients && sentInCurrentBatch >= randomBatchTarget) {
 				const randomPauseMs = getRandomPauseDurationMs(maxWaitMinutes);
 				currentRecipient = `⏸ ${sentInCurrentBatch} mesaj gönderildi - ${Math.round(randomPauseMs / 60000)} dk bekleniyor...`;
 				await new Promise((r) => setTimeout(r, randomPauseMs));

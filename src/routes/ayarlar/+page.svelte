@@ -20,8 +20,11 @@
 		accountRotationEnabled: false,
 		accountRotationMessageCount: 1,
 		messageDelay: 2000,
+		useMessageDelay: true,
 		batchSize: 25,
+		useBatchSizeLimit: true,
 		batchWaitMinutes: 5,
+		useBatchWait: true,
 		rejectMessageCheckEnabled: false,
 		rejectKeywords: 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum'
 	});
@@ -78,8 +81,11 @@
 					accountRotationEnabled: readBooleanFlag(data.accountRotationEnabled),
 					accountRotationMessageCount: Math.max(1, Math.min(100, Math.floor(Number(data.accountRotationMessageCount || 1)))),
 					messageDelay: data.messageDelay || 2000,
+					useMessageDelay: readBooleanFlag(data.useMessageDelay ?? true),
 					batchSize: data.batchSize || 25,
+					useBatchSizeLimit: readBooleanFlag(data.useBatchSizeLimit ?? true),
 					batchWaitMinutes: data.batchWaitMinutes || 5,
+					useBatchWait: readBooleanFlag(data.useBatchWait ?? true),
 					rejectMessageCheckEnabled: readBooleanFlag(data.rejectMessageCheckEnabled),
 					rejectKeywords: formatRejectKeywords(parseRejectKeywords(data.rejectKeywords)) || 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum'
 				};
@@ -522,9 +528,16 @@
 					<div class="rounded-lg border p-3 space-y-3">
 						<div class="flex items-center justify-between">
 							<Label class="text-sm">Mesajlar Arası Gecikme</Label>
-							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.messageDelay} ms</span>
+							<div class="flex items-center gap-2">
+								{#if settings.useMessageDelay}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.messageDelay} ms</span>
+								{:else}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">10 ms (Sabit)</span>
+								{/if}
+								<Switch checked={settings.useMessageDelay} onCheckedChange={(checked) => setBooleanValue('useMessageDelay', checked === true)} />
+							</div>
 						</div>
-						<div class="flex items-center gap-3">
+						<div class={`flex items-center gap-3 ${settings.useMessageDelay ? '' : 'opacity-50'}`}>
 							<input
 								type="range"
 								min="400"
@@ -532,6 +545,7 @@
 								step="100"
 								value={settings.messageDelay}
 								oninput={(e) => handleMessageDelayChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useMessageDelay}
 								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
 							/>
 							<Input
@@ -541,6 +555,7 @@
 								step="100"
 								value={settings.messageDelay}
 								onchange={(e) => handleMessageDelayChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useMessageDelay}
 								class="h-8 w-20 text-xs font-mono text-center"
 							/>
 						</div>
@@ -548,14 +563,26 @@
 							<span class="opacity-50">400 ms</span>
 							<span class="opacity-50">10.000 ms</span>
 						</div>
+						<p class="text-xs text-muted-foreground">
+							{settings.useMessageDelay
+								? 'Açıkken her mesaj arasında 400 ms ile belirlediğiniz değer arasında rastgele bekleme uygulanır.'
+								: 'Kapalıyken mesajlar arası bekleme sabit 10 ms uygulanır.'}
+						</p>
 					</div>
 
 					<div class="rounded-lg border p-3 space-y-3">
 						<div class="flex items-center justify-between">
 							<Label class="text-sm">Toplu Gönderimde Mesaj Sayısı</Label>
-							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchSize}</span>
+							<div class="flex items-center gap-2">
+								{#if settings.useBatchSizeLimit}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchSize}</span>
+								{:else}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">Sınırsız</span>
+								{/if}
+								<Switch checked={settings.useBatchSizeLimit} onCheckedChange={(checked) => setBooleanValue('useBatchSizeLimit', checked === true)} />
+							</div>
 						</div>
-						<div class="flex items-center gap-3">
+						<div class={`flex items-center gap-3 ${settings.useBatchSizeLimit ? '' : 'opacity-50'}`}>
 							<input
 								type="range"
 								min="20"
@@ -563,6 +590,7 @@
 								step="1"
 								value={settings.batchSize}
 								oninput={(e) => handleBatchSizeChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useBatchSizeLimit}
 								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
 							/>
 							<Input
@@ -572,18 +600,30 @@
 								step="1"
 								value={settings.batchSize}
 								onchange={(e) => handleBatchSizeChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useBatchSizeLimit}
 								class="h-8 w-20 text-xs font-mono text-center"
 							/>
 						</div>
-						<p class="text-xs text-muted-foreground">Her batch için 20 ile bu değer arasında rastgele hedef seçilir.</p>
+						<p class="text-xs text-muted-foreground">
+							{settings.useBatchSizeLimit
+								? 'Açıkken her batch için 20 ile bu değer arasında rastgele hedef seçilir.'
+								: 'Kapalıyken batch mesaj sayısı sınırı uygulanmaz.'}
+						</p>
 					</div>
 
 					<div class="rounded-lg border p-3 space-y-3">
 						<div class="flex items-center justify-between">
 							<Label class="text-sm">Toplu Gönderimde Bekleme (dk)</Label>
-							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchWaitMinutes}</span>
+							<div class="flex items-center gap-2">
+								{#if settings.useBatchWait}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchWaitMinutes}</span>
+								{:else}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">Bekleme Yok</span>
+								{/if}
+								<Switch checked={settings.useBatchWait} onCheckedChange={(checked) => setBooleanValue('useBatchWait', checked === true)} />
+							</div>
 						</div>
-						<div class="flex items-center gap-3">
+						<div class={`flex items-center gap-3 ${settings.useBatchWait ? '' : 'opacity-50'}`}>
 							<input
 								type="range"
 								min="3"
@@ -591,6 +631,7 @@
 								step="1"
 								value={settings.batchWaitMinutes}
 								oninput={(e) => handleBatchWaitChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useBatchWait}
 								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
 							/>
 							<Input
@@ -600,10 +641,15 @@
 								step="1"
 								value={settings.batchWaitMinutes}
 								onchange={(e) => handleBatchWaitChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useBatchWait}
 								class="h-8 w-20 text-xs font-mono text-center"
 							/>
 						</div>
-						<p class="text-xs text-muted-foreground">Batch tamamlandığında 3 ile bu değer arasında rastgele dakika beklenir.</p>
+						<p class="text-xs text-muted-foreground">
+							{settings.useBatchWait
+								? 'Açıkken batch tamamlandığında 3 ile bu değer arasında rastgele dakika beklenir.'
+								: 'Kapalıyken batch arası bekleme uygulanmaz.'}
+						</p>
 					</div>
 				</Card.Content>
 			</Card.Root>
