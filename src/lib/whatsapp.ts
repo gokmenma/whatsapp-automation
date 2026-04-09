@@ -1713,6 +1713,7 @@ export async function sendWhatsAppMessage(
     const shouldPersistLog = Boolean(batchId);
     const settings = await db.select().from(userSettings).where(eq(userSettings.userId, account.userId)).get();
     const humanBehaviorEnabled = Boolean(settings?.humanBehaviorEnabled);
+    const useMessageDelay = Boolean(settings?.useMessageDelay ?? true);
     const rawBehaviorLevel = String(settings?.humanBehaviorLevel || 'balanced').toLowerCase();
     const humanBehaviorLevel: HumanBehaviorLevel =
         rawBehaviorLevel === 'light' || rawBehaviorLevel === 'aggressive'
@@ -1844,7 +1845,7 @@ export async function sendWhatsAppMessage(
             }
             : undefined;
 
-        if (!isGroupTarget) {
+        if (!isGroupTarget && useMessageDelay) {
             // Always show a minimal typing presence for direct chats.
             // When human behavior is enabled, keep the richer and longer simulation profile.
             const minTypingMs = humanBehaviorEnabled ? 1200 : (batchId ? 500 : 700);
