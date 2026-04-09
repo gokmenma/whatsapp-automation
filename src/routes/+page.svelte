@@ -26,6 +26,8 @@
     let stats = $state({ total: 0, success: 0, error: 0 });
     let fetchedCredits = $state<number | null>(null);
     let credits = $derived(fetchedCredits ?? data.user?.credits ?? 0);
+    const CREDIT_PRICE_TRY = 0.30;
+    let remainingBalance = $derived(credits * CREDIT_PRICE_TRY);
     let selectedGroup = $state<any>(null);
     let isDialogOpen = $state(false);
 
@@ -171,7 +173,7 @@
         </div>
     </div>
 
-	<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+    <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
 		<Card.Root>
 			<Card.Header class="flex flex-row items-center justify-between space-y-0 pb-2">
 				<Card.Title class="text-sm font-medium">Toplam İşlem</Card.Title>
@@ -208,6 +210,17 @@
 				<p class="text-muted-foreground text-xs">Hesabınızdaki mesaj hakkı</p>
 			</Card.Content>
 		</Card.Root>
+        <Card.Root>
+            <Card.Header class="flex flex-row items-center justify-between space-y-0 pb-2">
+                <Card.Title class="text-sm font-medium">Kalan Bakiye</Card.Title>
+            </Card.Header>
+            <Card.Content>
+                <div class="text-2xl font-bold">
+                    {remainingBalance.toLocaleString('tr-TR', { style: 'currency', currency: 'TRY', minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+                <p class="text-muted-foreground text-xs">Geçici hesap: 1 kredi = 0,30 TL</p>
+            </Card.Content>
+        </Card.Root>
 	</div>
 
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
