@@ -28,6 +28,24 @@
     let credits = $derived(fetchedCredits ?? data.user?.credits ?? 0);
     const CREDIT_PRICE_TRY = 0.30;
     let remainingBalance = $derived(credits * CREDIT_PRICE_TRY);
+    let remainingBalanceDisplay = $derived.by(() => {
+        const formatted = remainingBalance.toLocaleString('tr-TR', {
+            style: 'currency',
+            currency: 'TRY',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+
+        const commaIndex = formatted.lastIndexOf(',');
+        if (commaIndex === -1) {
+            return { main: formatted, cents: '' };
+        }
+
+        return {
+            main: formatted.slice(0, commaIndex),
+            cents: formatted.slice(commaIndex)
+        };
+    });
     let selectedGroup = $state<any>(null);
     let isDialogOpen = $state(false);
 
@@ -215,8 +233,11 @@
                 <Card.Title class="text-sm font-medium">Kalan Bakiye</Card.Title>
             </Card.Header>
             <Card.Content>
-                <div class="text-2xl font-bold">
-                    {remainingBalance.toLocaleString('tr-TR', { style: 'currency', currency: 'TRY', minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                <div class="text-2xl font-bold text-blue-500">
+                    {remainingBalanceDisplay.main}
+                    {#if remainingBalanceDisplay.cents}
+                        <span class="text-[0.8em]">{remainingBalanceDisplay.cents}</span>
+                    {/if}
                 </div>
                 <p class="text-muted-foreground text-xs">Geçici hesap: 1 kredi = 0,30 TL</p>
             </Card.Content>
