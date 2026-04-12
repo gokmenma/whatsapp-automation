@@ -150,33 +150,53 @@
 	// Use data from parent layout whenever it updates
 	$effect(() => {
 		// Register dependencies on both accounts and credits from props
-		const incomingAccounts = data.accounts;
+		const incomingAccounts = data.accounts || [];
 		const incomingCredits = data.credits;
 		
 		// Untrack local state updates to prevent reactivity loops
 		untrack(() => {
-			// Update local accounts list
-			accounts = (incomingAccounts || []).filter((a: any) => a.status === 'ready');
+			// Update local accounts list - only READY accounts for sending
+			accounts = incomingAccounts.filter((a: any) => a.status === 'ready');
 			userCredits = incomingCredits || 0;
 			
-			// If no account is selected, or if the current one is not ready/doesn't exist, try to pick one
-			const currentIsReady = accounts.find(a => a.id === selectedAccountId);
-			if (!selectedAccountId || !currentIsReady) {
-				const defaultAccount = accounts.find((a: any) => a.isDefault);
-				selectedAccountId = defaultAccount ? defaultAccount.id : (accounts[0]?.id || "");
+			// Clean up selectedAccountId if it's no longer in the list of READY accounts
+			if (selectedAccountId) {
+                const found = accounts.find(a => a.id === selectedAccountId);
+                if (!found) {
+                    selectedAccountId = "";
+                }
+            }
+
+			// If no account is selected, try to pick one
+			if (!selectedAccountId) {
+                const storedId = typeof window !== 'undefined' ? window.localStorage.getItem('activeUiAccountId') : null;
+                const storedIsReady = storedId ? accounts.find(a => a.id === storedId) : null;
+                
+                if (storedIsReady) {
+                    selectedAccountId = storedId!;
+                } else {
+				    const defaultAccount = accounts.find((a: any) => a.isDefault);
+				    selectedAccountId = defaultAccount ? defaultAccount.id : (accounts[0]?.id || "");
+                }
 			}
 		});
 	});
 
-	async function fetchAccounts() {
-		try {
-			await invalidateAll();
-		} catch (e) {
-			console.error("Account refresh error:", e);
-		}
-	}
-
 	let lastLoadedAccountId = "";
+    
+    // Listen for global account change (e.g. from sidebar)
+    onMount(() => {
+        const handler = (e: any) => {
+            if (e.detail?.accountId) {
+                const isReady = accounts.find(a => a.id === e.detail.accountId);
+                if (isReady) {
+                    selectedAccountId = e.detail.accountId;
+                }
+            }
+        };
+        window.addEventListener('account:selected', handler);
+        return () => window.removeEventListener('account:selected', handler);
+    });
 	async function openContactModal() {
 		if (!selectedAccountId) return alert("Önce bir hesap seçmelisiniz");
 		
@@ -392,7 +412,8 @@
 		rejectMessageCheckEnabled: false,
 		useGreetingVariations: true,
 		useIntroVariations: true,
-		useClosingVariations: true
+		useClosingVariations: true,
+		banProtectionEnabled: true
 	});
 
 	async function setRejectMessageCheckEnabled(nextValue: boolean) {
@@ -411,6 +432,29 @@
 			userSettings.rejectMessageCheckEnabled = previousValue;
 			console.error('Reject message check save error:', error);
 			toast.error('Mesaj red kontrol ayarı kaydedilemedi.');
+		}
+	}
+
+	async function setBanProtectionEnabled(nextValue: boolean) {
+		const previousValue = userSettings.banProtectionEnabled;
+		userSettings.banProtectionEnabled = nextValue;
+
+		try {
+			const res = await fetch('/api/settings', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ banProtectionEnabled: nextValue })
+			});
+
+			if (!res.ok) {
+                const errorData = await res.json().catch(() => ({}));
+                throw new Error(errorData.error || 'Ban koruma ayarı kaydedilemedi.');
+            }
+            toast.success(`Ban koruma ${nextValue ? 'aktif edildi' : 'kapatıldı'}`);
+		} catch (error: any) {
+			userSettings.banProtectionEnabled = previousValue;
+			console.error('Ban protection save error:', error);
+			toast.error(error.message || 'Ban koruma ayarı kaydedilemedi.');
 		}
 	}
 
@@ -587,6 +631,7 @@
 				if (typeof data.useGreetingVariations === 'boolean') antiBan.useGreetingVariations = data.useGreetingVariations;
 				if (typeof data.useIntroVariations === 'boolean') antiBan.useIntroVariations = data.useIntroVariations;
 				if (typeof data.useClosingVariations === 'boolean') antiBan.useClosingVariations = data.useClosingVariations;
+				if (typeof data.banProtectionEnabled === 'boolean') userSettings.banProtectionEnabled = data.banProtectionEnabled;
 			}
 		} catch (e) {
 			console.error("Settings fetch error:", e);
@@ -654,7 +699,7 @@
 
 			// Mesajı Ban Koruma varyasyon havuzlarıyla rastgele oluştur
 			let finalMessage = item.message;
-			if (finalMessage) {
+			if (finalMessage && userSettings.banProtectionEnabled) {
 				const parts: string[] = [];
 
 				const greeting = antiBan.useGreetingVariations
@@ -678,7 +723,7 @@
 			}
 
 			// Mesaj sonuna sadece gizli benzersiz kod ekle
-			if (finalMessage) {
+			if (finalMessage && userSettings.banProtectionEnabled) {
 				// Gizli karakterler (opsiyonel seçime bağlı)
 				if (antiBan.addRandomSuffix) {
 					const secretNum = Math.floor(Math.random() * 9000000) + 1000000;
@@ -731,7 +776,7 @@
 
 			sentInCurrentBatch++;
 			const hasMoreRecipients = i < finalRecipients.length - 1;
-			if (antiBan.batchPauseEnabled && hasMoreRecipients && sentInCurrentBatch >= randomBatchTarget) {
+			if (userSettings.banProtectionEnabled && antiBan.batchPauseEnabled && hasMoreRecipients && sentInCurrentBatch >= randomBatchTarget) {
 				const randomPauseMs = getRandomPauseDurationMs(maxWaitMinutes);
 				currentRecipient = `⏸ ${sentInCurrentBatch} mesaj gönderildi - ${Math.round(randomPauseMs / 60000)} dk bekleniyor...`;
 				await new Promise((r) => setTimeout(r, randomPauseMs));
@@ -1014,10 +1059,10 @@
 		</div>
 	</div>
 
-	<div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+	<div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
 		<!-- Left Side: Message Content -->
 		<div class="lg:col-span-7 space-y-6">
-			<Card.Root class="overflow-hidden border-none shadow-md ring-1 ring-border/50">
+			<Card.Root class="overflow-hidden border-none shadow-md ring-1 ring-border/50 h-full flex flex-col">
 				<Card.Header class="bg-muted/30 pb-4">
 					<div class="flex items-center gap-2">
 						<div class="p-1.5 bg-primary/10 text-primary rounded-md">
@@ -1029,10 +1074,10 @@
 						</div>
 					</div>
 				</Card.Header>
-				<Card.Content class="p-6 space-y-6">
+				<Card.Content class="p-6 space-y-6 flex-1 flex flex-col">
 					<!-- Media Upload Area -->
 					<div class="space-y-3">
-						<div class="flex items-center justify-between">
+						<div class="flex items-center justify-between h-8">
 							<Label class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Medya Ekleyin <span class="text-[10px] font-normal lowercase">(isteğe bağlı)</span></Label>
 							<div class="flex items-center gap-3">
 								{#if isBulk}
@@ -1072,7 +1117,7 @@
 								<input type="file" id="media" bind:this={mediaInput} class="hidden" onchange={handleFileSelect} />
 								<Label 
                                     for="media" 
-                                    class="flex flex-col items-center justify-center h-44 rounded-xl border-2 border-dashed transition-all duration-300 cursor-pointer group {isDraggingMedia ? 'border-primary bg-primary/10' : 'border-muted-foreground/20 bg-muted/5 hover:border-primary/50 hover:bg-primary/2'}"
+                                    class="flex flex-col items-center justify-center h-[140px] rounded-xl border-2 border-dashed transition-all duration-300 cursor-pointer group {isDraggingMedia ? 'border-primary bg-primary/10' : 'border-muted-foreground/20 bg-muted/5 hover:border-primary/50 hover:bg-primary/2'}"
                                     ondragover={handleDragOver}
                                     ondragleave={handleDragLeave}
                                     ondrop={handleMediaDrop}
@@ -1108,7 +1153,7 @@
 					<Separator class="opacity-50" />
 
 					<!-- Message Textarea -->
-					<div class="space-y-3">
+					<div class="space-y-3 flex-1 flex flex-col">
 						<div class="flex items-center justify-between">
 							<div class="flex items-center gap-2">
 								<Label for="message" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">Mesaj Metni</Label>
@@ -1186,7 +1231,7 @@
 								</div>
 							{/if}
 						</div>
-						<div class="relative group">
+						<div class="relative group flex-1 flex flex-col">
 							<Textarea 
 								id="message" 
 								bind:value={messageBody} 
@@ -1195,7 +1240,7 @@
 								onmouseleave={handleTextareaSelection}
 								placeholder={isPersonalized ? "Excel dosyasındaki kişiye özel mesajlar kullanılacaktır." : "Mesajınızı buraya yazın..."} 
 								disabled={isPersonalized}
-								class="min-h-40 max-h-50 overflow-y-auto text-sm resize-none border-none bg-muted/10 p-4 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-xl shadow-inner-sm {isPersonalized ? 'opacity-50' : ''}" 
+								class="flex-1 min-h-[240px] overflow-y-auto text-sm resize-none border-none bg-muted/10 p-4 focus-visible:ring-1 focus-visible:ring-primary/30 transition-all rounded-xl shadow-inner-sm {isPersonalized ? 'opacity-50' : ''}" 
 							/>
 							{#if messageBody.length > 0}
 								<div class="absolute bottom-3 right-3 text-[10px] bg-background/80 backdrop-blur-sm px-2 py-1 rounded border shadow-sm text-muted-foreground font-mono">
@@ -1224,7 +1269,7 @@
 				</Card.Header>
 				<Card.Content class="p-6 space-y-6">
 					<div class="space-y-3">
-						<div class="flex items-center justify-between">
+						<div class="flex items-center justify-between h-8">
 							<div class="flex items-center gap-2">
 								<Label for="numbers" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Alıcı Numaraları</Label>
 								{#if validNumberCount > 0}
@@ -1266,7 +1311,7 @@
 								bind:value={phoneNumberText} 
 								placeholder=""
 								wrap="off"
-								class="min-h-35 max-h-50 w-full overflow-y-auto text-sm font-mono border-2 border-transparent bg-transparent focus-visible:ring-1 focus-visible:ring-primary/20 transition-all rounded-2xl shadow-inner-sm overflow-x-auto whitespace-pre p-4 {phoneNumberText ? 'border-muted-foreground/10 bg-muted/5' : 'opacity-0 focus:opacity-100'} {isDraggingNumbers ? 'opacity-0' : ''}" 
+								class="min-h-[140px] max-h-50 w-full overflow-y-auto text-sm font-mono border-2 border-transparent bg-transparent focus-visible:ring-1 focus-visible:ring-primary/20 transition-all rounded-2xl shadow-inner-sm overflow-x-auto whitespace-pre p-4 {phoneNumberText ? 'border-muted-foreground/10 bg-muted/5' : 'opacity-0 focus:opacity-100'} {isDraggingNumbers ? 'opacity-0' : ''}" 
 							/>
 
 							{#if isDraggingNumbers}
@@ -1396,7 +1441,18 @@
 
 						{#if sendStatus === "idle"}
 							<div class="mt-4">
-								<div class="mb-3 rounded-xl border bg-muted/20 px-3 py-2 flex items-center justify-between gap-3">
+									<div class="mb-3 rounded-xl border bg-muted/20 px-3 py-2 flex items-center justify-between gap-3">
+										<div>
+											<p class="text-sm font-semibold">Ban Koruma Ayarları</p>
+											<p class="text-xs text-muted-foreground">Mesajlara rastgele varyasyonlar ekleyerek hesap güvenliğini artırır.</p>
+										</div>
+										<Switch
+											checked={userSettings.banProtectionEnabled}
+											onCheckedChange={(checked) => setBanProtectionEnabled(checked === true)}
+										/>
+									</div>
+
+									<div class="mb-3 rounded-xl border bg-muted/20 px-3 py-2 flex items-center justify-between gap-3">
 									<div>
 										<p class="text-sm font-semibold">Mesaj Red Kontrolü</p>
 										<p class="text-xs text-muted-foreground">Mesaj red yanıtı veren numaralara gönderim yapılmaz.</p>

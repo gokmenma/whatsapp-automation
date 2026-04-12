@@ -21,13 +21,8 @@ function resolveDirectConversationNumber(accountId: string, jidOrNumber: string)
         return normalizeDirectDigits(raw);
     }
 
-    const [, domain = ''] = raw.split('@');
-    const digits = normalizeDirectDigits(raw);
-    if ((domain === 's.whatsapp.net' || domain === 'c.us') && digits) {
-        return digits;
-    }
-
-    return getCanonicalContactNumber(accountId, raw) || digits;
+    // Always prefer canonical normalization to handle LID <-> Phone mapping
+    return getCanonicalContactNumber(accountId, raw) || normalizeDirectDigits(raw);
 }
 
 // GET /api/messages/[jid]?accountId=xxx → messages for a conversation
@@ -56,112 +51,131 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
             .filter(Boolean)
     );
 
-    // Verify account belongs to user
-    const account = await db.select().from(accounts)
-        .where(eq(accounts.id, accountId))
-        .get();
-    if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
+    // Parallelize account fetch and JID listing
+    const [accountResult, jidRows] = await Promise.all([
+        db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1),
+        isGroupChat ? Promise.resolve([]) : db.execute(sql`SELECT DISTINCT contact_jid FROM messages WHERE account_id = ${accountId}`)
+    ]);
+    
+    const account = accountResult[0];
+    const isAdminOrSuper = locals.user.role === 'superadmin' || locals.user.role === 'admin';
+    const isOwner = String(account?.userId) === String(locals.user.id);
+    const canAccess = isOwner || (isAdminOrSuper && !account?.isPrivate);
 
-    // Mark incoming messages in this conversation as read in local DB so unread badge clears after opening.
+    if (!account || !canAccess) throw error(403, 'Erişim reddedildi');
+
+    // To efficiently fetch only relevant messages in SQL, we collect all JIDs first
+    const targetJidList: string[] = [];
     if (isGroupChat) {
-        await db.run(sql`
+        targetJidList.push(contactParam);
+    } else {
+        (jidRows as any[]).forEach(r => {
+            const jid = String(r.contact_jid || '');
+            if (resolveDirectConversationNumber(accountId, jid) === contactNumber) {
+                targetJidList.push(jid);
+            }
+        });
+    }
+
+    if (targetJidList.length === 0) {
+        return json({ messages: [], hasMore: false });
+    }
+
+    // Mark as read and fetch messages in parallel
+    const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
+    const before = url.searchParams.get('before');
+    const beforeDate = before ? new Date(Number(before) * 1000) : null;
+
+    let queryFilter = sql`m.account_id = ${accountId} AND m.contact_jid IN (${sql.join(targetJidList, sql`, `)})`;
+    if (beforeDate) {
+        queryFilter = sql`${queryFilter} AND m.timestamp < ${beforeDate}`;
+    }
+
+    const [allMsgs] = await Promise.all([
+        db.execute(sql`
+            SELECT
+                m.id,
+                m.account_id AS accountId,
+                m.contact_jid AS contactJid,
+                m.sender_jid AS senderJid,
+                m.sender_name AS senderName,
+                m.from_me AS fromMe,
+                m.body,
+                m.media_type AS mediaType,
+                m.quoted_msg_id AS quotedMsgId,
+                m.quoted_msg_body AS quotedMsgBody,
+                qm.media_type AS quotedMediaType,
+                qm.body AS quotedSourceBody,
+                m.reaction,
+                m.edited_at AS editedAt,
+                m.timestamp,
+                m.status
+            FROM messages m
+            LEFT JOIN messages qm ON qm.account_id = m.account_id AND qm.id = m.quoted_msg_id
+            WHERE ${queryFilter}
+            ORDER BY m.timestamp DESC
+            LIMIT ${limit + 1}
+        `),
+        // Mark as read in local DB
+        db.execute(sql`
             UPDATE messages
             SET status = 'read',
                 is_read = 1
             WHERE account_id = ${accountId}
-              AND contact_jid = ${contactParam}
+              AND contact_jid IN (${sql.join(targetJidList, sql`, `)})
               AND from_me = 0
               AND is_read = 0
-        `);
+        `),
+        // Mark as read on WhatsApp (async, don't strictly need to wait but we do for consistency)
+        markConversationAsReadOnWhatsApp(accountId, targetJidList)
+    ]);
 
-        await markConversationAsReadOnWhatsApp(accountId, [contactParam]);
-    } else {
-        const rows = await db.all(sql`
-            SELECT DISTINCT contact_jid
-            FROM messages
-            WHERE account_id = ${accountId}
-        `);
+    const rawMsgs = (allMsgs as any[]) || [];
+    const hasMore = rawMsgs.length > limit;
+    const items = hasMore ? rawMsgs.slice(0, limit) : rawMsgs;
 
-        const targetJids = Array.from(new Set(
-            (rows as any[])
-                .map((r) => String(r.contact_jid || ''))
-                .filter((jid) => resolveDirectConversationNumber(accountId, jid) === contactNumber)
-        ));
-
-        for (const jid of targetJids) {
-            await db.run(sql`
-                UPDATE messages
-                SET status = 'read',
-                    is_read = 1
-                WHERE account_id = ${accountId}
-                  AND contact_jid = ${jid}
-                  AND from_me = 0
-                  AND is_read = 0
-            `);
-        }
-
-        await markConversationAsReadOnWhatsApp(accountId, targetJids);
-    }
-
-    const allMsgs = await db.all(sql`
-        SELECT
-            m.id,
-            m.account_id AS accountId,
-            m.contact_jid AS contactJid,
-            m.sender_jid AS senderJid,
-            m.sender_name AS senderName,
-            m.from_me AS fromMe,
-            m.body,
-            m.media_type AS mediaType,
-            m.quoted_msg_id AS quotedMsgId,
-            m.quoted_msg_body AS quotedMsgBody,
-            qm.media_type AS quotedMediaType,
-            qm.body AS quotedSourceBody,
-            m.reaction,
-            m.edited_at AS editedAt,
-            m.timestamp,
-            m.status
-        FROM messages m
-        LEFT JOIN messages qm ON qm.account_id = m.account_id AND qm.id = m.quoted_msg_id
-        WHERE m.account_id = ${accountId}
-        ORDER BY m.timestamp DESC
-        LIMIT 2000
-    `);
-
-    const msgs = (allMsgs as any[])
-        .filter((m) => {
-            const rowJid = String(m.contactJid || '');
-            if (isGroupChat) return rowJid === contactParam;
-            return resolveDirectConversationNumber(accountId, rowJid) === contactNumber;
-        })
+    const msgs = items
         .filter((m) => {
             const body = String(m.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
             const isGhostRow = !m.mediaType && !body && m.status !== 'deleted_me' && m.status !== 'deleted_everyone';
             return !isGhostRow;
         })
-        .map((m) => ({
-            ...m,
-            // Some historical group rows were stored with wrong fromMe=false for own participant.
-            // Derive a stable view-time flag so own messages render on the right.
-            fromMe: Boolean(m.fromMe) || (
-                isGroupChat &&
-                (
-                    (selfDigits.length > 0 &&
-                        String(m.senderJid || '').split('@')[0].split(':')[0].replace(/\D/g, '') === selfDigits) ||
-                    (selfNameSet.size > 0 && selfNameSet.has(normalizeName(m.senderName)))
-                )
-            ),
-            body: String(m.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim(),
-            quotedMsgBody: String(m.quotedMsgBody || m.quotedSourceBody || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim() || null,
-            senderName: isGroupChat
-                ? (String(m.senderName || '').trim() || (m.senderJid ? getContactName(accountId, String(m.senderJid)) : null))
-                : null
-        }))
-        .slice(0, 500)
-        .reverse();
+        .map((m) => {
+            const rawTs = m.timestamp;
+            let timestamp: number;
+            
+            if (rawTs instanceof Date) {
+                timestamp = Math.floor(rawTs.getTime() / 1000);
+            } else if (typeof rawTs === 'number') {
+                timestamp = rawTs > 1e12 ? Math.floor(rawTs / 1000) : rawTs;
+            } else if (rawTs && !isNaN(Date.parse(String(rawTs)))) {
+                timestamp = Math.floor(new Date(String(rawTs)).getTime() / 1000);
+            } else {
+                timestamp = Math.floor(Date.now() / 1000);
+            }
+            
+            return {
+                ...m,
+                timestamp,
+                fromMe: Boolean(m.fromMe) || (
+                    isGroupChat &&
+                    (
+                        (selfDigits.length > 0 &&
+                            String(m.senderJid || '').split('@')[0].split(':')[0].replace(/\D/g, '') === selfDigits) ||
+                        (selfNameSet.size > 0 && selfNameSet.has(normalizeName(m.senderName)))
+                    )
+                ),
+                body: String(m.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim(),
+                quotedMsgBody: String(m.quotedMsgBody || m.quotedSourceBody || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim() || null,
+                senderName: isGroupChat
+                    ? (String(m.senderName || '').trim() || (m.senderJid ? getContactName(accountId, String(m.senderJid)) : null))
+                    : null
+            };
+        });
 
     return json({
         messages: msgs,
+        hasMore,
         contactName: getContactName(accountId, isGroupChat ? contactParam : `${contactNumber}@s.whatsapp.net`),
         contactNumber: isGroupChat ? contactParam.split('@')[0] : contactNumber
     });
@@ -178,11 +192,16 @@ export const POST: RequestHandler = async ({ params, request, locals }) => {
 
     const contactJid = decodeURIComponent(params.jid);
 
-    // Verify account belongs to user
-    const account = await db.select().from(accounts)
-        .where(eq(accounts.id, accountId))
-        .get();
-    if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
+    // Fetch account details
+    const accountResult = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
+    const account = accountResult[0];
+
+    // Verify account belongs to user (Admins/Superadmins can see all non-private accounts)
+    const isAdminOrSuper = locals.user.role === 'superadmin' || locals.user.role === 'admin';
+    const isOwner = String(account.userId) === String(locals.user.id);
+    const canAccess = isOwner || (isAdminOrSuper && !account.isPrivate);
+
+    if (!account || !canAccess) throw error(403, 'Erişim reddedildi');
 
     const target = contactJid.endsWith('@g.us')
         ? contactJid
@@ -204,13 +223,18 @@ export const DELETE: RequestHandler = async ({ params, url, locals }) => {
     const contactParam = decodeURIComponent(params.jid);
     const contactNumber = resolveDirectConversationNumber(accountId, contactParam);
 
-    // Verify account belongs to user
-    const account = await db.select().from(accounts)
-        .where(eq(accounts.id, accountId))
-        .get();
-    if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
+    // Fetch account details
+    const accountResult = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
+    const account = accountResult[0];
 
-    const rows = await db.all(sql`
+    // Verify account belongs to user (Admins/Superadmins can see all non-private accounts)
+    const isAdminOrSuper = locals.user.role === 'superadmin' || locals.user.role === 'admin';
+    const isOwner = String(account.userId) === String(locals.user.id);
+    const canAccess = isOwner || (isAdminOrSuper && !account.isPrivate);
+
+    if (!account || !canAccess) throw error(403, 'Erişim reddedildi');
+
+    const [rows]: any = await db.execute(sql`
         SELECT contact_jid
         FROM messages
         WHERE account_id = ${accountId}
@@ -223,7 +247,7 @@ export const DELETE: RequestHandler = async ({ params, url, locals }) => {
     ));
 
     for (const jid of targetJids) {
-        await db.run(sql`
+        await db.execute(sql`
             DELETE FROM messages
             WHERE account_id = ${accountId}
               AND contact_jid = ${jid}
@@ -259,12 +283,18 @@ export const PATCH: RequestHandler = async ({ params, url, request, locals }) =>
     const contactParam = decodeURIComponent(params.jid);
     const contactNumber = resolveDirectConversationNumber(accountId, contactParam);
 
-    const account = await db.select().from(accounts)
-        .where(eq(accounts.id, accountId))
-        .get();
-    if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
+    // Fetch account details
+    const accountResult = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
+    const account = accountResult[0];
 
-        const rows = await db.all(sql`
+    // Verify account belongs to user (Admins/Superadmins can see all non-private accounts)
+    const isAdminOrSuper = locals.user.role === 'superadmin' || locals.user.role === 'admin';
+    const isOwner = String(account.userId) === String(locals.user.id);
+    const canAccess = isOwner || (isAdminOrSuper && !account.isPrivate);
+
+    if (!account || !canAccess) throw error(403, 'Erişim reddedildi');
+
+        const [rows]: any = await db.execute(sql`
                                 SELECT id, contact_jid, from_me, timestamp, media_type, status
         FROM messages
         WHERE account_id = ${accountId}
@@ -312,7 +342,7 @@ export const PATCH: RequestHandler = async ({ params, url, request, locals }) =>
         }
 
         try {
-            await db.run(sql`
+            await db.execute(sql`
                 UPDATE messages
                 SET body = ${editedBody},
                     edited_at = ${new Date()}
@@ -321,7 +351,7 @@ export const PATCH: RequestHandler = async ({ params, url, request, locals }) =>
             `);
         } catch {
             // Fallback for older DB instances where edited_at is not yet present.
-            await db.run(sql`
+            await db.execute(sql`
                 UPDATE messages
                 SET body = ${editedBody}
                 WHERE account_id = ${accountId}
@@ -360,7 +390,7 @@ export const PATCH: RequestHandler = async ({ params, url, request, locals }) =>
     }
 
     const nextStatus = deleteMode === 'everyone' ? 'deleted_everyone' : 'deleted_me';
-    await db.run(sql`
+    await db.execute(sql`
         UPDATE messages
         SET body = 'Bu mesaj silindi',
             media_type = NULL,

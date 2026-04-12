@@ -16,7 +16,8 @@
 	
 	const isAuthPage = $derived(
 		page.url.pathname.startsWith('/login') || 
-		page.url.pathname.startsWith('/register')
+		page.url.pathname.startsWith('/register') ||
+		page.url.pathname.startsWith('/forgot-password')
 	);
 	function getRouteTitle(path: string) {
 		if (path === '/') return 'Genel Bakış';
@@ -25,7 +26,11 @@
 		if (path.startsWith('/hesaplar')) return 'Hesaplar';
 		if (path.startsWith('/ayarlar')) return 'Ayarlar';
 		if (path.startsWith('/hesabim')) return 'Hesabım';
+		if (path.startsWith('/gonderim-raporlari')) return 'Gönderim Raporları';
+		if (path.startsWith('/admin/users')) return 'Kullanıcı/Rol Yönetimi';
+		if (path.startsWith('/admin/permissions')) return 'Yetki Yönetimi';
 		return 'Panel';
+
 	}
 
 	const currentTitle = $derived(getRouteTitle(page.url.pathname));
@@ -85,6 +90,12 @@
 		eventSource.onmessage = (event) => {
 			try {
 				const msg = JSON.parse(event.data);
+				
+				// Permission check
+				const canAccessMessages = data.user?.role === 'superadmin' || 
+										  data.permissions?.some((p: any) => p.resource === '/mesajlar' && p.canAccess);
+				if (!canAccessMessages) return;
+
 				console.log("[SSE] Refreshing data for new message:", msg);
 				const activeAccountId = resolveActiveAccountId();
 				
@@ -120,15 +131,24 @@
 
 		const unreadFallbackInterval = window.setInterval(async () => {
 			try {
+				// Permission check
+				const canAccessMessages = data.user?.role === 'superadmin' || 
+										  data.permissions?.some((p: any) => p.resource === '/mesajlar' && p.canAccess);
+				if (!canAccessMessages) return;
+
 				const res = await fetch('/api/whatsapp/status');
 				if (!res.ok) return;
 
 				const payload = await res.json();
 				const accounts = Array.isArray(payload?.accounts) ? payload.accounts : [];
-				if (accounts.length === 0) return;
-
+				
 				const activeAccountId = resolveActiveAccountId();
 				let hasDelta = false;
+
+				// Refresh if account count changed (handles deletion/addition in other tabs)
+				if (accounts.length !== (data.accounts?.length || 0)) {
+					hasDelta = true;
+				}
 
 				for (const acc of accounts) {
 					const accountId = String(acc?.id || '').trim();
@@ -183,7 +203,7 @@
 	{@render children()}
 {:else}
 	<Sidebar.Provider>
-		<AppSidebar user={data.user} accounts={data.accounts ?? []} />
+		<AppSidebar user={data.user} accounts={data.accounts ?? []} permissions={data.permissions ?? []} resources={data.resources ?? []} />
 		<Sidebar.Inset>
 			<header
 				class="flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12"

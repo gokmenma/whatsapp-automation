@@ -37,7 +37,7 @@ export const GET: RequestHandler = ({ locals }) => {
                 }
             };
 
-            const onMessage = (data: { accountId: string; id: string; jid: string; body: string; pushName: string }) => {
+            const onMessage = (data: { accountId: string; id: string; jid: string; body: string; pushName: string; fromMe?: boolean; timestamp?: number }) => {
                 if (!userAccountIds.includes(data.accountId)) return;
                 console.log(`[SSE] Sending notification to user ${userId} for account ${data.accountId}`);
                 safeEnqueue(`data: ${JSON.stringify(data)}\n\n`);
@@ -48,15 +48,22 @@ export const GET: RequestHandler = ({ locals }) => {
                 safeEnqueue(`event: typing\ndata: ${JSON.stringify(data)}\n\n`);
             };
 
+            const onRaw = (data: { accountId: string; message: string }) => {
+                if (!userAccountIds.includes(data.accountId)) return;
+                safeEnqueue(data.message);
+            };
+
             cleanup = () => {
                 if (closed) return;
                 closed = true;
                 emitter.off('new_message', onMessage);
                 emitter.off('typing', onTyping);
+                emitter.off('sse_raw', onRaw);
             };
 
             emitter.on('new_message', onMessage);
             emitter.on('typing', onTyping);
+            emitter.on('sse_raw', onRaw);
 
             // Send initial ping
             safeEnqueue(': ping\n\n');

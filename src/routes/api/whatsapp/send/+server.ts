@@ -3,6 +3,7 @@ import { sendWhatsAppMessage } from '$lib/whatsapp';
 import { db } from '$lib/server/db';
 import { accounts } from '$lib/server/db/schema';
 import { eq, and } from 'drizzle-orm';
+import { appendFileSync } from 'node:fs';
 
 export const POST = async ({ request, locals }) => {
     // 1. Check Auth
@@ -12,18 +13,23 @@ export const POST = async ({ request, locals }) => {
 
     try {
         const { accountId, to, message, media, filePath, batchId } = await request.json();
+        const logMsg = `[${new Date().toISOString()}] API Request: Account=${accountId}, To=${to}, MessageLen=${message?.length || 0}\n`;
+        try {
+            appendFileSync('api_debug.log', logMsg);
+        } catch (e) {}
         
         if (!accountId || !to) {
             return json({ success: false, error: 'Hesap ve numara gereklidir.' }, { status: 400 });
         }
 
         // 2. Security Check: Verify account belongs to current user
-        const account = await db.select().from(accounts)
+        const accountResult = await db.select().from(accounts)
             .where(and(
                 eq(accounts.id, accountId),
                 eq(accounts.userId, locals.user.id)
             ))
-            .get();
+            .limit(1);
+        const account = accountResult[0];
         
         if (!account) {
             return json({ success: false, error: 'Bu hesaba erişim yetkiniz yok veya hesap bulunamadı.' }, { status: 403 });

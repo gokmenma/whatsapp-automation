@@ -11,12 +11,11 @@ export const DELETE = async ({ params, locals }) => {
     try {
         const id = parseInt(params.id);
         
-        db.delete(messageTemplates)
+        await db.delete(messageTemplates)
             .where(and(
                 eq(messageTemplates.id, id),
                 eq(messageTemplates.userId, locals.user.id)
-            ))
-            .run();
+            ));
 
         return json({ success: true });
     } catch (e: any) {

@@ -8,24 +8,12 @@
     import { SendHorizontal, Plus, Settings, FileSpreadsheet, History, Users, MessageSquare, Download } from "@lucide/svelte";
     import * as Tooltip from "$lib/components/ui/tooltip";
 
-    type Props = {
-        data: {
-            user?: {
-                id: string;
-                name: string;
-                email: string;
-                credits?: number;
-            };
-        };
-    };
-
-    let { data }: Props = $props();
-
+    let { data }: any = $props();
     let logs: any[] = $state([]);
     let groupedLogs: any[] = $state([]);
     let stats = $state({ total: 0, success: 0, error: 0 });
     let fetchedCredits = $state<number | null>(null);
-    let credits = $derived(fetchedCredits ?? data.user?.credits ?? 0);
+    let credits = $derived(fetchedCredits ?? data.credits ?? 0);
     let selectedGroup = $state<any>(null);
     let isDialogOpen = $state(false);
 
@@ -99,10 +87,10 @@
                 }
             });
 
-            groupedLogs = groups;
+            groupedLogs = groups.slice(0, 10);
             
             stats = {
-                total: groupedLogs.length,
+                total: groups.length,
                 success: logs.filter(l => l.status === 'success').length,
                 error: logs.filter(l => l.status === 'error').length
             };

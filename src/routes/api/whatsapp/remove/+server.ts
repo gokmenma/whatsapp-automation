@@ -16,20 +16,23 @@ export async function POST({ request, locals }) {
     }
 
     try {
-        // Delete from DB first (only if owned by user)
-        const deletedResult = await db.delete(accounts).where(
+        // First verify ownership
+        const account = await db.select().from(accounts).where(
             and(
-                eq(accounts.userId, locals.user.id),
-                eq(accounts.id, accountId)
+                eq(accounts.id, accountId),
+                eq(accounts.userId, Number(locals.user.id))
             )
-        ).returning();
+        ).limit(1);
 
-        if (deletedResult.length === 0) {
-            return json({ success: false, error: 'Account not found or not owned by you' }, { status: 404 });
+        if (account.length === 0) {
+            return json({ success: false, error: 'Hesap bulunamadı veya yetkiniz yok' }, { status: 404 });
         }
 
-        // Now remove from WhatsApp instances (and delete session data)
+        // Now remove from WhatsApp instances (and delete session data/logout)
         await removeAccount(accountId);
+
+        // Finally delete from database
+        await db.delete(accounts).where(eq(accounts.id, accountId));
         
         return json({ success: true, message: `Account ${accountId} removed` });
     } catch (e: any) {

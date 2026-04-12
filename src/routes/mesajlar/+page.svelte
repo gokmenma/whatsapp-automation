@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { page } from '$app/stores';
+    import { page } from '$app/state';
     import { goto } from '$app/navigation';
     import { onMount, onDestroy, tick } from 'svelte';
     import { toast } from 'svelte-sonner';
@@ -33,9 +33,13 @@
     import GlobeIcon from '@lucide/svelte/icons/globe';
     import Languages from '@lucide/svelte/icons/languages';
     import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+    import ChevronUpIcon from '@lucide/svelte/icons/chevron-up';
     import CheckIcon from '@lucide/svelte/icons/check';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as Dialog from '$lib/components/ui/dialog';
+    import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
+    import Plus from "@lucide/svelte/icons/plus";
+    import ArrowUpCircle from "@lucide/svelte/icons/arrow-up-circle";
 
     let { data } = $props();
 
@@ -51,6 +55,8 @@
     let sendingMessage = $state(false);
     let loadingConversations = $state(false);
     let loadingMessages = $state(false);
+    let loadingMoreMessages = $state(false);
+    let hasMoreMessages = $state(false);
     let chatLayoutEl = $state<HTMLDivElement | null>(null);
     let messagesContainerEl = $state<HTMLDivElement | null>(null);
     let messagesEndEl = $state<HTMLDivElement | null>(null);
@@ -202,25 +208,25 @@
         String(attachedMedia?.filename || '').toLowerCase().endsWith('.pdf')
     ));
 
-    function resolvePreferredAccountId(accounts: any[], currentId = '') {
+    function resolvePreferredAccountId(accounts: any[], currentId: any = '') {
+        const idStr = String(currentId || '').trim();
         if (!accounts || accounts.length === 0) return '';
 
-        const current = accounts.find((a: any) => a.id === currentId);
-        if (current) return current.id;
-
-        // Fall back to default account when current selection is unavailable.
-        const defaultAccount = accounts.find((a: any) => a.isDefault);
-        if (defaultAccount) return defaultAccount.id;
+        const current = accounts.find((a: any) => String(a.id) === idStr);
+        if (current) return String(current.id);
 
         const firstReady = accounts.find((a: any) => a.status === 'ready');
-        if (firstReady) return firstReady.id;
+        if (firstReady) return String(firstReady.id);
 
-        return accounts[0]?.id || '';
+        const defaultAccount = accounts.find((a: any) => a.isDefault);
+        if (defaultAccount) return String(defaultAccount.id);
+
+        return String(accounts[0]?.id || '');
     }
 
     // Derived
     let readyAccounts = $derived(data.accounts.filter((a: any) => a.status === 'ready'));
-    let selectedAccountName = $derived(data.accounts.find((a: any) => a.id === selectedAccountId)?.name || 'Seçili Hesap Yok');
+    let selectedAccountName = $derived(data.accounts.find((a: any) => String(a.id) === String(selectedAccountId))?.name || 'Seçili Hesap Yok');
     let filteredConversations = $derived(
         searchQuery.trim()
             ? conversations.filter(c =>
@@ -358,7 +364,7 @@
         const contactJid = String(conv?.contactJid || '').trim();
         if (!contactJid) return false;
 
-        const title = 'WhatsApp Otomasyon';
+        const title = String(conv?.name || conv?.number || 'WhatsApp Otomasyon').trim();
         const body = notificationPreviewForConversation(conv);
         let notification: Notification;
         try {
@@ -456,24 +462,24 @@
             const isIncomingByDirection = !toBool(conv?.lastMessageFromMe);
             const isActiveConversation = selectedContact?.jid === key;
 
+            const previousSnapshot = conversationSnapshots.get(key);
+            const currentWithoutUnread = [
+                String(conv.contactJid || ''),
+                String(conv.lastMessageAt || ''),
+                String(conv.lastMessage || ''),
+                String(conv.lastMessageMediaType || ''),
+                String(conv.lastMessageStatus || ''),
+                conv.lastMessageFromMe ? '1' : '0'
+            ].join('|');
+            const previousWithoutUnread = previousSnapshot
+                ? previousSnapshot.split('|').slice(0, 6).join('|')
+                : '';
+            const messageChanged = !previousSnapshot || currentWithoutUnread !== previousWithoutUnread;
+
             let effectiveUnread = nextUnreadRaw;
             if (isActiveConversation) {
                 effectiveUnread = 0;
             } else if (conversationsSnapshotInitialized) {
-                const previousSnapshot = conversationSnapshots.get(key);
-                const currentWithoutUnread = [
-                    String(conv.contactJid || ''),
-                    String(conv.lastMessageAt || ''),
-                    String(conv.lastMessage || ''),
-                    String(conv.lastMessageMediaType || ''),
-                    String(conv.lastMessageStatus || ''),
-                    conv.lastMessageFromMe ? '1' : '0'
-                ].join('|');
-                const previousWithoutUnread = previousSnapshot
-                    ? previousSnapshot.split('|').slice(0, 6).join('|')
-                    : '';
-                const messageChanged = !previousSnapshot || currentWithoutUnread !== previousWithoutUnread;
-
                 // Keep a local unread fallback so incoming messages still show badge
                 // even when backend unread state lags behind for closed conversations.
                 if (messageChanged && isIncomingByDirection && nextUnreadRaw === 0) {
@@ -496,12 +502,18 @@
 
             if (!conversationsSnapshotInitialized) continue;
 
-            const previous = conversationSnapshots.get(key);
-            const changed = !previous || previous !== snapshot;
             const unreadIncreased = effectiveUnread > prevUnread;
             const isMuted = toBool(conv?.muted);
             const isArchived = toBool(conv?.archived);
-            const shouldNotifyForConversation = changed && (isIncomingByDirection || unreadIncreased) && !isMuted && !isArchived;
+            
+            // Fix: Only notify if the message itself changed (not just unread count) 
+            // and it's not the active conversation.
+            const shouldNotifyForConversation = 
+                !isActiveConversation && 
+                messageChanged && 
+                (isIncomingByDirection || unreadIncreased) && 
+                !isMuted && 
+                !isArchived;
 
             if (shouldNotifyForConversation) {
                 shouldPlayNotification = true;
@@ -598,12 +610,11 @@
 
     // Load messages for selected contact
     async function scrollMessagesToBottom(behavior: ScrollBehavior = 'auto') {
+        // With newest on top, we probably want to scroll to the top instead,
+        // or just skip auto-scrolling to bottom on initial load.
         await tick();
         if (messagesContainerEl) {
-            messagesContainerEl.scrollTo({ top: messagesContainerEl.scrollHeight, behavior });
-        }
-        if (messagesEndEl) {
-            messagesEndEl.scrollIntoView({ behavior, block: 'end' });
+            messagesContainerEl.scrollTo({ top: 0, behavior });
         }
     }
 
@@ -612,10 +623,12 @@
         loadingMessages = true;
         try {
             const jid = encodeURIComponent(selectedContact.jid);
-            const res = await fetch(`/api/messages/${jid}?accountId=${encodeURIComponent(selectedAccountId)}`);
+            const res = await fetch(`/api/messages/${jid}?accountId=${encodeURIComponent(selectedAccountId)}&limit=50`);
             if (res.ok) {
                 const d = await res.json();
                 const incoming = d.messages || [];
+                hasMoreMessages = !!d.hasMore;
+                
                 if (selectedContact) {
                     selectedContact = {
                         jid: selectedContact.jid,
@@ -679,6 +692,37 @@
         }
     }
 
+    async function loadMoreMessages() {
+        if (!selectedContact || !selectedAccountId || loadingMoreMessages || !hasMoreMessages || messages.length === 0) return;
+        
+        loadingMoreMessages = true;
+        const oldestTs = messages[messages.length - 1].timestamp;
+        const jid = encodeURIComponent(selectedContact.jid);
+        
+        try {
+            const res = await fetch(`/api/messages/${jid}?accountId=${encodeURIComponent(selectedAccountId)}&before=${oldestTs}&limit=50`);
+            if (res.ok) {
+                const d = await res.json();
+                const older = d.messages || [];
+                hasMoreMessages = !!d.hasMore;
+                
+                if (older.length > 0) {
+                    messages = [...messages, ...older];
+                    prefetchIncomingMessageLinkPreviews(older);
+                    
+                    if (isGroupJid(selectedContact?.jid)) {
+                        const senderJids = new Set<string>(older.map((m: any) => String(m?.senderJid || m?.sender_jid || '').trim()).filter((j: string) => j.length > 0));
+                        for (const jid of senderJids) void ensureAvatarLoaded(jid);
+                    }
+                }
+            }
+        } catch (e) {
+            toast.error('Daha fazla mesaj yüklenemedi');
+        } finally {
+            loadingMoreMessages = false;
+        }
+    }
+
     async function selectConversation(conv: any) {
         if (selectionMode) {
             toggleConversationSelection(conv.contactJid);
@@ -692,10 +736,18 @@
         selectedContact = { jid: conv.contactJid, name: conv.name, number: conv.number };
         clearTypingIndicator();
         if (selectedAccountId && conv.contactJid) {
+            // Subscribe to presence
             void fetch('/api/whatsapp/presence-subscribe', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ accountId: selectedAccountId, jid: conv.contactJid })
+            }).catch(() => undefined);
+
+            // Mark as read on DB and WhatsApp
+            void fetch('/api/messages/mark-read', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ accountId: selectedAccountId, contactJid: conv.contactJid })
             }).catch(() => undefined);
         }
         messages = [];
@@ -1003,8 +1055,66 @@
         messageMenu = null;
     }
 
-    function reactToOwnMessage() {
-        toast.info('Ifade birakma yakinda eklenecek');
+    async function sendReaction(msg: any, emoji: string | null) {
+        if (!selectedAccountId || !msg?.id) return;
+
+        // Backup original reaction for rollback
+        const originalReaction = msg.reaction;
+        const msgId = msg.id;
+        
+        // Optimistic update
+        const selfJid = String(data.accounts.find(a => String(a.id) === String(selectedAccountId))?.user?.id || '').split('@')[0].split(':')[0] + '@s.whatsapp.net';
+        const selfName = data.accounts.find(a => String(a.id) === String(selectedAccountId))?.name || 'Siz';
+        
+        function updateLocalMessage(newReactionStr: string | null) {
+            messages = messages.map(m => {
+                if (m.id === msgId) return { ...m, reaction: newReactionStr };
+                return m;
+            });
+        }
+
+        // Apply optimistic update
+        let nextReaction = originalReaction;
+        try {
+            let reactions = parseMessageReactions(originalReaction);
+            // Simple approach: filter out own and add new one
+            reactions = reactions.filter(r => r.emoji !== emoji); // simplistic for now
+            // Adding it back as if it was the only one for this emoji for now (visual only)
+            const nextArr = [{ emoji, senderJid: selfJid, senderName: selfName }];
+            updateLocalMessage(JSON.stringify(nextArr));
+        } catch (e) {}
+
+        const promise = (async () => {
+            const res = await fetch('/api/whatsapp/react', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    accountId: selectedAccountId,
+                    messageId: msgId,
+                    emoji
+                })
+            });
+
+            if (!res.ok) {
+                const d = await res.json();
+                throw new Error(d.error || 'Bağlantı hatası');
+            }
+            return await res.json();
+        })();
+
+        toast.promise(promise, {
+            loading: 'İfade gönderiliyor...',
+            success: () => {
+                // We'll let the SSE/Sync handle the long-term update, but the optimistic one remains for now
+                return 'İfade bırakıldı';
+            },
+            error: (err) => {
+                // Rollback optimistic update
+                updateLocalMessage(originalReaction);
+                return err.message || 'İfade bırakılamadı';
+            }
+        });
+
         messageMenu = null;
     }
 
@@ -1071,7 +1181,8 @@
         if (String(msg?.status || '').startsWith('deleted')) return false;
         if (!String(msg?.body || '').trim()) return false;
         const age = messageAgeMs(msg?.timestamp);
-        return age >= 0 && age <= 15 * 60 * 1000;
+        // Allow editing for 24 hours. WhatsApp limit is usually 15m-24h depending on version.
+        return age >= 0 && age <= 24 * 60 * 60 * 1000;
     }
 
     async function deleteConversation(conv: any) {
@@ -1437,15 +1548,28 @@
     }
 
     function formatTime(timestamp: number | string | Date): string {
-        const ts = typeof timestamp === 'number' ? timestamp * (timestamp < 1e12 ? 1000 : 1) : new Date(timestamp).getTime();
+        if (!timestamp) return '';
+        const ts = typeof timestamp === 'number' 
+            ? timestamp * (timestamp < 1e12 ? 1000 : 1) 
+            : new Date(timestamp).getTime();
+        
         const d = new Date(ts);
         const now = new Date();
         const isToday = d.toDateString() === now.toDateString();
+        
+        // Consistent Turkey Time formatting
+        const options: Intl.DateTimeFormatOptions = { 
+            hour: '2-digit', 
+            minute: '2-digit',
+            hour12: false,
+            timeZone: 'Europe/Istanbul'
+        };
+
         if (isToday) {
-            return d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+            return d.toLocaleTimeString('tr-TR', options);
         }
-        return d.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit' }) + ' ' +
-               d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+        return d.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Istanbul' }) + ' ' +
+               d.toLocaleTimeString('tr-TR', options);
     }
 
     function formatConvTime(timestamp: number | string | Date): string {
@@ -1455,9 +1579,17 @@
         const now = new Date();
         const isToday = d.toDateString() === now.toDateString();
         const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
-        if (isToday) return d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+
+        const options: Intl.DateTimeFormatOptions = { 
+            hour: '2-digit', 
+            minute: '2-digit',
+            hour12: false,
+            timeZone: 'Europe/Istanbul'
+        };
+
+        if (isToday) return d.toLocaleTimeString('tr-TR', options);
         if (d.toDateString() === yesterday.toDateString()) return 'Dün';
-        return d.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+        return d.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'Europe/Istanbul' });
     }
 
     function isWithin24Hours(timestamp: number | string | Date): boolean {
@@ -1565,13 +1697,22 @@
         }
 
         const nextText = formatTypingText(payload);
-        const until = Date.now() + 6000;
-        typingByChat = { ...typingByChat, [chatKey]: { text: nextText, until } };
+        const untilExact = Date.now() + 6000;
+        
+        typingByChat = { 
+            ...typingByChat, 
+            [chatKey]: { 
+                text: nextText, 
+                until: untilExact,
+                participantJid: payload?.participantJid,
+                participantName: payload?.participantName
+            } 
+        };
 
         if (selectedKey && selectedKey === chatKey) {
             typingIndicatorText = nextText;
             typingIndicatorChatJid = String(selectedContact?.jid || chatJid).trim();
-            typingIndicatorUntil = until;
+            typingIndicatorUntil = untilExact;
         }
     }
 
@@ -1600,10 +1741,6 @@
             if (String(payload.accountId || '') !== String(selectedAccountId || '')) return;
             setTypingIndicator(payload);
         });
-
-        stream.onerror = () => {
-            // Native SSE retry is enough.
-        };
     }
 
     function clampConversationsPaneWidth(value: number) {
@@ -1739,12 +1876,12 @@
 
             if (fingerprint) conversationsStreamFingerprint = fingerprint;
             void loadConversations();
-        });
 
-        stream.onerror = () => {
-            if (stream !== conversationsEventSource) return;
-            // Native EventSource auto-reconnect is more stable than manual close/reopen.
-        };
+            // Also reload messages if the account matches and we have a selected contact
+            if (selectedContact && String(selectedAccountId) === String(nextAccountId)) {
+                void loadMessages(false);
+            }
+        });
     }
 
     // Control polling based on selectedContact and messages state
@@ -1802,7 +1939,7 @@
 
         const start = messageTextareaEl.selectionStart;
         const end = messageTextareaEl.selectionEnd;
-        if (start === end) return;
+        if (start === null || end === null || start === end) return;
 
         const selectedText = messageText.substring(start, end);
         const hasOuterMarkers =
@@ -1840,21 +1977,10 @@
         }, 0);
     }
 
-    function formatBold() {
-        toggleFormat('*');
-    }
-
-    function formatItalic() {
-        toggleFormat('_');
-    }
-
-    function formatStrikethrough() {
-        toggleFormat('~');
-    }
-
-    function formatCode() {
-        toggleFormat('`');
-    }
+    function formatBold() { toggleFormat('*'); }
+    function formatItalic() { toggleFormat('_'); }
+    function formatStrikethrough() { toggleFormat('~'); }
+    function formatCode() { toggleFormat('`'); }
 
     // Parse and render markdown-style formatting
     function parseMessageFormatting(text: string): string {
@@ -1864,20 +1990,13 @@
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
 
-        // Apply formatting in order: bold, italic, strikethrough, code
-        // Bold: *text* → <strong>text</strong>
+        // Order: bold, italic, strikethrough, code
         escaped = escaped.replace(/\*([^*\n]+)\*/g, '<strong>$1</strong>');
-        
-        // Italic: _text_ → <em>text</em>
         escaped = escaped.replace(/_([^_]+?)_/g, '<em>$1</em>');
-        
-        // Strikethrough: ~text~ → <del>text</del>
         escaped = escaped.replace(/~([^~\n]+)~/g, '<del>$1</del>');
-        
-        // Code: `text` → <code>text</code>
         escaped = escaped.replace(/`([^`]+?)`/g, '<code>$1</code>');
 
-        // Linkify plain URLs in message body.
+        // Linkify plain URLs
         escaped = escaped.replace(/(https?:\/\/[^\s<]+)/gi, (rawUrl) => {
             const cleanUrl = trimTrailingUrlPunctuation(rawUrl);
             const trailing = rawUrl.slice(cleanUrl.length);
@@ -1965,25 +2084,15 @@
         }
     }
 
-    function isInstagramPreview(preview: LinkPreview | null | undefined): boolean {
-        const source = String(preview?.siteName || preview?.domain || '').toLowerCase();
-        return source.includes('instagram');
-    }
-
-    $effect(() => {
-        filterContacts();
-    });
+    $effect(() => { filterContacts(); });
 
     $effect(() => {
         const nextAccountId = resolvePreferredAccountId(data.accounts, selectedAccountId);
-        if (nextAccountId !== selectedAccountId) {
-            selectedAccountId = nextAccountId;
-        }
+        if (nextAccountId !== selectedAccountId) selectedAccountId = nextAccountId;
     });
 
     $effect(() => {
         const nextAccountId = String(selectedAccountId || '').trim();
-
         if (!nextAccountId) {
             lastHandledAccountId = '';
             conversations = [];
@@ -2000,7 +2109,6 @@
         if (lastHandledAccountId === nextAccountId) return;
         lastHandledAccountId = nextAccountId;
 
-        // Invalidate any in-flight request and reset fetch gate so new request starts immediately.
         conversationsRequestSeq += 1;
         conversationsFetchInFlight = false;
         conversationsReloadQueued = false;
@@ -2022,7 +2130,6 @@
             await loadConversations(activeAccountId);
             if (selectedAccountId === activeAccountId) {
                 startConversationsStream(activeAccountId, { skipInitialSnapshot: true });
-
                 if (pendingInitialContactJid) {
                     const conv = conversations.find((c) => c.contactJid === pendingInitialContactJid);
                     if (conv) {
@@ -2038,60 +2145,40 @@
             url.searchParams.set('account', activeAccountId);
             url.searchParams.delete('contact');
             window.history.replaceState({}, '', url.toString());
-
             window.localStorage.setItem('activeUiAccountId', activeAccountId);
-            window.dispatchEvent(new CustomEvent('account:selected', {
-                detail: { accountId: activeAccountId }
-            }));
+            window.dispatchEvent(new CustomEvent('account:selected', { detail: { accountId: activeAccountId } }));
         }
-    });
-
-    onMount(async () => {
-        loadDesktopNotificationPreference();
-        syncBrowserNotificationPermission();
-        if (desktopNotificationsEnabled) {
-            void requestBrowserNotificationPermission();
-        }
-
-        if (typeof window !== 'undefined') {
-            const stored = String(window.localStorage.getItem('activeUiAccountId') || '').trim();
-            if (stored && data.accounts.some((a: any) => a.id === stored)) {
-                selectedAccountId = stored;
-            }
-
-            const paneWidthStored = Number(window.localStorage.getItem('messagesConversationsPaneWidth') || 340);
-            if (Number.isFinite(paneWidthStored)) {
-                conversationsPaneWidth = clampConversationsPaneWidth(paneWidthStored);
-            }
-        }
-
-        selectedAccountId = resolvePreferredAccountId(data.accounts, selectedAccountId);
-        // Restore from URL params
-        const urlParams = new URLSearchParams(window.location.search);
-        const urlAccount = urlParams.get('account');
-        const urlContact = urlParams.get('contact');
-        if (urlAccount && data.accounts.some((a: any) => a.id === urlAccount)) {
-            selectedAccountId = urlAccount;
-        }
-        pendingInitialContactJid = String(urlContact || '').trim();
-
-        startTypingStream();
     });
 
     onMount(() => {
-        if (typeof window === 'undefined') return;
+        loadDesktopNotificationPreference();
+        syncBrowserNotificationPermission();
+        if (desktopNotificationsEnabled) void requestBrowserNotificationPermission();
 
+        if (typeof window !== 'undefined') {
+            const stored = String(window.localStorage.getItem('activeUiAccountId') || '').trim();
+            if (stored && data.accounts.some((a: any) => String(a.id) === stored)) {
+                selectedAccountId = stored;
+            } else {
+                const preferredId = resolvePreferredAccountId(data.accounts, selectedAccountId);
+                if (preferredId) selectedAccountId = preferredId;
+            }
+            const paneWidthStored = Number(window.localStorage.getItem('messagesConversationsPaneWidth') || 340);
+            if (Number.isFinite(paneWidthStored)) conversationsPaneWidth = clampConversationsPaneWidth(paneWidthStored);
+        }
+
+        const urlParams = new URL(window.location.href).searchParams;
+        const urlAccount = urlParams.get('account');
+        if (urlAccount && data.accounts.some((a: any) => String(a.id) === urlAccount)) selectedAccountId = urlAccount;
+        pendingInitialContactJid = String(urlParams.get('contact') || '').trim();
+
+        startTypingStream();
+        
         const onAccountSelected = (event: Event) => {
             const customEvent = event as CustomEvent<{ accountId?: string }>;
-            const nextAccountId = String(customEvent.detail?.accountId || '').trim();
-            if (!nextAccountId || nextAccountId === selectedAccountId) return;
-
-            const exists = data.accounts.some((a: any) => a.id === nextAccountId);
-            if (!exists) return;
-
-            selectedAccountId = nextAccountId;
+            const next = String(customEvent.detail?.accountId || '').trim();
+            if (next && next !== selectedAccountId && data.accounts.some(a => a.id === next)) selectedAccountId = next;
         };
-
         window.addEventListener('account:selected', onAccountSelected as EventListener);
         return () => window.removeEventListener('account:selected', onAccountSelected as EventListener);
     });
@@ -2105,49 +2192,29 @@
     $effect(() => {
         if (!typingIndicatorUntil) return;
         const timeout = Math.max(0, typingIndicatorUntil - Date.now());
-        const timer = setTimeout(() => {
-            if (Date.now() >= typingIndicatorUntil) clearTypingIndicator();
-        }, timeout + 20);
-
+        const timer = setTimeout(() => { if (Date.now() >= typingIndicatorUntil) clearTypingIndicator(); }, timeout + 20);
         return () => clearTimeout(timer);
     });
 
     $effect(() => {
-        const keys = Object.keys(typingByChat);
-        if (keys.length === 0) return;
-
         const timer = setInterval(() => {
             const now = Date.now();
             let changed = false;
             const next = { ...typingByChat };
-
-            for (const key of Object.keys(next)) {
-                if (next[key].until <= now) {
-                    delete next[key];
-                    changed = true;
-                }
-            }
-
+            for (const key of Object.keys(next)) if (next[key].until <= now) { delete next[key]; changed = true; }
             if (changed) {
                 typingByChat = next;
-                if (typingIndicatorChatJid && !next[typingIndicatorChatJid]) {
-                    clearTypingIndicator();
-                }
+                if (typingIndicatorChatJid && !next[typingIndicatorChatJid]) clearTypingIndicator();
             }
         }, 1000);
-
         return () => clearInterval(timer);
     });
 
-    // Close context menu on document click
     $effect(() => {
         if (typeof window === 'undefined') return;
         function handleDocClick() {
-            contextMenu = null;
-            messageMenu = null;
-            msgLangPickerOpen = false;
-            topActionsMenuOpen = false;
-            selectionActionsMenuOpen = false;
+            contextMenu = null; messageMenu = null; msgLangPickerOpen = false;
+            topActionsMenuOpen = false; selectionActionsMenuOpen = false;
         }
         if (contextMenu || messageMenu || topActionsMenuOpen || selectionActionsMenuOpen) {
             document.addEventListener('click', handleDocClick);
@@ -2157,237 +2224,76 @@
 
     $effect(() => {
         if (typeof window === 'undefined' || !isEmojiPickerOpen) return;
-
         const closeOnOutside = (event: MouseEvent) => {
-            const target = event.target as Node | null;
-            if (!target) return;
-            if (emojiPickerEl?.contains(target)) return;
-            isEmojiPickerOpen = false;
+            if (emojiPickerEl && !emojiPickerEl.contains(event.target as Node)) isEmojiPickerOpen = false;
         };
-
         document.addEventListener('mousedown', closeOnOutside);
         return () => document.removeEventListener('mousedown', closeOnOutside);
     });
 </script>
 
 <div class="flex h-[calc(100vh-4rem)] overflow-hidden bg-background -mx-4 -mb-4" bind:this={chatLayoutEl}>
-    <!-- LEFT PANEL: Conversation List -->
     <div class="flex flex-col border-r border-border {selectedContact ? 'hidden md:flex' : 'flex'}"
          style={`min-width: 280px; max-width: 560px; flex-basis: ${conversationsPaneWidth}px; width: ${conversationsPaneWidth}px;`}>
 
-        <!-- Header -->
         <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
-            <span class="text-xs text-muted-foreground font-medium truncate max-w-36" title={selectedAccountName}>
-                {selectedAccountName}
-            </span>
-
+            <div class="flex items-center gap-1.5 min-w-0 flex-1">
+                <DropdownMenu.Root>
+                    <DropdownMenu.Trigger>
+                        {#snippet child({ props })}
+                            <button {...props} class="flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-muted transition-colors min-w-0 max-w-full group">
+                                <span class="text-xs text-muted-foreground font-semibold truncate group-hover:text-foreground transition-colors" title={selectedAccountName}>{selectedAccountName}</span>
+                                <ChevronDownIcon class="w-3.5 h-3.5 text-muted-foreground/50 group-hover:text-foreground/70 transition-colors" />
+                            </button>
+                        {/snippet}
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Content align="start" class="w-64">
+                        <DropdownMenu.Label>Hesap Değiştir</DropdownMenu.Label>
+                        <DropdownMenu.Separator />
+                        {#each data.accounts as acc}
+                            <DropdownMenu.Item onclick={() => { selectedAccountId = acc.id; }} class="flex items-center justify-between gap-2">
+                                <div class="flex flex-col min-w-0">
+                                    <span class="font-medium truncate">{acc.name}</span>
+                                    <span class="text-[10px] text-muted-foreground truncate">{acc.id}</span>
+                                </div>
+                                <div class="flex items-center gap-2 shrink-0">
+                                    {#if acc.status === 'ready'}<div class="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]"></div>{:else}<div class="w-1.5 h-1.5 rounded-full bg-muted-foreground/30"></div>{/if}
+                                    {#if String(acc.id) === String(selectedAccountId)}<CheckIcon class="w-3.5 h-3.5 text-primary" />{/if}
+                                </div>
+                            </DropdownMenu.Item>
+                        {/each}
+                        <DropdownMenu.Separator /><DropdownMenu.Item onclick={() => goto('/hesaplar')}><Plus class="w-4 h-4 mr-2" /><span>Hesap Ekle / Düzenle</span></DropdownMenu.Item>
+                    </DropdownMenu.Content>
+                </DropdownMenu.Root>
+            </div>
             <div class="flex items-center gap-2">
-                <div class="relative group">
-                    <button
-                        class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors hover:scale-105"
-                        aria-label="Yeni mesaj başlat"
-                        title="Yeni mesaj başlat"
-                        onclick={openNewChatDialog}
-                    >
-                        <MessageSquarePlusIcon class="w-4 h-4 text-foreground" />
-                    </button>
-                    <span class="pointer-events-none absolute left-1/2 -translate-x-1/2 top-full mt-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Yeni konuşma</span>
-                </div>
-                <div class="relative">
-                    <button
-                        bind:this={topActionsMenuButtonEl}
-                        class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors"
-                        aria-label="Sohbet işlemleri"
-                        title="Sohbet işlemleri"
-                        onclick={toggleTopActionsMenu}
-                    >
-                        <EllipsisVerticalIcon class="w-4 h-4 text-foreground" />
-                    </button>
-
-                    {#if topActionsMenuOpen}
-                        <div
-                            class="fixed z-50 w-64 overflow-hidden rounded-2xl border border-black/8 bg-background/98 py-1 shadow-[0_16px_44px_rgba(15,23,42,0.16)] backdrop-blur-xl"
-                            style={`left:${topActionsMenuPosition.x}px; top:${topActionsMenuPosition.y}px;`}
-                            onmousedown={(e) => e.stopPropagation()}
-                            role="menu"
-                            tabindex="-1"
-                        >
-                            {#if !selectionMode}
-                                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem">
-                                    <span>Yeni grup</span>
-                                </button>
-                                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem">
-                                    <span>Yıldızlı mesajlar</span>
-                                </button>
-                                <button
-                                    class="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm hover:bg-muted/60"
-                                    onclick={toggleDesktopNotifications}
-                                    role="menuitem"
-                                >
-                                    <span>Masaüstü bildirimi</span>
-                                    <span class="text-xs text-muted-foreground">{desktopNotificationsEnabled ? 'Açık' : 'Kapalı'}</span>
-                                </button>
-                                <button
-                                    class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60"
-                                    onclick={sendTestDesktopNotification}
-                                    role="menuitem"
-                                >
-                                    <span>Test bildirimi gönder</span>
-                                </button>
-                                <button
-                                    class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60"
-                                    onclick={() => startSelectionMode()}
-                                    role="menuitem"
-                                >
-                                    <span>Sohbetleri seç</span>
-                                </button>
-                                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem">
-                                    <span>Tümünü okundu olarak işaretle</span>
-                                </button>
-                            {/if}
-                        </div>
-                    {/if}
-                </div>
+                <div class="relative group"><button class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors hover:scale-105" onclick={openNewChatDialog}><MessageSquarePlusIcon class="w-4 h-4 text-foreground" /></button><span class="pointer-events-none absolute left-1/2 -translate-x-1/2 top-full mt-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Yeni konuşma</span></div>
+                <div class="relative"><button bind:this={topActionsMenuButtonEl} class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors" onclick={toggleTopActionsMenu}><EllipsisVerticalIcon class="w-4 h-4 text-foreground" /></button>
+                {#if topActionsMenuOpen}<div class="fixed z-50 w-64 overflow-hidden rounded-2xl border border-black/8 bg-background/98 py-1 shadow-[0_16px_44px_rgba(15,23,42,0.16)] backdrop-blur-xl" style={`left:${topActionsMenuPosition.x}px; top:${topActionsMenuPosition.y}px;`} onmousedown={(e) => e.stopPropagation()} role="menu" tabindex="-1">
+                {#if !selectionMode}
+                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem"><span>Yeni grup</span></button>
+                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem"><span>Yıldızlı mesajlar</span></button>
+                <button class="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={toggleDesktopNotifications} role="menuitem"><span>Masaüstü bildirimi</span><span class="text-xs text-muted-foreground">{desktopNotificationsEnabled ? 'Açık' : 'Kapalı'}</span></button>
+                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={sendTestDesktopNotification} role="menuitem"><span>Test bildirimi gönder</span></button>
+                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => startSelectionMode()} role="menuitem"><span>Sohbetleri seç</span></button>
+                <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-foreground/45" disabled role="menuitem"><span>Tümünü okundu olarak işaretle</span></button>
+                {/if}</div>{/if}</div>
             </div>
         </div>
 
-        {#if selectionMode}
-            <div class="px-3 py-2 border-b border-border/70 bg-muted/25 flex items-center justify-between gap-2">
-                <div class="flex items-center gap-2 min-w-0">
-                    <button
-                        class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors"
-                        aria-label="Seçimi temizle"
-                        title="Seçimi temizle"
-                        onclick={exitSelectionMode}
-                    >
-                        <XIcon class="w-4 h-4" />
-                    </button>
-                    <span class="text-sm font-medium truncate">{selectedConversationJids.size} sohbet seçildi</span>
-                </div>
+        {#if selectionMode}<div class="px-3 py-2 border-b border-border/70 bg-muted/25 flex items-center justify-between gap-2"><div class="flex items-center gap-2 min-w-0"><button class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors" onclick={exitSelectionMode}><XIcon class="w-4 h-4" /></button><span class="text-sm font-medium truncate">{selectedConversationJids.size} sohbet seçildi</span></div><div class="relative"><button bind:this={selectionActionsMenuButtonEl} class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors" onclick={toggleSelectionActionsMenu}><EllipsisVerticalIcon class="w-4 h-4 text-foreground" /></button>
+        {#if selectionActionsMenuOpen}<div class="fixed z-50 w-64 overflow-hidden rounded-2xl border border-black/8 bg-background/98 py-1 shadow-[0_16px_44px_rgba(15,23,42,0.16)] backdrop-blur-xl" style={`left:${selectionActionsMenuPosition.x}px; top:${selectionActionsMenuPosition.y}px;`} onmousedown={(e) => e.stopPropagation()} role="menu" tabindex="-1"><div class="px-4 py-2 text-xs font-medium text-muted-foreground border-b border-border/70">{selectedConversationJids.size} sohbet seçili</div><button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={selectAllVisibleConversations} role="menuitem"><span>Tüm görünenleri seç</span></button><button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ archived: true }, 'Sohbetler arşivlendi')} role="menuitem"><span>Seçilenleri arşivle</span></button><button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ archived: false }, 'Sohbetler arşivden çıkarıldı')} role="menuitem"><span>Seçilenleri arşivden çıkar</span></button><button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ muted: true }, 'Sohbetler sessize alındı')} role="menuitem"><span>Seçilenleri sessize al</span></button><button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ muted: false }, 'Sohbetler sessizden çıkarıldı')} role="menuitem"><span>Seçilenleri sessizden çıkar</span></button><div class="mx-4 my-1 h-px bg-border/70"></div><button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-destructive hover:bg-destructive/8" onclick={deleteSelectedConversations} role="menuitem"><span>Seçilenleri sil</span></button><button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={exitSelectionMode} role="menuitem"><span>Seçimden çık</span></button></div>{/if}</div></div>{/if}
 
-                <div class="relative">
-                    <button
-                        bind:this={selectionActionsMenuButtonEl}
-                        class="inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors"
-                        aria-label="Seçili sohbet işlemleri"
-                        title="Seçili sohbet işlemleri"
-                        onclick={toggleSelectionActionsMenu}
-                    >
-                        <EllipsisVerticalIcon class="w-4 h-4" />
-                    </button>
+        <div class="px-3 py-2 border-b border-border"><div class="flex items-center gap-2 bg-muted/50 rounded-lg px-3 py-1.5"><SearchIcon class="w-4 h-4 text-muted-foreground shrink-0" /><input type="text" placeholder="Ara..." bind:value={searchQuery} class="bg-transparent text-sm flex-1 outline-none placeholder:text-muted-foreground" /></div></div>
 
-                    {#if selectionActionsMenuOpen}
-                        <div
-                            class="fixed z-50 w-64 overflow-hidden rounded-2xl border border-black/8 bg-background/98 py-1 shadow-[0_16px_44px_rgba(15,23,42,0.16)] backdrop-blur-xl"
-                            style={`left:${selectionActionsMenuPosition.x}px; top:${selectionActionsMenuPosition.y}px;`}
-                            onmousedown={(e) => e.stopPropagation()}
-                            role="menu"
-                            tabindex="-1"
-                        >
-                            <div class="px-4 py-2 text-xs font-medium text-muted-foreground border-b border-border/70">
-                                {selectedConversationJids.size} sohbet seçili
-                            </div>
-                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={selectAllVisibleConversations} role="menuitem">
-                                <span>Tüm görünenleri seç</span>
-                            </button>
-                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ archived: true }, 'Sohbetler arşivlendi')} role="menuitem">
-                                <span>Seçilenleri arşivle</span>
-                            </button>
-                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ archived: false }, 'Sohbetler arşivden çıkarıldı')} role="menuitem">
-                                <span>Seçilenleri arşivden çıkar</span>
-                            </button>
-                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ muted: true }, 'Sohbetler sessize alındı')} role="menuitem">
-                                <span>Seçilenleri sessize al</span>
-                            </button>
-                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={() => applyBulkPreferences({ muted: false }, 'Sohbetler sessizden çıkarıldı')} role="menuitem">
-                                <span>Seçilenleri sessizden çıkar</span>
-                            </button>
-                            <div class="mx-4 my-1 h-px bg-border/70"></div>
-                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm text-destructive hover:bg-destructive/8" onclick={deleteSelectedConversations} role="menuitem">
-                                <span>Seçilenleri sil</span>
-                            </button>
-                            <button class="flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-muted/60" onclick={exitSelectionMode} role="menuitem">
-                                <span>Seçimden çık</span>
-                            </button>
-                        </div>
-                    {/if}
-                </div>
-            </div>
-        {/if}
+        {#if archivedConversationCount > 0 || isArchivedView}<div class="px-3 py-2 border-b border-border/70 bg-background/80"><button class="w-full flex items-center justify-between rounded-xl border border-border/70 px-3 py-2 text-left transition-colors {isArchivedView ? 'bg-primary/10 border-primary/25' : 'bg-muted/20 hover:bg-muted/40'}" onclick={() => { isArchivedView = !isArchivedView; }}><div><div class="text-sm font-medium">Arşivlenmiş</div><div class="text-[11px] text-muted-foreground">{isArchivedView ? 'Ana konuşma listesine dön' : 'Arşivdeki konuşmaları göster'}</div></div><span class="min-w-6 rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground text-center">{archivedConversationCount}</span></button></div>{/if}
 
-        <!-- Search -->
-        <div class="px-3 py-2 border-b border-border">
-            <div class="flex items-center gap-2 bg-muted/50 rounded-lg px-3 py-1.5">
-                <SearchIcon class="w-4 h-4 text-muted-foreground shrink-0" />
-                <input
-                    type="text"
-                    placeholder="Ara..."
-                    bind:value={searchQuery}
-                    class="bg-transparent text-sm flex-1 outline-none placeholder:text-muted-foreground"
-                />
-            </div>
-        </div>
-
-        {#if archivedConversationCount > 0 || isArchivedView}
-            <div class="px-3 py-2 border-b border-border/70 bg-background/80">
-                <button
-                    class="w-full flex items-center justify-between rounded-xl border border-border/70 px-3 py-2 text-left transition-colors {isArchivedView ? 'bg-primary/10 border-primary/25' : 'bg-muted/20 hover:bg-muted/40'}"
-                    onclick={() => { isArchivedView = !isArchivedView; }}
-                >
-                    <div>
-                        <div class="text-sm font-medium">Arşivlenmiş</div>
-                        <div class="text-[11px] text-muted-foreground">
-                            {isArchivedView ? 'Ana konuşma listesine dön' : 'Arşivdeki konuşmaları göster'}
-                        </div>
-                    </div>
-                    <span class="min-w-6 rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground text-center">
-                        {archivedConversationCount}
-                    </span>
-                </button>
-            </div>
-        {/if}
-
-        <!-- No account ready state -->
         {#if readyAccounts.length === 0}
-            <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
-                <MessageSquareIcon class="w-12 h-12 text-muted-foreground/40" />
-                <p class="text-sm text-muted-foreground">Bağlı hesap yok.</p>
-                <a href="/hesaplar" class="text-xs text-primary hover:underline">Hesap bağla →</a>
-            </div>
-
-        <!-- Loading state -->
+            <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center"><MessageSquareIcon class="w-12 h-12 text-muted-foreground/40" /><p class="text-sm text-muted-foreground">Bağlı hesap yok.</p><a href="/hesaplar" class="text-xs text-primary hover:underline">Hesap bağla →</a></div>
         {:else if loadingConversations && conversations.length === 0}
-            <div class="flex-1 p-3 space-y-2">
-                <div class="flex items-center gap-2 px-2 py-1.5 text-[11px] text-muted-foreground font-medium">
-                    <div class="w-3 h-3 border-2 border-primary/70 border-t-transparent rounded-full animate-spin"></div>
-                    Konuşmalar yükleniyor...
-                </div>
-                {#each Array(8) as _, i}
-                    <div class="flex items-center gap-3 px-2 py-2 rounded-lg border border-border/40 bg-muted/20 animate-pulse" style="animation-delay: {i * 60}ms">
-                        <div class="w-10 h-10 rounded-full bg-muted-foreground/15 shrink-0"></div>
-                        <div class="flex-1 min-w-0 space-y-2">
-                            <div class="h-3 rounded bg-muted-foreground/15 w-2/3"></div>
-                            <div class="h-2.5 rounded bg-muted-foreground/10 w-5/6"></div>
-                        </div>
-                        <div class="h-2.5 w-8 rounded bg-muted-foreground/10 shrink-0"></div>
-                    </div>
-                {/each}
-            </div>
-
-        <!-- Empty state -->
+            <div class="flex-1 p-3 space-y-2"><div class="flex items-center gap-2 px-2 py-1.5 text-[11px] text-muted-foreground font-medium"><div class="w-3 h-3 border-2 border-primary/70 border-t-transparent rounded-full animate-spin"></div>Konuşmalar yükleniyor...</div>{#each Array(8) as _, i}<div class="flex items-center gap-3 px-2 py-2 rounded-lg border border-border/40 bg-muted/20 animate-pulse" style="animation-delay: {i * 60}ms"><div class="w-10 h-10 rounded-full bg-muted-foreground/15 shrink-0"></div><div class="flex-1 min-w-0 space-y-2"><div class="h-3 rounded bg-muted-foreground/15 w-2/3"></div><div class="h-2.5 rounded bg-muted-foreground/10 w-5/6"></div></div><div class="h-2.5 w-8 rounded bg-muted-foreground/10 shrink-0"></div></div>{/each}</div>
         {:else if visibleConversations.length === 0}
-            <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
-                <MessageSquareIcon class="w-12 h-12 text-muted-foreground/40" />
-                <p class="text-sm text-muted-foreground">
-                    {searchQuery ? 'Sonuç bulunamadı' : (isArchivedView ? 'Arşivlenmiş konuşma yok' : 'Henüz mesaj yok')}
-                </p>
-                {#if !searchQuery && !isArchivedView}
-                    <p class="text-xs text-muted-foreground/70">Mesaj gönderdiğinizde burada görünecek.</p>
-                    <button class="text-xs text-primary hover:underline" onclick={openNewChatDialog}>Yeni konuşma başlat →</button>
-                {/if}
-            </div>
-
-        <!-- Conversation list -->
+            <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center"><MessageSquareIcon class="w-12 h-12 text-muted-foreground/40" /><p class="text-sm text-muted-foreground">{searchQuery ? 'Sonuç bulunamadı' : (isArchivedView ? 'Arşivlenmiş konuşma yok' : 'Henüz mesaj yok')}</p>{#if !searchQuery && !isArchivedView}<p class="text-xs text-muted-foreground/70">Mesaj gönderdiğinizde burada görünecek.</p><button class="text-xs text-primary hover:underline" onclick={openNewChatDialog}>Yeni konuşma başlat →</button>{/if}</div>
         {:else}
             <div class="flex-1 overflow-y-auto">
                 {#each visibleConversations as conv (conv.contactJid)}
@@ -2400,1130 +2306,97 @@
                     {@const previewMediaType = useUnreadPreview ? (conv.unreadPreviewMediaType || null) : (conv.lastMessageMediaType || null)}
                     {@const previewText = useUnreadPreview ? String(conv.unreadPreview || '').trim() : String(conv.lastMessage || '').trim()}
                     {@const typingPreview = getTypingPreview(String(conv.contactJid || ''))}
-                    <button
-                        class="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors text-left border-b border-border/50 cursor-pointer {selectionMode && isSelected ? 'bg-primary/8 border-l-2 border-l-primary' : ''} {(!selectionMode && isActive) ? 'bg-primary/10 border-l-2 border-l-primary' : ''}"
-                        onclick={() => selectConversation(conv)}
-                        oncontextmenu={(e) => handleConvContextMenu(e, conv)}
-                    >
-                        {#if selectionMode}
-                            <div class="shrink-0 w-5 h-5 rounded-md border flex items-center justify-center text-[11px] font-bold {isSelected ? 'bg-primary text-primary-foreground border-primary' : 'border-muted-foreground/50 text-transparent'}">
-                                ✓
-                            </div>
-                        {/if}
-                        <!-- Avatar -->
-                        {#if avatarUrls[conv.contactJid]}
-                            <img
-                                src={avatarUrls[conv.contactJid] || ''}
-                                alt={conv.name}
-                                class="shrink-0 w-10 h-10 rounded-full object-cover"
-                                onerror={() => clearAvatarUrl(conv.contactJid)}
-                            />
-                        {:else}
-                            <div
-                                class="shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-semibold"
-                                style="background-color: {avatarColor(conv.name)};"
-                            >
-                                {getInitials(conv.name)}
-                            </div>
-                        {/if}
-                        <!-- Info -->
-                        <div class="flex-1 min-w-0">
-                            <div class="flex items-baseline justify-between gap-1">
-                                <div class="flex items-center gap-2 min-w-0">
-                                    <span class="font-medium text-sm truncate">{conv.name}</span>
-                                    {#if conv.muted}
-                                        <span class="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Sessizde</span>
-                                    {/if}
-                                </div>
-                                <span class="text-xs shrink-0 {unreadCount > 0 ? 'text-emerald-600 font-semibold' : 'text-muted-foreground'}">{formatConvTime(conv.lastMessageAt)}</span>
-                            </div>
-                            <div class="flex items-center gap-2 mt-0.5">
-                                <div class="flex items-center gap-1 min-w-0 flex-1">
-                                    {#if previewFromMe}
-                                        <span class={"message-status text-xs " + statusTickClass(previewStatus)} aria-hidden="true">
-                                            {#if isDoubleTickStatus(previewStatus)}
-                                                <span class="message-status-double">
-                                                    <span>✓</span><span>✓</span>
-                                                </span>
-                                            {:else if isFailedStatus(previewStatus)}
-                                                !
-                                            {:else}
-                                                ✓
-                                            {/if}
-                                        </span>
-                                    {/if}
-                                    <span class="text-xs truncate {typingPreview ? 'text-emerald-600 font-medium' : (unreadCount > 0 ? 'text-emerald-600 font-medium' : 'text-muted-foreground')}">
-                                        {#if typingPreview}
-                                            {typingPreview}
-                                        {:else}
-                                            {previewMediaType ? mediaIcon(previewMediaType) : previewText}
-                                        {/if}
-                                    </span>
-                                </div>
-                                {#if unreadCount > 0}
-                                    <span class="shrink-0 inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[11px] font-semibold text-white">
-                                        {unreadCount > 99 ? '99+' : unreadCount}
-                                    </span>
-                                {/if}
-                            </div>
-                        </div>
+                    <button class="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors text-left border-b border-border/50 cursor-pointer {selectionMode && isSelected ? 'bg-primary/8 border-l-2 border-l-primary' : ''} {(!selectionMode && isActive) ? 'bg-primary/10 border-l-2 border-l-primary' : ''}" onclick={() => selectConversation(conv)} oncontextmenu={(e) => handleConvContextMenu(e, conv)}>{#if selectionMode}<div class="shrink-0 w-5 h-5 rounded-md border flex items-center justify-center text-[11px] font-bold {isSelected ? 'bg-primary text-primary-foreground border-primary' : 'border-muted-foreground/50 text-transparent'}">✓</div>{/if}
+                        {#if avatarUrls[conv.contactJid]}<img src={avatarUrls[conv.contactJid] || ''} alt={conv.name} class="shrink-0 w-10 h-10 rounded-full object-cover" onerror={() => clearAvatarUrl(conv.contactJid)} />{:else}<div class="shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-semibold" style="background-color: {avatarColor(conv.name)};">{getInitials(conv.name)}</div>{/if}
+                        <div class="flex-1 min-w-0"><div class="flex items-baseline justify-between gap-1"><div class="flex items-center gap-2 min-w-0"><span class="font-medium text-sm truncate">{conv.name}</span>{#if conv.muted}<span class="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Sessizde</span>{/if}</div><span class="text-xs shrink-0 {unreadCount > 0 ? 'text-emerald-600 font-semibold' : 'text-muted-foreground'}">{formatConvTime(conv.lastMessageAt)}</span></div><div class="flex items-center gap-2 mt-0.5"><div class="flex items-center gap-1 min-w-0 flex-1">{#if previewFromMe}<span class={"message-status text-xs " + statusTickClass(previewStatus)} aria-hidden="true">{#if isDoubleTickStatus(previewStatus)}<span class="message-status-double"><span>✓</span><span>✓</span></span>{:else if isFailedStatus(previewStatus)}!{:else}✓{/if}</span>{/if}<span class="text-xs truncate {typingPreview ? 'text-emerald-600 font-medium' : (unreadCount > 0 ? 'text-emerald-600 font-medium' : 'text-muted-foreground')}">{#if typingPreview}{typingPreview}{:else}{previewMediaType ? mediaIcon(previewMediaType) : previewText}{/if}</span></div>{#if unreadCount > 0}<span class="shrink-0 inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[11px] font-semibold text-white">{unreadCount > 99 ? '99+' : unreadCount}</span>{/if}</div></div>
                     </button>
                 {/each}
             </div>
         {/if}
 
-        <!-- Context Menu -->
-        {#if contextMenu}
-            <div
-                class="fixed z-50 w-72 overflow-hidden rounded-3xl border border-black/8 bg-background/98 py-2 shadow-[0_18px_48px_rgba(15,23,42,0.18)] backdrop-blur-xl"
-                style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
-                onmousedown={(e) => e.preventDefault()}
-                role="menu"
-                tabindex="0"
-            >
-                <button
-                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-muted/60"
-                    aria-label={contextMenu.conv.archived ? 'Sohbeti arşivden çıkar' : 'Sohbeti arşivle'}
-                    onclick={() => {
-                        toggleArchiveConversation(contextMenu!.conv);
-                    }}
-                    role="menuitem"
-                >
-                    <ArchiveIcon class="h-4 w-4 shrink-0 text-foreground/85" />
-                    <span>{contextMenu.conv.archived ? 'Arşivden çıkar' : 'Sohbeti arşivle'}</span>
-                </button>
-                <button
-                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-muted/60"
-                    aria-label={contextMenu.conv.muted ? 'Bildirimleri aç' : 'Bildirimleri sessize al'}
-                    onclick={() => {
-                        toggleMuteConversation(contextMenu!.conv);
-                    }}
-                    role="menuitem"
-                >
-                    <BellOffIcon class="h-4 w-4 shrink-0 text-foreground/85" />
-                    <span>{contextMenu.conv.muted ? 'Bildirimleri aç' : 'Bildirimleri sessize al'}</span>
-                </button>
-                <button
-                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
-                    disabled
-                    role="menuitem"
-                >
-                    <PinIcon class="h-4 w-4 shrink-0" />
-                    <span>Sohbeti sabitle</span>
-                </button>
-                <button
-                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
-                    disabled
-                    role="menuitem"
-                >
-                    <MailOpenIcon class="h-4 w-4 shrink-0" />
-                    <span>Okunmadı olarak işaretle</span>
-                </button>
-                <button
-                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
-                    disabled
-                    role="menuitem"
-                >
-                    <HeartIcon class="h-4 w-4 shrink-0" />
-                    <span>Favoriler'e ekle</span>
-                </button>
-                <button
-                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
-                    disabled
-                    role="menuitem"
-                >
-                    <ListPlusIcon class="h-4 w-4 shrink-0" />
-                    <span>Listeye ekle</span>
-                </button>
-                <div class="mx-4 my-1 h-px bg-border/70"></div>
-                <button
-                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
-                    disabled
-                    role="menuitem"
-                >
-                    <BanIcon class="h-4 w-4 shrink-0" />
-                    <span>Engelle</span>
-                </button>
-                <button
-                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45"
-                    disabled
-                    role="menuitem"
-                >
-                    <EraserIcon class="h-4 w-4 shrink-0" />
-                    <span>Sohbeti temizle</span>
-                </button>
-                <div class="mx-4 my-1 h-px bg-border/70"></div>
-                <button
-                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-destructive transition-colors hover:bg-destructive/8"
-                    onclick={() => {
-                        deleteConversation(contextMenu!.conv);
-                    }}
-                    role="menuitem"
-                >
-                    <TrashIcon class="h-4 w-4 shrink-0" />
-                    <span>Sohbeti sil</span>
-                </button>
-            </div>
-        {/if}
+        {#if contextMenu}<div class="fixed z-50 w-72 overflow-hidden rounded-3xl border border-black/8 bg-background/98 py-2 shadow-[0_18px_48px_rgba(15,23,42,0.18)] backdrop-blur-xl" style="left: {contextMenu.x}px; top: {contextMenu.y}px;" onmousedown={(e) => e.preventDefault()} role="menu" tabindex="0">
+            <button class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-muted/60" onclick={() => { toggleArchiveConversation(contextMenu!.conv); }} role="menuitem"><ArchiveIcon class="h-4 w-4 shrink-0 text-foreground/85" /><span>{contextMenu.conv.archived ? 'Arşivden çıkar' : 'Sohbeti arşivle'}</span></button>
+            <button class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-muted/60" onclick={() => { toggleMuteConversation(contextMenu!.conv); }} role="menuitem"><BellOffIcon class="h-4 w-4 shrink-0 text-foreground/85" /><span>{contextMenu.conv.muted ? 'Bildirimleri aç' : 'Bildirimleri sessize al'}</span></button>
+            <button class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45" disabled role="menuitem"><PinIcon class="h-4 w-4 shrink-0" /><span>Sohbeti sabitle</span></button>
+            <button class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45" disabled role="menuitem"><MailOpenIcon class="h-4 w-4 shrink-0" /><span>Okunmadı olarak işaretle</span></button>
+            <button class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45" disabled role="menuitem"><HeartIcon class="h-4 w-4 shrink-0" /><span>Favoriler'e ekle</span></button>
+            <button class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45" disabled role="menuitem"><ListPlusIcon class="h-4 w-4 shrink-0" /><span>Listeye ekle</span></button>
+            <div class="mx-4 my-1 h-px bg-border/70"></div>
+            <button class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45" disabled role="menuitem"><BanIcon class="h-4 w-4 shrink-0" /><span>Engelle</span></button>
+            <button class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-foreground/45" disabled role="menuitem"><EraserIcon class="h-4 w-4 shrink-0" /><span>Sohbeti temizle</span></button>
+            <div class="mx-4 my-1 h-px bg-border/70"></div>
+            <button class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-destructive transition-colors hover:bg-destructive/8" onclick={() => { deleteConversation(contextMenu!.conv); }} role="menuitem"><TrashIcon class="h-4 w-4 shrink-0" /><span>Sohbeti sil</span></button>
+        </div>{/if}
 
-        <!-- Delete Confirmation Dialog -->
-        <AlertDialog.Root bind:open={deleteDialogOpen}>
-            <AlertDialog.Content>
-                <AlertDialog.Header>
-                    <AlertDialog.Title>{convToDelete?.name || convToDelete?.number} silinsin mi?</AlertDialog.Title>
-                    <AlertDialog.Description>
-                        Tüm mesajlar kalıcı olarak silinecektir. Bu işlem geri alınamaz.
-                    </AlertDialog.Description>
-                </AlertDialog.Header>
-                <AlertDialog.Footer>
-                    <AlertDialog.Cancel disabled={deletingConversation}>Vazgeç</AlertDialog.Cancel>
-                    <AlertDialog.Action
-                        onclick={confirmDelete}
-                        disabled={deletingConversation}
-                        aria-busy={deletingConversation}
-                        class="bg-destructive text-white hover:bg-destructive/90"
-                    >
-                        {#if deletingConversation}
-                            <span class="inline-flex items-center gap-2">
-                                <span class="w-3.5 h-3.5 border-2 border-white/90 border-t-transparent rounded-full animate-spin"></span>
-                                Siliniyor...
-                            </span>
-                        {:else}
-                            Sil
-                        {/if}
-                    </AlertDialog.Action>
-                </AlertDialog.Footer>
-            </AlertDialog.Content>
-        </AlertDialog.Root>
+        <AlertDialog.Root bind:open={deleteDialogOpen}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>{convToDelete?.name || convToDelete?.number} silinsin mi?</AlertDialog.Title><AlertDialog.Description>Tüm mesajlar kalıcı olarak silinecektir. Bu işlem geri alınamaz.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel disabled={deletingConversation}>Vazgeç</AlertDialog.Cancel><AlertDialog.Action onclick={confirmDelete} disabled={deletingConversation} class="bg-destructive text-white hover:bg-destructive/90">{#if deletingConversation}<span class="inline-flex items-center gap-2"><span class="w-3.5 h-3.5 border-2 border-white/90 border-t-transparent rounded-full animate-spin"></span>Siliniyor...</span>{:else}Sil{/if}</AlertDialog.Action></AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>
 
-        <Dialog.Root bind:open={newChatDialogOpen}>
-            <Dialog.Content class="sm:max-w-130 max-h-[80vh] flex flex-col">
-                <Dialog.Header>
-                    <Dialog.Title>Yeni konuşma başlat</Dialog.Title>
-                    <Dialog.Description>Rehberden bir kişi seçip bu ekranda mesajlaşmaya başlayın.</Dialog.Description>
-                </Dialog.Header>
-
-                <div class="py-2">
-                    <div class="flex items-center gap-2 bg-muted/50 rounded-lg px-3 py-2 border border-border">
-                        <SearchIcon class="w-4 h-4 text-muted-foreground shrink-0" />
-                        <input
-                            type="text"
-                            placeholder="İsim veya numara ara..."
-                            bind:value={contactSearch}
-                            class="bg-transparent text-sm flex-1 outline-none placeholder:text-muted-foreground"
-                        />
-                    </div>
-                </div>
-
-                <div class="flex-1 overflow-y-auto border rounded-md">
-                    {#if isLoadingContacts}
-                        <div class="p-6 text-sm text-muted-foreground text-center">Rehber yükleniyor...</div>
-                    {:else if filteredContacts.length === 0}
-                        <div class="p-6 text-sm text-muted-foreground text-center">Kişi bulunamadı</div>
-                    {:else}
-                        {#each filteredContacts as contact (contact.id)}
-                            <button
-                                class="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-muted/50 border-b border-border/60 text-left"
-                                onclick={() => startChatWithContact(contact).catch(console.error)}
-                            >
-                                <div
-                                    class="shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-semibold"
-                                    style="background-color: {avatarColor(contact.name || contact.number)};"
-                                >
-                                    {getInitials(contact.name || contact.number)}
-                                </div>
-                                <div class="min-w-0">
-                                    <div class="font-medium text-sm truncate">{contact.name || contact.number}</div>
-                                    <div class="text-xs text-muted-foreground">+{contact.number}</div>
-                                </div>
-                            </button>
-                        {/each}
-                    {/if}
-                </div>
-            </Dialog.Content>
-        </Dialog.Root>
+        <Dialog.Root bind:open={newChatDialogOpen}><Dialog.Content class="sm:max-w-130 max-h-[80vh] flex flex-col"><Dialog.Header><Dialog.Title>Yeni konuşma başlat</Dialog.Title><Dialog.Description>Rehberden bir kişi seçip bu ekranda mesajlaşmaya başlayın.</Dialog.Description></Dialog.Header><div class="py-2"><div class="flex items-center gap-2 bg-muted/50 rounded-lg px-3 py-2 border border-border"><SearchIcon class="w-4 h-4 text-muted-foreground shrink-0" /><input type="text" placeholder="İsim veya numara ara..." bind:value={contactSearch} class="bg-transparent text-sm flex-1 outline-none placeholder:text-muted-foreground" /></div></div><div class="flex-1 overflow-y-auto border rounded-md">{#if isLoadingContacts}<div class="p-6 text-sm text-muted-foreground text-center">Rehber yükleniyor...</div>{:else if filteredContacts.length === 0}<div class="p-6 text-sm text-muted-foreground text-center">Kişi bulunamadı</div>{:else}{#each filteredContacts as contact (contact.id)}<button class="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-muted/50 border-b border-border/60 text-left" onclick={() => startChatWithContact(contact).catch(console.error)}><div class="shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-semibold" style="background-color: {avatarColor(contact.name || contact.number)};">{getInitials(contact.name || contact.number)}</div><div class="min-w-0"><div class="font-medium text-sm truncate">{contact.name || contact.number}</div><div class="text-xs text-muted-foreground">+{contact.number}</div></div></button>{/each}{/if}</div></Dialog.Content></Dialog.Root>
     </div>
 
-    <!-- Desktop splitter -->
-    <button
-        type="button"
-        class="hidden md:flex w-2 shrink-0 cursor-col-resize items-stretch select-none bg-transparent"
-        onmousedown={startResizeConversationsPane}
-        aria-label="Konuşma paneli genişliğini ayarla"
-    >
-        <div class="mx-auto my-2 w-0.5 rounded-full transition-colors {resizingConversationsPane ? 'bg-primary' : 'bg-border/80 hover:bg-primary/70'}"></div>
-    </button>
+    <button type="button" class="hidden md:flex w-2 shrink-0 cursor-col-resize items-stretch select-none bg-transparent" onmousedown={startResizeConversationsPane}><div class="mx-auto my-2 w-0.5 rounded-full transition-colors {resizingConversationsPane ? 'bg-primary' : 'bg-border/80 hover:bg-primary/70'}"></div></button>
 
-    <!-- RIGHT PANEL: Chat View -->
     <div class="flex-1 flex-col min-w-0 {selectedContact ? 'flex' : 'hidden md:flex'}">
-
         {#if !selectedContact}
-            <!-- Empty chat state (desktop only) -->
-            <div class="flex flex-1 flex-col items-center justify-center gap-4 text-center p-8">
-                <div class="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center">
-                    <MessageSquareIcon class="w-10 h-10 text-primary/60" />
-                </div>
-                <div>
-                    <p class="text-lg font-semibold">WhatsApp Mesajları</p>
-                    <p class="text-sm text-muted-foreground mt-1">Sol taraftan bir konuşma seçin</p>
-                </div>
-            </div>
-
+            <div class="flex flex-1 flex-col items-center justify-center gap-4 text-center p-8"><div class="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center"><MessageSquareIcon class="w-10 h-10 text-primary/60" /></div><div><p class="text-lg font-semibold">WhatsApp Mesajları</p><p class="text-sm text-muted-foreground mt-1">Sol taraftan bir konuşma seçin</p></div></div>
         {:else}
-            <!-- Chat Header -->
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div
-                class="flex items-center gap-3 px-4 py-3 border-b border-border bg-muted/30 text-left hover:bg-muted/45 transition-colors"
-                onclick={openContactInfo}
-            >
-                <button
-                    class="md:hidden p-1 rounded-md hover:bg-muted"
-                    onclick={(e) => {
-                        e.stopPropagation();
-                        clearSelectedConversation();
-                    }}
-                >
-                    <ArrowLeftIcon class="w-5 h-5" />
-                </button>
-                {#if selectedContact?.jid && avatarUrls[selectedContact.jid]}
-                    <img
-                        src={avatarUrls[selectedContact.jid] || ''}
-                        alt={selectedContact.name}
-                        class="w-9 h-9 rounded-full object-cover shrink-0"
-                        onerror={() => clearAvatarUrl(selectedContact?.jid || '')}
-                    />
-                {:else}
-                    <div
-                        class="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-semibold shrink-0"
-                        style="background-color: {avatarColor(selectedContact.name)};"
-                    >
-                        {getInitials(selectedContact.name)}
-                    </div>
-                {/if}
-                <div class="flex-1 min-w-0">
-                    <p class="font-semibold text-sm truncate">{selectedContact.name}</p>
-                    <p class="text-xs {typingIndicatorText && typingIndicatorChatJid === selectedContact.jid ? 'text-emerald-600 font-medium' : 'text-muted-foreground'}">
-                        {#if typingIndicatorText && typingIndicatorChatJid === selectedContact.jid}
-                            {typingIndicatorText}
-                        {:else}
-                            +{selectedContact.number}
-                        {/if}
-                    </p>
-                </div>
-            </div>
+            <div class="flex items-center gap-3 px-4 py-3 border-b border-border bg-muted/30 text-left hover:bg-muted/45 transition-colors" onclick={openContactInfo}><button class="md:hidden p-1 rounded-md hover:bg-muted" onclick={(e) => { e.stopPropagation(); clearSelectedConversation(); }}><ArrowLeftIcon class="w-5 h-5" /></button>{#if selectedContact?.jid && avatarUrls[selectedContact.jid]}<img src={avatarUrls[selectedContact.jid] || ''} alt={selectedContact.name} class="w-9 h-9 rounded-full object-cover shrink-0" onerror={() => clearAvatarUrl(selectedContact?.jid || '')} />{:else}<div class="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-semibold shrink-0" style="background-color: {avatarColor(selectedContact.name)};">{getInitials(selectedContact.name)}</div>{/if}<div class="flex-1 min-w-0"><p class="font-semibold text-sm truncate">{selectedContact.name}</p><p class="text-xs {typingIndicatorText && typingIndicatorChatJid === selectedContact.jid ? 'text-emerald-600 font-medium' : 'text-muted-foreground'}">{#if typingIndicatorText && typingIndicatorChatJid === selectedContact.jid}{typingIndicatorText}{:else}+{selectedContact.number}{/if}</p></div></div>
 
-            <Dialog.Root bind:open={contactInfoOpen}>
-                <Dialog.Content class="sm:max-w-md bg-[#f7f7f6] border-[#e5e5e3]">
-                    <Dialog.Header>
-                        <Dialog.Title>Kişi bilgisi</Dialog.Title>
-                    </Dialog.Header>
+            <Dialog.Root bind:open={contactInfoOpen}><Dialog.Content class="sm:max-w-md bg-[#f7f7f6] border-[#e5e5e3]"><Dialog.Header><Dialog.Title>Kişi bilgisi</Dialog.Title></Dialog.Header>{#if selectedContact}{@const mediaCount = messages.filter((m) => Boolean(m?.mediaType || m?.media_type)).length}<div class="mt-1 space-y-3"><div class="rounded-2xl border border-border/60 bg-background px-4 py-4 text-center">{#if avatarUrls[selectedContact.jid]}<img src={avatarUrls[selectedContact.jid] || ''} alt={selectedContact.name} class="mx-auto h-24 w-24 rounded-full object-cover" onerror={() => clearAvatarUrl(selectedContact?.jid || '')} />{:else}<div class="mx-auto h-24 w-24 rounded-full flex items-center justify-center text-white text-2xl font-semibold" style="background-color: {avatarColor(selectedContact.name)};">{getInitials(selectedContact.name)}</div>{/if}<p class="mt-3 text-2xl font-semibold leading-tight">{selectedContact.name}</p><p class="mt-1 text-sm text-muted-foreground">+{selectedContact.number}</p><button class="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/50 px-4 py-2 text-sm hover:bg-muted" type="button"><SearchIcon class="w-4 h-4" /> Ara</button></div><div class="rounded-2xl border border-border/60 bg-background overflow-hidden"><div class="flex items-center justify-between px-4 py-3 text-sm"><div class="flex items-center gap-2"><FileIcon class="w-4 h-4 text-muted-foreground" /><span>Medya, bağlantı ve belgeler</span></div><span class="text-muted-foreground">{mediaCount}</span></div><div class="h-px bg-border/70"></div><div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground"><div class="flex items-center gap-2"><HeartIcon class="w-4 h-4" /><span>Yıldızlı mesajlar</span></div><span>0</span></div><div class="h-px bg-border/70"></div><div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground"><div class="flex items-center gap-2"><BellOffIcon class="w-4 h-4" /><span>Bildirimleri sessize al</span></div><span>Kapalı</span></div></div><div class="rounded-2xl border border-border/60 bg-background px-4 py-3 text-xs text-muted-foreground"><div class="font-medium text-foreground mb-1">WhatsApp JID</div><div class="break-all">{selectedContact.jid}</div></div></div>{/if}</Dialog.Content></Dialog.Root>
 
-                    {#if selectedContact}
-                        {@const mediaCount = messages.filter((m) => Boolean(m?.mediaType || m?.media_type)).length}
-                        <div class="mt-1 space-y-3">
-                            <div class="rounded-2xl border border-border/60 bg-background px-4 py-4 text-center">
-                                {#if avatarUrls[selectedContact.jid]}
-                                    <img
-                                        src={avatarUrls[selectedContact.jid] || ''}
-                                        alt={selectedContact.name}
-                                        class="mx-auto h-24 w-24 rounded-full object-cover"
-                                        onerror={() => clearAvatarUrl(selectedContact?.jid || '')}
-                                    />
-                                {:else}
-                                    <div
-                                        class="mx-auto h-24 w-24 rounded-full flex items-center justify-center text-white text-2xl font-semibold"
-                                        style="background-color: {avatarColor(selectedContact.name)};"
-                                    >
-                                        {getInitials(selectedContact.name)}
-                                    </div>
-                                {/if}
-                                <p class="mt-3 text-2xl font-semibold leading-tight">{selectedContact.name}</p>
-                                <p class="mt-1 text-sm text-muted-foreground">+{selectedContact.number}</p>
-                                <button class="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/50 px-4 py-2 text-sm hover:bg-muted" type="button">
-                                    <SearchIcon class="w-4 h-4" /> Ara
-                                </button>
-                            </div>
-
-                            <div class="rounded-2xl border border-border/60 bg-background overflow-hidden">
-                                <div class="flex items-center justify-between px-4 py-3 text-sm">
-                                    <div class="flex items-center gap-2">
-                                        <FileIcon class="w-4 h-4 text-muted-foreground" />
-                                        <span>Medya, bağlantı ve belgeler</span>
-                                    </div>
-                                    <span class="text-muted-foreground">{mediaCount}</span>
-                                </div>
-                                <div class="h-px bg-border/70"></div>
-                                <div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground">
-                                    <div class="flex items-center gap-2">
-                                        <HeartIcon class="w-4 h-4" />
-                                        <span>Yıldızlı mesajlar</span>
-                                    </div>
-                                    <span>0</span>
-                                </div>
-                                <div class="h-px bg-border/70"></div>
-                                <div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground">
-                                    <div class="flex items-center gap-2">
-                                        <BellOffIcon class="w-4 h-4" />
-                                        <span>Bildirimleri sessize al</span>
-                                    </div>
-                                    <span>Kapalı</span>
-                                </div>
-                            </div>
-
-                            <div class="rounded-2xl border border-border/60 bg-background px-4 py-3 text-xs text-muted-foreground">
-                                <div class="font-medium text-foreground mb-1">WhatsApp JID</div>
-                                <div class="break-all">{selectedContact.jid}</div>
-                            </div>
-                        </div>
-                    {/if}
-                </Dialog.Content>
-            </Dialog.Root>
-
-            <!-- Messages Area -->
-              <div class="flex-1 overflow-y-auto px-4 py-3 space-y-1"
-                  bind:this={messagesContainerEl}
-                 style="background: radial-gradient(ellipse at top, hsl(var(--muted)/0.3) 0%, transparent 70%);">
-
+            <div class="flex-1 relative overflow-hidden"><div class="absolute inset-0 pointer-events-none opacity-[0.4] dark:opacity-[0.1]" style="background-image: url('/wa-premium-bg.png'); background-repeat: repeat; background-size: 500px; background-position: center; z-index: 0;"></div>
+                <div class="absolute inset-0 overflow-y-auto px-4 py-3 space-y-1 z-10" bind:this={messagesContainerEl}><div class="flex flex-col min-h-full">
                 {#if loadingMessages && messages.length === 0}
-                    <div class="flex justify-center py-8">
-                        <div class="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
-                    </div>
+                    <div class="flex justify-center py-12"><div class="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin"></div></div>
                 {:else if messages.length === 0}
-                    <div class="flex flex-col items-center justify-center h-full gap-2 text-center py-12">
-                        <MessageSquareIcon class="w-8 h-8 text-muted-foreground/40" />
-                        <p class="text-sm text-muted-foreground">Bu konuşmada henüz mesaj yok</p>
-                    </div>
+                    <div class="flex flex-col items-center justify-center py-20 text-center opacity-40"><MessageSquareIcon class="w-12 h-12 mb-2" /><p class="text-sm">Bu konuşmada henüz mesaj yok</p></div>
                 {:else}
-                    {#each messages as msg, i (msg.id)}
-                        {@const isFromMe = Boolean(msg.fromMe || msg.from_me)}
-                        {@const isDeleted = (msg.status === 'deleted_me' || msg.status === 'deleted_everyone')}
-                        {@const senderName = resolveGroupSenderName(msg)}
-                        {@const prevIsFromMe = i > 0 ? Boolean(messages[i-1].fromMe || messages[i-1].from_me) : null}
-                        {@const prevSenderName = i > 0 ? resolveGroupSenderName(messages[i-1]) : ''}
-                        {@const msgTs = msg.timestamp < 1e12 ? msg.timestamp * 1000 : msg.timestamp}
-                        {@const showDateSep = i === 0 || (() => {
-                            const prevTs = messages[i-1].timestamp < 1e12 ? messages[i-1].timestamp * 1000 : messages[i-1].timestamp;
-                            return new Date(msgTs).toDateString() !== new Date(prevTs).toDateString();
-                        })()}
-                        {@const mediaKind = msg.mediaType || msg.media_type}
-                        {@const mediaUrl = `/api/messages/media/${encodeURIComponent(msg.id)}`}
-                        {@const mediaThumbUrl = `/api/messages/media-thumb/${encodeURIComponent(msg.id)}`}
-                        {@const bodyText = String(msg.body || '').trim()}
-                        {@const isPdfDocument = mediaKind === 'document' && isPdfFilename(bodyText)}
-                        {@const documentLabel = bodyText || (isPdfDocument ? 'PDF dosyası' : 'Belge')}
-                        {@const messageLinkUrl = !isDeleted && !isFromMe && !mediaKind ? firstUrlInText(bodyText) : null}
-                        {@const messageLinkPreview = messageLinkUrl ? linkPreviewCache[normalizeLinkPreviewUrl(messageLinkUrl)] : null}
-                        {@const reactions = parseMessageReactions(msg.reaction)}
-                        {@const quotedPreview = String(msg.quotedMsgBody || '').trim()}
-                        {@const quotedMediaKind = String(msg.quotedMediaType || msg.quoted_media_type || '').trim()}
-                        {@const quotedHasMedia = Boolean(quotedMediaKind)}
-                        {@const quotedDisplayText = quotedPreview || (quotedHasMedia ? mediaIcon(quotedMediaKind) : 'Mesaj')}
-                        {@const quotedThumbUrl = msg.quotedMsgId && (quotedMediaKind === 'image' || quotedMediaKind === 'video' || quotedMediaKind === 'document')
-                            ? `/api/messages/media-thumb/${encodeURIComponent(String(msg.quotedMsgId))}`
-                            : ''}
-                        {@const senderJid = String(msg?.senderJid || msg?.sender_jid || '').trim()}
-                        {@const isSameSender = !showDateSep && prevIsFromMe === isFromMe && prevSenderName === senderName}
-                        {@const showGroupSender = !isFromMe && !isSameSender && isGroupJid(selectedContact?.jid) && Boolean(senderName)}
-                        {@const msgAvatarUrl = isGroupJid(selectedContact?.jid) ? (avatarUrls[senderJid] ?? null) : (avatarUrls[selectedContact?.jid ?? ''] ?? null)}
-
-                        <!-- Date separator -->
-                        {#if showDateSep}
-                            <div class="flex justify-center py-2">
-                                <span class="text-xs bg-muted text-muted-foreground px-3 py-1 rounded-full">
-                                    {new Date(msgTs).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' })}
-                                </span>
-                            </div>
-                        {/if}
-
-                        <!-- Message bubble -->
-                        <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} items-start gap-1.5 {isSameSender ? 'mt-0.5' : 'mt-4'}">
-                            {#if !isFromMe}
-                                {#if !isSameSender}
-                                    {#if msgAvatarUrl}
-                                        <img src={msgAvatarUrl} alt={senderName || ''} class="shrink-0 w-7 h-7 rounded-full object-cover" onerror={() => { if (senderJid) clearAvatarUrl(senderJid); }} />
-                                    {:else}
-                                        <div class="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-white text-[10px] font-semibold" style="background-color: {avatarColor(senderName || selectedContact?.name || '')}">
-                                            {getInitials(senderName || selectedContact?.name || '')}
-                                        </div>
-                                    {/if}
-                                {:else}
-                                    <div class="shrink-0 w-7"></div>
-                                {/if}
-                            {/if}
-                            <!-- svelte-ignore a11y_no_static_element_interactions -->
-                            <div
-                                class="max-w-[75%] rounded-2xl text-sm shadow-sm overflow-hidden {isDeleted ? 'bg-muted/70 text-muted-foreground rounded-xl opacity-80' : (isFromMe ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted text-foreground rounded-bl-sm')}"
-                                oncontextmenu={(e) => handleMessageContextMenu(e, msg)}
-                            >
-
-                                {#if showGroupSender}
-                                    <div class="px-3 pt-1.5 pb-0 text-[11px] leading-tight font-semibold text-sky-700">
-                                        {senderName}
-                                    </div>
-                                {/if}
-
-                                {#if msg.quotedMsgId || quotedPreview}
-                                    <div class="px-3 {showGroupSender ? 'pt-1' : 'pt-2'} pb-0.5">
-                                        <div class="rounded-xl border-l-2 px-2.5 py-1.5 text-[11px] leading-snug {isFromMe ? 'border-primary-foreground/35 bg-primary-foreground/10 text-primary-foreground/85' : 'border-sky-500/55 bg-background/55 text-foreground/80'}">
-                                            <div class="text-[10px] font-semibold opacity-80">Alıntılanan mesaj</div>
-                                            <div class="flex items-start gap-2">
-                                                <div class="min-w-0 flex-1 max-h-10 overflow-hidden whitespace-pre-wrap break-all">{quotedDisplayText}</div>
-                                                {#if quotedThumbUrl}
-                                                    <img
-                                                        src={quotedThumbUrl}
-                                                        alt="Alintilanan medya"
-                                                        class="h-10 w-10 shrink-0 rounded-md border border-border/40 object-cover"
-                                                        loading="lazy"
-                                                        onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-                                                    />
-                                                {/if}
-                                            </div>
-                                        </div>
-                                    </div>
-                                {/if}
-
-                                <!-- Media content -->
-                                {#if !isDeleted && mediaKind === 'image'}
-                                    <button class="block cursor-zoom-in" type="button" onclick={() => openMediaViewer(mediaUrl, 'image')} aria-label="Fotoğrafı görüntüle">
-                                        <img
-                                            src={mediaUrl}
-                                            alt="Fotoğraf"
-                                            class="max-w-full max-h-64 block object-cover hover:opacity-90 transition-opacity"
-                                            loading="lazy"
-                                            onerror={(e) => {
-                                                const img = e.currentTarget as HTMLImageElement;
-                                                img.style.display = 'none';
-                                                const fallback = img.parentElement?.nextElementSibling as HTMLElement | null;
-                                                if (fallback) fallback.style.display = 'flex';
-                                            }}
-                                        />
-                                    </button>
-                                    <div class="hidden items-center gap-1.5 px-3 py-2 opacity-80 text-xs font-medium">
-                                        <ImageIcon class="w-3.5 h-3.5" /><span>Fotoğraf</span>
-                                    </div>
-                                {:else if !isDeleted && mediaKind === 'video'}
-                                    <!-- svelte-ignore a11y_media_has_caption -->
-                                    <video controls class="max-w-full max-h-64 block" preload="metadata">
-                                        <source src={mediaUrl} />
-                                    </video>
-                                {:else if !isDeleted && mediaKind === 'audio'}
-                                    <div class="px-3 pt-2">
-                                        <!-- svelte-ignore a11y_media_has_caption -->
-                                        <audio controls class="w-full h-8" preload="metadata">
-                                            <source src={mediaUrl} />
-                                        </audio>
-                                    </div>
-                                {:else if !isDeleted && mediaKind === 'document'}
-                                    <div class="px-3 pt-2">
-                                        <button
-                                            type="button"
-                                            class="w-full rounded-xl border border-border/60 bg-background/55 px-2.5 py-2 text-left transition-colors hover:bg-background"
-                                            onclick={() => openMediaViewer(mediaUrl, 'document', documentLabel)}
-                                            aria-label={(isPdfDocument ? 'PDF' : 'Belge') + ' aç'}
-                                        >
-                                            <div class="flex items-center gap-2.5">
-                                                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border/60 bg-muted/60 text-[10px] font-bold tracking-wide {isPdfDocument ? 'text-rose-600' : 'text-muted-foreground'}">
-                                                    {isPdfDocument ? 'PDF' : 'DOC'}
-                                                </div>
-                                                <div class="min-w-0 flex-1">
-                                                    <p class="truncate text-xs font-medium">{documentLabel}</p>
-                                                    <p class="text-[10px] text-muted-foreground">Dokunarak aç</p>
-                                                </div>
-                                                <img
-                                                    src={mediaThumbUrl}
-                                                    alt={isPdfDocument ? 'PDF onizlemesi' : 'Belge onizlemesi'}
-                                                    class="h-12 w-12 shrink-0 rounded-md border border-border/40 object-cover"
-                                                    loading="lazy"
-                                                    onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-                                                />
-                                            </div>
-                                        </button>
-                                    </div>
-                                    <div class="flex items-center gap-2 px-3 py-2 opacity-80 text-xs font-medium">
-                                        <FileIcon class="w-3.5 h-3.5 shrink-0" />
-                                        <button onclick={() => openMediaViewer(mediaUrl, 'document', documentLabel)} class="underline hover:text-primary transition-colors">Görüntüle</button>
-                                        <span class="opacity-40">·</span>
-                                        <a href={mediaUrl} download class="underline hover:text-primary transition-colors">İndir</a>
-                                    </div>
-                                {/if}
-
-                                {#if messageLinkPreview}
-                                    <a
-                                        href={messageLinkPreview.url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        class="mx-2 mt-2 block overflow-hidden rounded-xl border border-border/60 bg-background/90 text-foreground no-underline hover:bg-background transition-colors"
-                                    >
-                                        {#if messageLinkPreview.image}
-                                            <img
-                                                src={messageLinkPreview.image}
-                                                alt={messageLinkPreview.title || messageLinkPreview.domain || 'Link onizlemesi'}
-                                                class="h-36 w-full object-cover"
-                                                loading="lazy"
-                                                onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-                                            />
-                                        {/if}
-                                        {#if isInstagramPreview(messageLinkPreview)}
-                                            <div class="px-3 py-2">
-                                                <p class="text-[13px] font-semibold leading-snug line-clamp-2">{messageLinkPreview.title || 'Instagram'}</p>
-                                                <p class="mt-1 text-[12px] leading-snug text-muted-foreground line-clamp-1">{messageLinkPreview.domain || messageLinkPreview.siteName || 'www.instagram.com'}</p>
-                                            </div>
-                                        {:else}
-                                            <div class="px-3 py-2">
-                                                <div class="flex items-start gap-2">
-                                                    {#if messageLinkPreview.thumbnail}
-                                                        <img
-                                                            src={messageLinkPreview.thumbnail}
-                                                            alt={messageLinkPreview.authorName || messageLinkPreview.domain || 'Profil'}
-                                                            class="mt-0.5 h-9 w-9 shrink-0 rounded-md object-cover border border-border/50"
-                                                            loading="lazy"
-                                                            onerror={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-                                                        />
-                                                    {/if}
-                                                    <div class="min-w-0 flex-1">
-                                                        <p class="text-xs font-semibold leading-snug line-clamp-2">{messageLinkPreview.title || messageLinkPreview.domain}</p>
-                                                        {#if messageLinkPreview.description}
-                                                            <p class="mt-1 text-[11px] leading-snug text-muted-foreground line-clamp-4 whitespace-pre-wrap">{messageLinkPreview.description}</p>
-                                                        {/if}
-                                                    </div>
-                                                </div>
-                                                {#if messageLinkPreview.authorName}
-                                                    <p class="mt-1 text-[11px] leading-snug text-foreground/80 line-clamp-1">{messageLinkPreview.authorName}</p>
-                                                {/if}
-                                                <div class="mt-1.5 flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
-                                                    <GlobeIcon class="w-3 h-3" />
-                                                    <span>{messageLinkPreview.siteName || messageLinkPreview.domain}</span>
-                                                </div>
-                                            </div>
-                                        {/if}
-                                    </a>
-                                {/if}
-
-                                <!-- Body text / caption -->
-                                {#if msg.body && !(mediaKind && !isDeleted && ['[Medya]', '[Ses mesaji]', '[Cikartma]'].includes(String(msg.body || '')))}
-                                    {#if translatedMessages.has(String(msg.id))}
-                                        {@const msgTranslation = translatedMessages.get(String(msg.id))!}
-                                        <p class="px-3 py-1.5 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">
-                                            {@html parseMessageFormatting(msgTranslation.text)}
-                                        </p>
-                                        <div class="px-3 pb-1.5 flex items-center gap-1.5">
-                                            <Languages class="w-3 h-3 {isFromMe ? 'text-primary-foreground/50' : 'text-muted-foreground'}" />
-                                            <span class="text-[10px] {isFromMe ? 'text-primary-foreground/50' : 'text-muted-foreground'}">{translationLanguages.find(l => l.code === msgTranslation.lang)?.label ?? msgTranslation.lang} · </span>
-                                            <button
-                                                type="button"
-                                                onclick={() => revertMessageTranslation(String(msg.id))}
-                                                class="text-[10px] underline underline-offset-2 {isFromMe ? 'text-primary-foreground/70 hover:text-primary-foreground' : 'text-muted-foreground hover:text-foreground'} transition-colors"
-                                            >Orijinali göster</button>
-                                        </div>
-                                    {:else if translatingMessageIds.has(String(msg.id))}
-                                        <p class="px-3 py-1.5 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">
-                                            {@html parseMessageFormatting(msg.body)}
-                                        </p>
-                                        <div class="px-3 pb-1.5 flex items-center gap-1.5">
-                                            <div class="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin {isFromMe ? 'text-primary-foreground/50' : 'text-muted-foreground'}"></div>
-                                            <span class="text-[10px] {isFromMe ? 'text-primary-foreground/50' : 'text-muted-foreground'}">Çevriliyor...</span>
-                                        </div>
-                                    {:else}
-                                        <p class="px-3 py-1.5 whitespace-pre-wrap break-all leading-relaxed {mediaKind && !isDeleted ? 'pt-1' : ''} {isDeleted ? 'italic' : ''}">
-                                            {@html parseMessageFormatting(msg.body)}
-                                        </p>
-                                    {/if}
-                                {:else if !mediaKind}
-                                    <div class="px-3 py-1.5"></div>
-                                {/if}
-
-                                <!-- Timestamp -->
-                                <div class="flex justify-end items-end px-3 pb-1 mt-0">
-                                    <span class="text-[10px] leading-none {isFromMe ? 'text-primary-foreground/70' : 'text-muted-foreground'}">
-                                        {formatTime(msg.timestamp)}
-                                        {#if msg.editedAt || locallyEditedMessageIds.has(String(msg.id || ''))}
-                                            <span class="ml-1 opacity-80">(duzenlendi)</span>
-                                        {/if}
-                                        {#if isFromMe}
-                                            <span class={"message-status ml-1 " + statusTickClass(msg.status)} aria-hidden="true">
-                                                {#if isDoubleTickStatus(msg.status)}
-                                                    <span class="message-status-double">
-                                                        <span>✓</span><span>✓</span>
-                                                    </span>
-                                                {:else if isFailedStatus(msg.status)}
-                                                    !
-                                                {:else}
-                                                    ✓
-                                                {/if}
-                                            </span>
-                                        {/if}
-                                    </span>
-                                </div>
-
-                                {#if reactions.length > 0}
-                                    <div class="px-3 pb-2 pt-0.5 flex flex-wrap justify-end gap-1">
-                                        {#each reactions as reaction (reaction.emoji)}
-                                            <span class="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/95 px-2 py-0.5 text-[11px] leading-none shadow-sm">
-                                                <span>{reaction.emoji}</span>
-                                                {#if reaction.count > 1}
-                                                    <span class="text-muted-foreground">{reaction.count}</span>
-                                                {/if}
-                                            </span>
-                                        {/each}
-                                    </div>
-                                {/if}
-                            </div>
-                        </div>
-                    {/each}
-                    <div bind:this={messagesEndEl}></div>
-                {/if}
-            </div>
-
-            {#if messageMenu}
-                <div
-                    class="fixed min-w-40 bg-background border border-border rounded-lg shadow-lg py-1 z-50"
-                    style="left: {messageMenu.x}px; top: {messageMenu.y}px;"
-                    onmousedown={(e) => e.preventDefault()}
-                    role="menu"
-                    tabindex="0"
-                >
-                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => openMessageInfo(messageMenu!.msg)} role="menuitem">
-                        <MessageSquareIcon class="w-4 h-4" />
-                        Mesaj bilgisi
-                    </button>
-                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => startReplyToMessage(messageMenu!.msg)} role="menuitem">
-                        <CornerUpLeftIcon class="w-4 h-4" />
-                        Cevapla
-                    </button>
-                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => copyMessageText(messageMenu!.msg)} role="menuitem">
-                        <FileIcon class="w-4 h-4" />
-                        Kopyala
-                    </button>
-                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={reactToOwnMessage} role="menuitem">
-                        <SmileIcon class="w-4 h-4" />
-                        Ifade birak
-                    </button>
-                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => forwardMessageToInput(messageMenu!.msg)} role="menuitem">
-                        <ForwardIcon class="w-4 h-4" />
-                        Ilet
-                    </button>
-                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={togglePinMessage} role="menuitem">
-                        <PinIcon class="w-4 h-4" />
-                        Sabitle
-                    </button>
-                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={toggleStarMessage} role="menuitem">
-                        <HeartIcon class="w-4 h-4" />
-                        Yildiz ekle
-                    </button>
-                    {#if canEditMessage(messageMenu.msg)}
-                        <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={() => editMessageDraft(messageMenu!.msg)} role="menuitem">
-                            <CodeIcon class="w-4 h-4" />
-                            Duzenle
-                        </button>
-                    {/if}
-                    <!-- Çevir row with inline language picker -->
-                    <div class="relative">
-                        <div class="flex items-center">
-                            <button
-                                class="flex-1 flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors"
-                                onclick={() => translateMessage(messageMenu!.msg)}
-                                role="menuitem"
-                            >
-                                <Languages class="w-4 h-4 shrink-0" />
-                                <span class="flex-1">Çevir</span>
-                            </button>
-                            <button
-                                type="button"
-                                class="flex items-center gap-1 px-2 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors border-l border-border/50"
-                                onclick={(e) => { e.stopPropagation(); msgLangPickerOpen = !msgLangPickerOpen; }}
-                                role="menuitem"
-                                aria-label="Çeviri dili seç"
-                            >
-                                <span class="font-medium">{translationLanguages.find(l => l.code === msgTranslateLang)?.label ?? msgTranslateLang}</span>
-                                <ChevronDownIcon class="w-3 h-3 transition-transform {msgLangPickerOpen ? 'rotate-180' : ''}" />
-                            </button>
-                        </div>
-                        {#if msgLangPickerOpen}
-                            <div class="border-t border-border/50 bg-muted/30 py-1 max-h-48 overflow-y-auto">
-                                {#each translationLanguages as lang}
-                                    <button
-                                        type="button"
-                                        class="w-full flex items-center justify-between px-4 py-1.5 text-xs hover:bg-muted transition-colors {msgTranslateLang === lang.code ? 'text-primary font-semibold' : 'text-foreground'}"
-                                        onclick={(e) => { e.stopPropagation(); msgTranslateLang = lang.code; msgLangPickerOpen = false; }}
-                                    >
-                                        {lang.label}
-                                        {#if msgTranslateLang === lang.code}
-                                            <CheckIcon class="w-3 h-3 text-primary" />
-                                        {/if}
-                                    </button>
-                                {/each}
-                            </div>
-                        {/if}
+                    <div class="flex flex-col">
+                        {#each messages as msg, i (msg.id)}
+                            {@const isFromMe = Boolean(msg.fromMe || msg.from_me)}
+                            {@const isDeleted = (msg.status === 'deleted_me' || msg.status === 'deleted_everyone')}
+                            {@const senderName = resolveGroupSenderName(msg)}
+                            {@const prevMsgInList = messages[i - 1]}
+                            {@const msgTs = msg.timestamp < 1e12 ? msg.timestamp * 1000 : msg.timestamp}
+                            {@const showDateSep = !prevMsgInList || (new Date(msgTs).toDateString() !== new Date(prevMsgInList.timestamp < 1e12 ? prevMsgInList.timestamp * 1000 : prevMsgInList.timestamp).toDateString())}
+                            {@const mediaKind = msg.mediaType || msg.media_type}
+                            {@const mediaUrl = `/api/messages/media/${encodeURIComponent(msg.id)}`}
+                            {@const bodyText = String(msg.body || '').trim()}
+                            {@const isSameSender = !showDateSep && i > 0 && Boolean(messages[i-1].fromMe) === isFromMe && resolveGroupSenderName(messages[i-1]) === senderName}
+                            {#if showDateSep}<div class="flex justify-center py-6 mt-2 first:mt-0"><span class="text-xs bg-muted/90 text-muted-foreground px-4 py-1 rounded-full border border-border/40 font-medium shadow-sm">{new Date(msgTs).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Istanbul' })}</span></div>{/if}
+                            <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} items-start gap-1.5 {isSameSender ? 'mt-0.5' : 'mt-4'}"><div class="relative flex flex-col max-w-[75%] z-10"><div class="flex flex-col text-[14.2px] shadow-sm {isDeleted ? 'bg-muted/70 opacity-80' : (isFromMe ? 'bg-[#d9fdd3] dark:bg-[#005c4b] text-[#111b21] dark:text-[#e9edef]' : 'bg-white dark:bg-[#202c33] text-[#111b21] dark:text-[#e9edef]')} rounded-lg {isFromMe ? 'rounded-tr-none' : 'rounded-lg rounded-tl-none'}" oncontextmenu={(e) => handleMessageContextMenu(e, msg)}>{#if !isFromMe && isGroupJid(selectedContact?.jid) && senderName}<div class="px-2.5 pt-1.5 pb-0 text-[12.5px] font-bold text-sky-600 dark:text-sky-400">{senderName}</div>{/if}
+                                {#if !isDeleted && mediaKind === 'image'}<div class="px-1 pt-1 pb-0"><button type="button" onclick={() => openMediaViewer(mediaUrl, 'image')} class="block w-full max-w-[320px] rounded-lg overflow-hidden"><img src={mediaUrl} alt="Fotoğraf" class="w-full h-auto max-h-[320px] object-cover" loading="lazy" /></button></div>{:else if !isDeleted && mediaKind === 'video'}<div class="px-1 pt-1 pb-0"><video controls class="w-full max-w-[320px] max-h-[320px] rounded-xl overflow-hidden block" preload="metadata"><source src={mediaUrl} /></video></div>{/if}
+                                {#if bodyText}<div class="px-2.5 py-1.5 whitespace-pre-wrap break-words leading-relaxed">{@html parseMessageFormatting(bodyText)}</div>{/if}
+                                <div class="flex items-center justify-end gap-1 px-2.5 pb-1 -mt-1 ml-auto"><span class="text-[10.5px] text-muted-foreground leading-none">{formatTime(msg.timestamp)}</span>{#if isFromMe}<span class={"text-xs leading-none " + statusTickClass(msg.status)}>{#if isDoubleTickStatus(msg.status)}✓✓{:else}✓{/if}</span>{/if}</div></div>{#if msg.reaction && msg.reaction !== '[]'}{@const reactions = parseMessageReactions(msg.reaction)}<div class="absolute -bottom-2 {isFromMe ? 'right-0' : 'left-0'} flex items-center gap-0.5 pointer-events-none">{#each reactions as r}<div class="px-1 py-0.5 rounded-full bg-background border border-border text-[10px] pointer-events-auto">{r.emoji}</div>{/each}</div>{/if}</div></div>
+                        {/each}
+                        {#if hasMoreMessages}<div class="flex justify-center py-6 mt-6 border-t border-border/10"><button class="flex items-center gap-2 px-6 py-2 rounded-full bg-muted/40 hover:bg-muted text-xs font-semibold text-muted-foreground transition-all hover:scale-105 active:scale-95 border border-border/30 shadow-sm" onclick={loadMoreMessages} disabled={loadingMoreMessages}>{#if loadingMoreMessages}<div class="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin"></div><span>Yükleniyor...</span>{:else}<ArrowUpCircle class="w-4 h-4 text-primary/70" /><span>Daha Eski Mesajları Yükle</span>{/if}</button></div>{/if}<div class="h-4" bind:this={messagesEndEl}></div>
                     </div>
-                    <div class="mx-2 my-1 h-px bg-border/70"></div>
-                    <button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onclick={openMessageDeleteDialog} role="menuitem">
-                        <TrashIcon class="w-4 h-4" />
-                        Sil
-                    </button>
-                </div>
-            {/if}
+                {/if}</div></div></div>
 
-            <AlertDialog.Root bind:open={messageDeleteDialogOpen}>
-                <AlertDialog.Content>
-                    <AlertDialog.Header>
-                        <AlertDialog.Title>Mesaj silinsin mi?</AlertDialog.Title>
-                        <AlertDialog.Description>
-                            Bu mesajı sadece sizden veya herkesten silebilirsiniz.
-                        </AlertDialog.Description>
-                    </AlertDialog.Header>
-                    <AlertDialog.Footer>
-                        <AlertDialog.Cancel onclick={() => { msgToDelete = null; }}>Vazgeç</AlertDialog.Cancel>
-                        <button
-                            class="px-3 py-2 text-sm rounded-md border border-border hover:bg-muted/50 inline-flex items-center gap-2"
-                            onclick={() => deleteSingleMessage('me')}
-                        >
-                            <TrashIcon class="w-4 h-4" />
-                            Benden sil
-                        </button>
-                        {#if Boolean(msgToDelete?.fromMe || msgToDelete?.from_me) && isWithin24Hours(msgToDelete?.timestamp)}
-                            <button
-                                class="px-3 py-2 text-sm rounded-md bg-destructive text-white hover:bg-destructive/90 inline-flex items-center gap-2"
-                                onclick={() => deleteSingleMessage('everyone')}
-                            >
-                                <TrashIcon class="w-4 h-4" />
-                                Herkesten sil
-                            </button>
-                        {/if}
-                    </AlertDialog.Footer>
-                </AlertDialog.Content>
-            </AlertDialog.Root>
+            {#if messageMenu}<div class="fixed min-w-40 bg-background border border-border rounded-lg shadow-lg py-1 z-50" style="left: {messageMenu.x}px; top: {messageMenu.y}px;" onmousedown={(e) => e.preventDefault()} role="menu" tabindex="0"><div class="flex items-center justify-around px-2 py-2 border-b border-border/50 bg-muted/20 gap-1">{#each ['👍', '❤️', '😂', '😮', '😢', '🙏'] as emoji}<button class="text-xl hover:scale-125 transition-transform p-1" onclick={() => sendReaction(messageMenu!.msg, emoji)}>{emoji}</button>{/each}</div><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={() => startReplyToMessage(messageMenu!.msg)}><CornerUpLeftIcon class="w-4 h-4" /> Cevapla</button><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={() => copyMessageText(messageMenu!.msg)}><FileIcon class="w-4 h-4" /> Kopyala</button><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={openMessageDeleteDialog}><TrashIcon class="w-4 h-4" /> Sil</button></div>{/if}
 
-            <!-- Message Input -->
+            <AlertDialog.Root bind:open={messageDeleteDialogOpen}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>Mesaj silinsin mi?</AlertDialog.Title><AlertDialog.Description>Bu mesajı sadece sizden veya herkesten silebilirsiniz.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel onclick={() => { msgToDelete = null; }}>Vazgeç</AlertDialog.Cancel><button class="px-3 py-2 text-sm rounded-md border border-border hover:bg-muted/50 inline-flex items-center gap-2" onclick={() => deleteSingleMessage('me')}><TrashIcon class="w-4 h-4" />Benden sil</button>{#if Boolean(msgToDelete?.fromMe || msgToDelete?.from_me) && isWithin24Hours(msgToDelete?.timestamp)}<button class="px-3 py-2 text-sm rounded-md bg-destructive text-white hover:bg-destructive/90 inline-flex items-center gap-2" onclick={() => deleteSingleMessage('everyone')}><TrashIcon class="w-4 h-4" />Herkesten sil</button>{/if}</AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>
+
             <div class="px-4 py-3 border-t border-border bg-background">
-                {#if editingMessageId}
-                    <div class="mb-2 flex items-start justify-between gap-3 rounded-xl border border-amber-300/60 bg-amber-50/60 px-3 py-2">
-                        <div class="min-w-0">
-                            <div class="text-[11px] font-semibold text-amber-700">Mesaj duzenleniyor</div>
-                            <div class="text-xs text-amber-700/80">Yeni mesaj gitmez, mevcut mesaj guncellenir.</div>
-                        </div>
-                        <button class="shrink-0 rounded-md p-1 hover:bg-amber-100" type="button" onclick={clearEditingMessage} aria-label="Duzenlemeyi iptal et">
-                            <XIcon class="w-4 h-4 text-amber-700" />
-                        </button>
-                    </div>
-                {/if}
-                {#if replyingTo}
-                    <div class="mb-2 flex items-start justify-between gap-3 rounded-xl border border-border bg-muted/35 px-3 py-2">
-                        <div class="min-w-0">
-                            <div class="text-[11px] font-semibold text-sky-700">{replyingTo.senderName || 'Mesaja cevap'}</div>
-                            <div class="text-xs text-muted-foreground max-h-9 overflow-hidden whitespace-pre-wrap break-all">{replyingTo.body}</div>
-                        </div>
-                        <button class="shrink-0 rounded-md p-1 hover:bg-muted" type="button" onclick={clearReplyToMessage} aria-label="Cevabı iptal et">
-                            <XIcon class="w-4 h-4 text-muted-foreground" />
-                        </button>
-                    </div>
-                {/if}
-                {#if attachedMedia && (isImageAttachment || isVideoAttachment || isPdfAttachment)}
-                    <div class="mb-2 inline-block rounded-lg border border-border bg-muted/30 p-1">
-                        {#if isImageAttachment}
-                            <img src={attachedMedia?.data || ''} alt={attachedMedia?.filename || 'Gorsel'} class="max-h-28 max-w-56 rounded-md object-cover" />
-                        {:else if isVideoAttachment}
-                            <!-- svelte-ignore a11y_media_has_caption -->
-                            <video src={attachedMedia?.data || ''} class="max-h-28 max-w-56 rounded-md" controls preload="metadata"></video>
-                        {:else if isPdfAttachment}
-                            <button
-                                type="button"
-                                class="flex w-56 items-center gap-2 rounded-md border border-border/60 bg-background px-2.5 py-2 text-left hover:bg-muted/50 transition-colors"
-                                onclick={() => openMediaViewer(attachedMedia?.data || '', 'document', attachedMedia?.filename || 'PDF dosyası')}
-                                aria-label="PDF önizlemesini aç"
-                            >
-                                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border/60 bg-rose-50 text-[10px] font-bold tracking-wide text-rose-600">PDF</div>
-                                <div class="min-w-0 flex-1">
-                                    <p class="truncate text-xs font-medium">{attachedMedia?.filename || 'PDF dosyası'}</p>
-                                    <p class="text-[10px] text-muted-foreground">Dokunarak aç</p>
-                                </div>
-                            </button>
-                        {/if}
-                    </div>
-                {/if}
-                <div class="flex items-end gap-2">
-                    <div class="flex-1 bg-muted/50 rounded-2xl border border-border px-4 py-2.5 flex items-end gap-2">
-                        <div class="relative group shrink-0">
-                            <button
-                                class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105"
-                                title="Dosya ekle"
-                                aria-label="Dosya ekle"
-                                onclick={() => mediaInputEl?.click()}
-                                type="button"
-                            >
-                                <PaperclipIcon class="w-4 h-4 text-muted-foreground" />
-                            </button>
-                            <span class="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Dosya ekle</span>
-                        </div>
-                        <div class="relative group shrink-0">
-                            <button
-                                class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105"
-                                title="Emoji ekle"
-                                aria-label="Emoji ekle"
-                                onclick={() => { isEmojiPickerOpen = !isEmojiPickerOpen; }}
-                                type="button"
-                            >
-                                <SmileIcon class="w-4 h-4 text-muted-foreground" />
-                            </button>
-                            <span class="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Emoji</span>
-
-                            {#if isEmojiPickerOpen}
-                                <div
-                                    bind:this={emojiPickerEl}
-                                    class="absolute bottom-full left-0 mb-2 w-64 rounded-xl border border-border bg-background shadow-xl p-3 z-30"
-                                >
-                                    <div class="text-[11px] font-semibold text-muted-foreground mb-2">Hizli ifadeler</div>
-                                    <div class="grid grid-cols-8 gap-1.5">
-                                        {#each quickEmojis as emoji}
-                                            <button
-                                                class="h-7 w-7 rounded-md hover:bg-muted text-base leading-none flex items-center justify-center"
-                                                type="button"
-                                                onclick={async () => { await insertEmoji(emoji); }}
-                                                title={emoji}
-                                                aria-label={`Emoji ${emoji}`}
-                                            >
-                                                {emoji}
-                                            </button>
-                                        {/each}
-                                    </div>
-                                </div>
-                            {/if}
-                        </div>
-                        <input
-                            bind:this={mediaInputEl}
-                            type="file"
-                            class="hidden"
-                            accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
-                            onchange={handleMediaSelect}
-                        />
-                        <!-- Translation toggle & language picker -->
-                        <div class="relative shrink-0">
-                            {#if translationEnabled}
-                                <!-- Active pill: icon + language name + chevron -->
-                                <button
-                                    type="button"
-                                    onclick={() => { langPickerOpen = !langPickerOpen; }}
-                                    class="flex items-center gap-1 h-7 pl-2 pr-1.5 rounded-full border border-primary/40 bg-primary/10 text-primary text-xs font-medium hover:bg-primary/15 transition-all"
-                                    aria-label="Dil seç"
-                                >
-                                    <Languages class="w-3.5 h-3.5 shrink-0" />
-                                    <span>{translationLanguages.find(l => l.code === translationTargetLang)?.label ?? translationTargetLang}</span>
-                                    <ChevronDownIcon class="w-3 h-3 shrink-0 opacity-60 transition-transform {langPickerOpen ? 'rotate-180' : ''}" />
-                                </button>
-                            {:else}
-                                <!-- Inactive icon button -->
-                                <button
-                                    type="button"
-                                    onclick={() => { translationEnabled = true; langPickerOpen = true; translationPreview = ''; }}
-                                    class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105 text-muted-foreground"
-                                    title="Çeviriyi etkinleştir"
-                                    aria-label="Çeviriyi etkinleştir"
-                                >
-                                    <Languages class="w-4 h-4" />
-                                </button>
-                            {/if}
-
-                            <!-- Custom language picker dropdown -->
-                            {#if langPickerOpen}
-                                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                                <div
-                                    class="fixed inset-0 z-20"
-                                    onclick={() => { langPickerOpen = false; }}
-                                ></div>
-                                <div class="absolute bottom-full left-0 mb-2 w-48 rounded-xl border border-border bg-background shadow-xl z-30 overflow-hidden">
-                                    <div class="flex items-center justify-between px-3 py-2 border-b border-border">
-                                        <span class="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Hedef dil</span>
-                                        <button
-                                            type="button"
-                                            class="text-[10px] text-destructive/70 hover:text-destructive px-1.5 py-0.5 rounded hover:bg-destructive/10 transition-colors"
-                                            onclick={(e) => { e.stopPropagation(); translationEnabled = false; langPickerOpen = false; translationPreview = ''; }}
-                                        >Kapat</button>
-                                    </div>
-                                    <div class="py-1 max-h-64 overflow-y-auto">
-                                        {#each translationLanguages as lang}
-                                            <button
-                                                type="button"
-                                                onclick={(e) => { e.stopPropagation(); translationTargetLang = lang.code; langPickerOpen = false; }}
-                                                class="w-full flex items-center justify-between px-3 py-1.5 text-sm hover:bg-muted transition-colors {translationTargetLang === lang.code ? 'text-primary font-medium bg-primary/5' : 'text-foreground'}"
-                                            >
-                                                {lang.label}
-                                                {#if translationTargetLang === lang.code}
-                                                    <CheckIcon class="w-3.5 h-3.5 text-primary" />
-                                                {/if}
-                                            </button>
-                                        {/each}
-                                    </div>
-                                </div>
-                            {/if}
-                        </div>
-                        <div class="flex-1 relative">
-                            <textarea
-                                bind:this={messageTextareaEl}
-                                bind:value={messageText}
-                                onkeydown={handleKeydown}
-                                onpaste={handleMessagePaste}
-                                placeholder="Mesaj yazın..."
-                                rows="1"
-                                onmouseup={() => { showFormattingToolbar = (messageTextareaEl?.selectionStart ?? 0) !== (messageTextareaEl?.selectionEnd ?? 0); }}
-                                onkeyup={() => { showFormattingToolbar = (messageTextareaEl?.selectionStart ?? 0) !== (messageTextareaEl?.selectionEnd ?? 0); }}
-                                onblur={() => { setTimeout(() => { showFormattingToolbar = false; }, 150); }}
-                                class="flex-1 w-full bg-transparent resize-none outline-none text-sm leading-relaxed placeholder:text-muted-foreground max-h-32"
-                                style="field-sizing: content;"
-                            ></textarea>
-                            {#if translationEnabled && translationPreview && translationPreview !== messageText.trim()}
-                                <div class="mt-1.5 flex items-start gap-1.5 px-2 py-1.5 rounded-lg bg-primary/8 border border-primary/15 text-xs text-foreground/80 leading-snug">
-                                    <Languages class="w-3 h-3 shrink-0 mt-0.5 text-primary/60" />
-                                    <span>{translationPreview}</span>
-                                </div>
-                            {/if}
-
-                            {#if showFormattingToolbar && messageTextareaEl && (messageTextareaEl.selectionStart ?? 0) !== (messageTextareaEl.selectionEnd ?? 0)}
-                                <div class="absolute -top-10 left-0 flex gap-1 bg-muted border border-border rounded-lg p-1 shadow-md">
-                                    <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95"
-                                        onmousedown={(e) => { e.preventDefault(); formatBold(); }}
-                                        type="button"
-                                        title="Kalın"
-                                        aria-label="Kalın"
-                                    >
-                                        <BoldIcon class="w-4 h-4" />
-                                    </button>
-                                    <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95"
-                                        onmousedown={(e) => { e.preventDefault(); formatItalic(); }}
-                                        title="İtalik (Ctrl+I)"
-                                        type="button"
-                                        aria-label="İtalik"
-                                    >
-                                        <ItalicIcon class="w-4 h-4" />
-                                    </button>
-                                    <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95"
-                                        onmousedown={(e) => { e.preventDefault(); formatStrikethrough(); }}
-                                        title="Üstü çizili"
-                                        type="button"
-                                        aria-label="Üstü çizili"
-                                    >
-                                        <StrikethroughIcon class="w-4 h-4" />
-                                    </button>
-                                    <button
-                                        class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95"
-                                        onmousedown={(e) => { e.preventDefault(); formatCode(); }}
-                                        title="Kod"
-                                        type="button"
-                                        aria-label="Kod"
-                                    >
-                                        <CodeIcon class="w-4 h-4" />
-                                    </button>
-                                </div>
-                            {/if}
-                        </div>
-                    </div>
-                    <button
-                        onclick={sendMessage}
-                        disabled={(!messageText.trim() && !attachedMedia) || sendingMessage || isTranslating}
-                        class="shrink-0 w-10 h-10 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground rounded-full flex items-center justify-center transition-all active:scale-95"
-                    >
-                        {#if sendingMessage || isTranslating}
-                            <div class="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin"></div>
-                        {:else}
-                            <SendIcon class="w-4 h-4" />
-                        {/if}
-                    </button>
-                </div>
-                {#if attachedMedia}
-                    <div class="mt-2 inline-flex items-center gap-2 px-2.5 py-1 rounded-md border border-border bg-muted/40 text-xs">
-                        <FileIcon class="w-3.5 h-3.5" />
-                        <span class="max-w-60 truncate">{attachedMedia.filename}</span>
-                        <button class="p-0.5 rounded hover:bg-muted transition-colors hover:scale-105" onclick={clearAttachedMedia} type="button" aria-label="Dosyayı kaldır" title="Dosyayı kaldır">
-                            <XIcon class="w-3.5 h-3.5" />
-                        </button>
-                    </div>
-                {/if}
-                <p class="text-[10px] text-muted-foreground mt-1.5 text-center">
-                    Enter ile gönder · Shift+Enter yeni satır · 1 kredi / mesaj{translationEnabled ? ` · Çeviri: ${translationLanguages.find(l => l.code === translationTargetLang)?.label ?? translationTargetLang}` : ''}
-                </p>
-            </div>
+                {#if editingMessageId}<div class="mb-2 flex items-start justify-between gap-3 rounded-xl border border-amber-300/60 bg-amber-50/60 px-3 py-2"><div class="min-w-0"><div class="text-[11px] font-semibold text-amber-700">Mesaj duzenleniyor</div><div class="text-xs text-amber-700/80">Yeni mesaj gitmez, mevcut mesaj guncellenir.</div></div><button class="shrink-0 rounded-md p-1 hover:bg-amber-100" type="button" onclick={clearEditingMessage}><XIcon class="w-4 h-4 text-amber-700" /></button></div>{/if}
+                {#if replyingTo}<div class="mb-2 flex items-start justify-between gap-3 rounded-xl border border-border bg-muted/35 px-3 py-2"><div class="min-w-0"><div class="text-[11px] font-semibold text-sky-700">{replyingTo.senderName || 'Mesaja cevap'}</div><div class="text-xs text-muted-foreground max-h-9 overflow-hidden whitespace-pre-wrap break-all">{replyingTo.body}</div></div><button class="shrink-0 rounded-md p-1 hover:bg-muted" type="button" onclick={clearReplyToMessage}><XIcon class="w-4 h-4 text-muted-foreground" /></button></div>{/if}
+                {#if attachedMedia && (isImageAttachment || isVideoAttachment || isPdfAttachment)}<div class="mb-2 inline-block rounded-lg border border-border bg-muted/30 p-1">{#if isImageAttachment}<img src={attachedMedia?.data || ''} alt={attachedMedia?.filename || 'Gorsel'} class="max-h-28 max-w-56 rounded-md object-cover" />{:else if isVideoAttachment}<video src={attachedMedia?.data || ''} class="max-h-28 max-w-56 rounded-md" controls preload="metadata"></video>{:else if isPdfAttachment}<button type="button" class="flex w-56 items-center gap-2 rounded-md border border-border/60 bg-background px-2.5 py-2 text-left hover:bg-muted/50 transition-colors" onclick={() => openMediaViewer(attachedMedia?.data || '', 'document', attachedMedia?.filename || 'PDF dosyası')}><div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border/60 bg-rose-50 text-[10px] font-bold tracking-wide text-rose-600">PDF</div><div class="min-w-0 flex-1"><p class="truncate text-xs font-medium">{attachedMedia?.filename || 'PDF dosyası'}</p><p class="text-[10px] text-muted-foreground">Dokunarak aç</p></div></button>{/if}</div>{/if}
+                <div class="flex items-end gap-2"><div class="flex-1 bg-muted/50 rounded-2xl border border-border px-4 py-2.5 flex items-end gap-2"><div class="relative group shrink-0"><button class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105" onclick={() => mediaInputEl?.click()} type="button"><PaperclipIcon class="w-4 h-4 text-muted-foreground" /></button><span class="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Dosya ekle</span></div>
+                <div class="relative group shrink-0"><button class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105" onclick={() => { isEmojiPickerOpen = !isEmojiPickerOpen; }} type="button"><SmileIcon class="w-4 h-4 text-muted-foreground" /></button><span class="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Emoji</span>
+                {#if isEmojiPickerOpen}<div bind:this={emojiPickerEl} class="absolute bottom-full left-0 mb-2 w-64 rounded-xl border border-border bg-background shadow-xl p-3 z-30"><div class="text-[11px] font-semibold text-muted-foreground mb-2">Hizli ifadeler</div><div class="grid grid-cols-8 gap-1.5">{#each quickEmojis as emoji}<button class="h-7 w-7 rounded-md hover:bg-muted text-base leading-none flex items-center justify-center" type="button" onclick={async () => { await insertEmoji(emoji); }}>{emoji}</button>{/each}</div></div>{/if}</div><input bind:this={mediaInputEl} type="file" class="hidden" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt" onchange={handleMediaSelect} />
+                <div class="relative shrink-0">{#if translationEnabled}<button type="button" onclick={() => { langPickerOpen = !langPickerOpen; }} class="flex items-center gap-1 h-7 pl-2 pr-1.5 rounded-full border border-primary/40 bg-primary/10 text-primary text-xs font-medium hover:bg-primary/15 transition-all"><Languages class="w-3.5 h-3.5 shrink-0" /><span>{translationLanguages.find(l => l.code === translationTargetLang)?.label ?? translationTargetLang}</span><ChevronDownIcon class="w-3 h-3 shrink-0 opacity-60 transition-transform {langPickerOpen ? 'rotate-180' : ''}" /></button>{:else}<button type="button" onclick={() => { translationEnabled = true; langPickerOpen = true; translationPreview = ''; }} class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105 text-muted-foreground"><Languages class="w-4 h-4" /></button>{/if}{#if langPickerOpen}<div class="fixed inset-0 z-20" onclick={() => { langPickerOpen = false; }}></div><div class="absolute bottom-full left-0 mb-2 w-48 rounded-xl border border-border bg-background shadow-xl z-30 overflow-hidden"><div class="flex items-center justify-between px-3 py-2 border-b border-border"><span class="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Hedef dil</span><button type="button" class="text-[10px] text-destructive/70 hover:text-destructive px-1.5 py-0.5 rounded hover:bg-destructive/10" onclick={(e) => { e.stopPropagation(); translationEnabled = false; langPickerOpen = false; translationPreview = ''; }}>Kapat</button></div><div class="py-1 max-h-64 overflow-y-auto">{#each translationLanguages as lang}<button type="button" onclick={(e) => { e.stopPropagation(); translationTargetLang = lang.code; langPickerOpen = false; }} class="w-full flex items-center justify-between px-3 py-1.5 text-sm hover:bg-muted {translationTargetLang === lang.code ? 'text-primary font-medium bg-primary/5' : 'text-foreground'}">{lang.label}{#if translationTargetLang === lang.code}<CheckIcon class="w-3.5 h-3.5 text-primary" />{/if}</button>{/each}</div></div>{/if}</div><div class="flex-1 relative"><textarea bind:this={messageTextareaEl} bind:value={messageText} onkeydown={handleKeydown} onpaste={handleMessagePaste} placeholder="Mesaj yazın..." rows="1" onmouseup={() => { showFormattingToolbar = (messageTextareaEl?.selectionStart ?? 0) !== (messageTextareaEl?.selectionEnd ?? 0); }} onkeyup={() => { showFormattingToolbar = (messageTextareaEl?.selectionStart ?? 0) !== (messageTextareaEl?.selectionEnd ?? 0); }} onblur={() => { setTimeout(() => { showFormattingToolbar = false; }, 150); }} class="flex-1 w-full bg-transparent resize-none outline-none text-sm leading-relaxed placeholder:text-muted-foreground max-h-32" style="field-sizing: content;"></textarea>{#if translationEnabled && translationPreview && translationPreview !== messageText.trim()}<div class="mt-1.5 flex items-start gap-1.5 px-2 py-1.5 rounded-lg bg-primary/8 border border-primary/15 text-xs text-foreground/80 leading-snug"><Languages class="w-3 h-3 shrink-0 mt-0.5 text-primary/60" /><span>{translationPreview}</span></div>{/if}{#if showFormattingToolbar && messageTextareaEl && (messageTextareaEl.selectionStart ?? 0) !== (messageTextareaEl.selectionEnd ?? 0)}<div class="absolute -top-10 left-0 flex gap-1 bg-muted border border-border rounded-lg p-1 shadow-md"><button class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95" onmousedown={(e) => { e.preventDefault(); formatBold(); }} type="button"><BoldIcon class="w-4 h-4" /></button><button class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95" onmousedown={(e) => { e.preventDefault(); formatItalic(); }} type="button"><ItalicIcon class="w-4 h-4" /></button><button class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95" onmousedown={(e) => { e.preventDefault(); formatStrikethrough(); }} type="button"><StrikethroughIcon class="w-4 h-4" /></button><button class="p-1.5 rounded hover:bg-muted-foreground/20 transition-colors active:scale-95" onmousedown={(e) => { e.preventDefault(); formatCode(); }} type="button"><CodeIcon class="w-4 h-4" /></button></div>{/if}</div></div><button onclick={sendMessage} disabled={(!messageText.trim() && !attachedMedia) || sendingMessage || isTranslating} class="shrink-0 w-10 h-10 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground rounded-full flex items-center justify-center transition-all active:scale-95">{#if sendingMessage || isTranslating}<div class="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin"></div>{:else}<SendIcon class="w-4 h-4" />{/if}</button></div>{#if attachedMedia}<div class="mt-2 inline-flex items-center gap-2 px-2.5 py-1 rounded-md border border-border bg-muted/40 text-xs"><FileIcon class="w-3.5 h-3.5" /><span class="max-w-60 truncate">{attachedMedia.filename}</span><button class="p-0.5 rounded hover:bg-muted transition-colors hover:scale-105" onclick={clearAttachedMedia} type="button"><XIcon class="w-3.5 h-3.5" /></button></div>{/if}<p class="text-[10px] text-muted-foreground mt-1.5 text-center">Enter ile gönder · Shift+Enter yeni satır · 1 kredi / mesaj{translationEnabled ? ` · Çeviri: ${translationLanguages.find(l => l.code === translationTargetLang)?.label ?? translationTargetLang}` : ''}</p></div>
         {/if}
     </div>
 </div>
 
-{#if mediaViewerOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-        class="fixed inset-0 z-200 flex items-center justify-center bg-black/85 backdrop-blur-sm"
-        onclick={() => mediaViewerOpen = false}
-        role="dialog"
-        aria-modal="true"
-        tabindex="-1"
-    >
-        <button
-            class="absolute top-4 right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-white/20 text-white hover:bg-white/35 transition-colors"
-            onclick={() => mediaViewerOpen = false}
-            aria-label="Kapat"
-        >
-            <XIcon class="w-5 h-5" />
-        </button>
-        {#if mediaViewerType === 'image'}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div onclick={(e) => e.stopPropagation()}>
-                <img
-                    src={mediaViewerUrl}
-                    alt={mediaViewerFilename || 'Fotoğraf'}
-                    class="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl"
-                />
-            </div>
-        {:else}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div
-                class="relative flex flex-col bg-background rounded-xl shadow-2xl overflow-hidden"
-                style="width: min(92vw, 900px); height: min(90vh, 700px);"
-                onclick={(e) => e.stopPropagation()}
-            >
-                <div class="flex items-center justify-between px-4 py-2.5 border-b border-border bg-muted/50 shrink-0">
-                    <span class="text-sm font-medium truncate flex items-center gap-2 min-w-0">
-                        <FileIcon class="w-4 h-4 text-muted-foreground shrink-0" />
-                        <span class="truncate">{mediaViewerFilename || 'Belge'}</span>
-                    </span>
-                    <div class="flex items-center gap-3 shrink-0 ml-3">
-                        <a href={mediaViewerUrl} download={mediaViewerFilename || 'belge'} class="text-xs text-primary hover:underline">İndir</a>
-                        <button
-                            class="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted transition-colors"
-                            onclick={() => mediaViewerOpen = false}
-                            aria-label="Kapat"
-                        >
-                            <XIcon class="w-4 h-4" />
-                        </button>
-                    </div>
-                </div>
-                <iframe
-                    src={mediaViewerUrl}
-                    title={mediaViewerFilename || 'Belge'}
-                    class="flex-1 w-full border-none"
-                ></iframe>
-            </div>
-        {/if}
-    </div>
-{/if}
+{#if mediaViewerOpen}<div class="fixed inset-0 z-200 flex items-center justify-center bg-black/85 backdrop-blur-sm" onclick={() => mediaViewerOpen = false} role="dialog" aria-modal="true" tabindex="-1"><button class="absolute top-4 right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-white/20 text-white hover:bg-white/35 transition-colors" onclick={() => mediaViewerOpen = false}><XIcon class="w-5 h-5" /></button>{#if mediaViewerType === 'image'}<div onclick={(e) => e.stopPropagation()}><img src={mediaViewerUrl} alt={mediaViewerFilename || 'Fotoğraf'} class="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl" /></div>{:else}<div class="relative flex flex-col bg-background rounded-xl shadow-2xl overflow-hidden" style="width: min(92vw, 900px); height: min(90vh, 700px);" onclick={(e) => e.stopPropagation()}><div class="flex items-center justify-between px-4 py-2.5 border-b border-border bg-muted/50 shrink-0"><span class="text-sm font-medium truncate flex items-center gap-2 min-w-0"><FileIcon class="w-4 h-4 text-muted-foreground shrink-0" /><span class="truncate">{mediaViewerFilename || 'Belge'}</span></span><div class="flex items-center gap-3 shrink-0 ml-3"><a href={mediaViewerUrl} download={mediaViewerFilename || 'belge'} class="text-xs text-primary hover:underline">İndir</a><button class="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted transition-colors" onclick={() => mediaViewerOpen = false}><XIcon class="w-4 h-4" /></button></div></div><iframe src={mediaViewerUrl} title={mediaViewerFilename || 'Belge'} class="flex-1 w-full border-none"></iframe></div>{/if}</div>{/if}
 
 <style>
-    .message-status {
-        display: inline-flex;
-        align-items: center;
-        line-height: 1;
-        vertical-align: middle;
-    }
-
-    .message-status-double {
-        display: inline-flex;
-        align-items: center;
-    }
-
-    .message-status-double span + span {
-        margin-left: -0.34em;
-    }
+    .message-status { display: inline-flex; align-items: center; line-height: 1; vertical-align: middle; }
+    .message-status-double { display: inline-flex; align-items: center; }
+    .message-status-double span + span { margin-left: -0.34em; }
+    .typing-dot { width: 6px; height: 6px; background: #8696a0; border-radius: 50%; animation: typingAnimation 1.4s infinite ease-in-out; }
+    .dark .typing-dot { background: #8696a0; }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typingAnimation { 0%, 60%, 100% { transform: translateY(0); opacity: 0.35; } 30% { transform: translateY(-5px); opacity: 0.9; } }
 </style>

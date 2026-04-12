@@ -11,8 +11,7 @@ export const load = async ({ locals }) => {
     const purchaseHistory = await db.select()
         .from(purchases)
         .where(eq(purchases.userId, locals.user.id))
-        .orderBy(desc(purchases.createdAt))
-        .all();
+        .orderBy(desc(purchases.createdAt));
     
     return {
         purchases: purchaseHistory

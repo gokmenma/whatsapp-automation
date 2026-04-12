@@ -16,13 +16,19 @@ function sseData(event: string, payload: unknown) {
 export const GET: RequestHandler = async ({ url, locals }) => {
     if (!locals.user) throw error(401, 'Unauthorized');
 
-    const accountId = String(url.searchParams.get('accountId') || '').trim();
+    const accountId = url.searchParams.get('accountId');
     if (!accountId) throw error(400, 'accountId gerekli');
 
-    const account = await db.select().from(accounts)
-        .where(eq(accounts.id, accountId))
-        .get();
-    if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
+    const accountRes = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
+    const account = accountRes[0];
+    if (!account) throw error(404, 'Hesap bulunamadı');
+
+    // Verify account belongs to user (Admins/Superadmins can see all non-private accounts)
+    const isAdminOrSuper = locals.user.role === 'superadmin' || locals.user.role === 'admin';
+    const isOwner = String(account.userId) === String(locals.user.id);
+    const canAccess = isOwner || (isAdminOrSuper && !account.isPrivate);
+
+    if (!canAccess) throw error(403, 'Erişim reddedildi');
 
     const textEncoder = encoder();
     let pollId: ReturnType<typeof setInterval> | null = null;
@@ -38,9 +44,9 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 
             const sendSnapshotIfChanged = async () => {
                 try {
-                    const row = await db.get(sql`
+                    const [rows]: any = await db.execute(sql`
                         SELECT
-                            COALESCE(MAX(timestamp), 0) AS max_ts,
+                            MAX(COALESCE(edited_at, timestamp)) AS max_update,
                             COUNT(*) AS total_count,
                             SUM(
                                 CASE
@@ -49,19 +55,26 @@ export const GET: RequestHandler = async ({ url, locals }) => {
                                     THEN 1
                                     ELSE 0
                                 END
-                            ) AS unread_count
+                            ) AS unread_count,
+                            SUM(COALESCE(CHAR_LENGTH(reaction), 0)) AS reaction_sum
                         FROM messages
                         WHERE account_id = ${accountId}
-                    `) as any;
+                    `);
+                    const row = (rows as any[])[0];
 
-                    const maxTs = Number(row?.max_ts || 0);
+                    const rawMaxUpdate = row?.max_update;
+                    const maxUpdate = rawMaxUpdate instanceof Date 
+                        ? rawMaxUpdate.getTime() 
+                        : (rawMaxUpdate ? new Date(rawMaxUpdate).getTime() : 0);
+                    
                     const totalCount = Number(row?.total_count || 0);
                     const unreadCount = Number(row?.unread_count || 0);
-                    const fingerprint = `${maxTs}|${totalCount}|${unreadCount}`;
+                    const reactionSum = Number(row?.reaction_sum || 0);
+                    const fingerprint = `${maxUpdate}|${totalCount}|${unreadCount}|${reactionSum}`;
 
                     if (fingerprint !== lastFingerprint) {
                         lastFingerprint = fingerprint;
-                        pushEvent('messages', { maxTs, totalCount, unreadCount, fingerprint, accountId });
+                        pushEvent('messages', { maxUpdate, totalCount, unreadCount, fingerprint, accountId });
                     }
                 } catch (e: any) {
                     pushEvent('error', { message: String(e?.message || 'stream-error') });
@@ -73,7 +86,7 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 
             pollId = setInterval(() => {
                 void sendSnapshotIfChanged();
-            }, 1500);
+            }, 5000);
 
             keepAliveId = setInterval(() => {
                 controller.enqueue(textEncoder.encode(': keepalive\n\n'));

@@ -6,7 +6,8 @@ import { eq } from 'drizzle-orm';
 export const GET = async ({ locals }) => {
     if (!locals.user) return json({ error: 'Unauthorized' }, { status: 401 });
 
-    let settings = await db.select().from(userSettings).where(eq(userSettings.userId, locals.user.id)).get();
+    const settingsResult = await db.select().from(userSettings).where(eq(userSettings.userId, locals.user.id)).limit(1);
+    let settings = settingsResult[0];
 
     if (!settings) {
         // Create default settings if not exists
@@ -22,6 +23,7 @@ export const GET = async ({ locals }) => {
             useClosingVariations: true,
             rejectMessageCheckEnabled: false,
             rejectKeywords: 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum',
+            banProtectionEnabled: true,
         };
         await db.insert(userSettings).values(newSettings);
         settings = newSettings;
@@ -62,7 +64,8 @@ export const POST = async ({ request, locals }) => {
     }
 
     // Check if settings already exist
-    const existing = await db.select().from(userSettings).where(eq(userSettings.userId, locals.user.id)).get();
+    const existingResult = await db.select().from(userSettings).where(eq(userSettings.userId, locals.user.id)).limit(1);
+    const existing = existingResult[0];
 
     if (existing) {
         await db.update(userSettings)

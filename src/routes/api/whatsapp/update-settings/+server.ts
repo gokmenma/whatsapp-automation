@@ -10,17 +10,18 @@ export const POST = async ({ request, locals }) => {
     
     if (isDefault) {
         // Clear default for all other accounts of this user
+        const userIdStr = String(locals.user.id);
         await db.update(accounts)
             .set({ isDefault: false })
-            .where(eq(accounts.userId, locals.user.id));
+            .where(eq(accounts.userId, userIdStr));
     }
 
-    const result = await db.update(accounts)
+    const userIdNum = Number(locals.user.id);
+    const [updateResult]: any = await db.update(accounts)
         .set({ autoReply, autoReplyMessage, isDefault })
-        .where(and(eq(accounts.id, accountId), eq(accounts.userId, locals.user.id)))
-        .returning();
+        .where(and(eq(accounts.id, accountId), eq(accounts.userId, userIdNum)));
 
-    if (result.length === 0) {
+    if (updateResult.affectedRows === 0) {
         return json({ success: false, error: 'Hesap bulunamadı veya yetkiniz yok.' });
     }
 

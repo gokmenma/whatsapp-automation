@@ -4,14 +4,21 @@ import { getLogs } from '$lib/whatsapp';
 export const GET = async ({ locals }) => {
     if (!locals.user) return json({ error: 'Unauthorized' }, { status: 401 });
     
-    const { db } = await import('$lib/server/db');
-    const { users } = await import('$lib/server/db/schema');
+    const { remoteDb } = await import('$lib/server/db');
+    const { userCredits } = await import('$lib/server/db/remote-schema');
     const { eq } = await import('drizzle-orm');
     
-    const [user] = await db.select().from(users).where(eq(users.id, locals.user.id));
+    const userId = Number(locals.user.id);
+    let userBalance = 0;
+    try {
+        const [creditRow]: any = await remoteDb.select().from(userCredits).where(eq(userCredits.userId, userId)).limit(1);
+        userBalance = creditRow?.balance || 0;
+    } catch (e) {
+        console.error('Credits fetch error in logs API:', e);
+    }
     
     return json({ 
-        logs: await getLogs(),
-        credits: user?.credits || 0
+        logs: await getLogs(userId),
+        credits: userBalance
     });
 };

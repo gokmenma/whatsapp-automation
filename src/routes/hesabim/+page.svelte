@@ -173,7 +173,7 @@
 
     <!-- Kredi Satın Alma Modalı -->
     <Dialog.Root bind:open={openCredits}>
-        <Dialog.Content class="sm:max-w-[550px] p-0 overflow-hidden border-none bg-background">
+        <Dialog.Content class="sm:max-w-3xl p-0 overflow-hidden border-none bg-background">
             <div class="bg-primary p-6 text-primary-foreground relative overflow-hidden">
                 <div class="absolute right-[-20px] top-[-20px] opacity-10">
                     <Coins size={150} />
@@ -185,7 +185,7 @@
             </div>
             
             <div class="p-6">
-                <div class="grid grid-cols-2 gap-4">
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
                     {#each data.creditPackages as pkg}
                         <Card.Root class="relative group hover:border-primary transition-all duration-300 overflow-hidden">
                             {#if pkg.credits >= 500}

@@ -18,13 +18,16 @@ export const POST = async ({ request, locals }) => {
             return json({ success: false, error: 'accountId ve jid gerekli' }, { status: 400 });
         }
 
-        const account = await db
-            .select()
-            .from(accounts)
-            .where(and(eq(accounts.id, accountId), eq(accounts.userId, locals.user.id)))
-            .get();
+        const accountResult = await db.select().from(accounts)
+            .where(eq(accounts.id, accountId))
+            .limit(1);
+        const account = accountResult[0];
 
-        if (!account) {
+        const isAdminOrSuper = locals.user.role === 'superadmin' || locals.user.role === 'admin';
+        const isOwner = account && String(account.userId) === String(locals.user.id);
+        const canAccess = isOwner || (account && isAdminOrSuper && !account.isPrivate);
+
+        if (!account || !canAccess) {
             return json({ success: false, error: 'Erişim reddedildi' }, { status: 403 });
         }
 

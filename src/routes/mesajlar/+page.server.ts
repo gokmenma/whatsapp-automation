@@ -1,18 +1,21 @@
 import { redirect } from '@sveltejs/kit';
-import type { PageServerLoad } from './$types';
 import { db } from '$lib/server/db';
 import { accounts } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { getAllAccounts } from '$lib/whatsapp';
 
-export const load: PageServerLoad = async ({ locals }) => {
+export const load = async ({ locals }) => {
     if (!locals.user) throw redirect(303, '/login');
 
-    const userAccounts = await db.select().from(accounts).where(eq(accounts.userId, locals.user.id));
-    const accountsWithStatus = await getAllAccounts(userAccounts);
+    const userIdInt = Number(locals.user.id);
+    const dbAccountsResult = await db.select().from(accounts).where(eq(accounts.userId, userIdInt));
+    const liveAccounts = dbAccountsResult.length > 0 ? await getAllAccounts(dbAccountsResult) : [];
 
-    return {
-        accounts: accountsWithStatus,
-        user: locals.user
-    };
+    const hasReadyAccount = liveAccounts.some(acc => acc.status === 'ready');
+
+    if (!hasReadyAccount) {
+        throw redirect(303, '/hesaplar?error=need_active_account');
+    }
+
+    return {};
 };

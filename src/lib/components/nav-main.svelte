@@ -6,6 +6,7 @@
 
 	let {
 		items,
+        title = "Platform"
 	}: {
 		items: {
 			title: string;
@@ -19,6 +20,7 @@
 				url: string;
 			}[];
 		}[];
+        title?: string;
 	} = $props();
 
 	function isItemActive(url: string) {
@@ -37,7 +39,7 @@
 </script>
 
 <Sidebar.Group>
-	<Sidebar.GroupLabel>Platform</Sidebar.GroupLabel>
+	<Sidebar.GroupLabel>{title}</Sidebar.GroupLabel>
 	<Sidebar.Menu>
 		{#each items as item (item.title)}
 			{#if item.items && item.items.length > 0}

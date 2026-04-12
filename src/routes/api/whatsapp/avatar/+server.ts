@@ -15,9 +15,10 @@ export const GET = async ({ url, locals }) => {
         return json({ error: 'accountId ve jid gerekli' }, { status: 400 });
     }
 
-    const account = await db.select().from(accounts)
+    const accountResult = await db.select().from(accounts)
         .where(and(eq(accounts.id, accountId), eq(accounts.userId, locals.user.id)))
-        .get();
+        .limit(1);
+    const account = accountResult[0];
 
     if (!account) {
         return json({ error: 'Erisim reddedildi' }, { status: 403 });

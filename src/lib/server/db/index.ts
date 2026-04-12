@@ -1,106 +1,100 @@
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import Database from 'better-sqlite3';
+import { drizzle as drizzleMysql } from 'drizzle-orm/mysql2';
+import mysql from 'mysql2/promise';
 import * as schema from './schema';
-import path from 'path';
-import fs from 'fs';
+import * as remoteSchema from './remote-schema';
 
-let dbPath;
-if (process.env.USER_DATA_PATH) {
-    dbPath = path.join(process.env.USER_DATA_PATH, 'sqlite.db');
-    // Eğer veritabanı dosyası yoksa, ana dizinden kopyala (opsiyonel)
-    if (!fs.existsSync(dbPath) && fs.existsSync(path.resolve('sqlite.db'))) {
-        fs.copyFileSync(path.resolve('sqlite.db'), dbPath);
-    }
-} else {
-    dbPath = path.resolve('sqlite.db');
-}
+// --- MYSQL CONFIGURATION ---
+const mysqlPool = mysql.createPool({
+    host: process.env.MYSQL_HOST || 'localhost',
+    user: process.env.MYSQL_USER || 'root',
+    password: process.env.MYSQL_PASSWORD || '',
+    database: process.env.MYSQL_DATABASE || 'whatsapp_automation',
+    timezone: '+03:00',
+    charset: 'utf8mb4',
+    waitForConnections: true,
+    connectionLimit: 50,
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0
+});
 
-const sqlite = new Database(dbPath);
-sqlite.pragma('journal_mode = WAL');
+// Single database instance for everything
+export const db = drizzleMysql(mysqlPool, { schema, mode: 'default' });
+export const remoteDb = drizzleMysql(mysqlPool, { schema: remoteSchema, mode: 'default' });
 
-function ensureMessageColumns() {
-    const columns = sqlite.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
-    const names = new Set(columns.map((column) => column.name));
+let isInitialized = false;
 
-    const requiredColumns: Array<[string, string]> = [
-        ['sender_jid', 'ALTER TABLE messages ADD COLUMN sender_jid TEXT'],
-        ['sender_name', 'ALTER TABLE messages ADD COLUMN sender_name TEXT'],
-        ['quoted_msg_id', 'ALTER TABLE messages ADD COLUMN quoted_msg_id TEXT'],
-        ['quoted_msg_body', 'ALTER TABLE messages ADD COLUMN quoted_msg_body TEXT'],
-        ['reaction', 'ALTER TABLE messages ADD COLUMN reaction TEXT'],
-        ['edited_at', 'ALTER TABLE messages ADD COLUMN edited_at INTEGER'],
-        ['is_read', 'ALTER TABLE messages ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0']
-    ];
+async function initDb() {
+    if (isInitialized) return;
+    isInitialized = true;
 
-    for (const [name, statement] of requiredColumns) {
-        if (!names.has(name)) {
-            sqlite.exec(statement);
+    try {
+        console.log('MySQL Database checking schema...');
+        
+        // Use a faster way to check columns/indexes than running full ALTERs
+        // 1. Core tables
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, username VARCHAR(255) NOT NULL, password VARCHAR(255) NOT NULL, email VARCHAR(255) NOT NULL, role ENUM('superadmin', 'admin', 'user', 'qrcode_scanner') DEFAULT 'user', status ENUM('active', 'inactive') DEFAULT 'active', can_add_sources TINYINT(1) DEFAULT 1, account_limit INT DEFAULT 5, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, full_name VARCHAR(100), user_type ENUM('self_source', 'pool_source') DEFAULT 'self_source', last_login TIMESTAMP NULL, deleted TINYINT(1) DEFAULT 0)`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS role_permissions (id INT AUTO_INCREMENT PRIMARY KEY, role ENUM('superadmin', 'admin', 'user', 'qrcode_scanner') NOT NULL, resource VARCHAR(255) NOT NULL, can_access TINYINT(1) DEFAULT 1)`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS sessions (id VARCHAR(255) PRIMARY KEY, user_id INT NOT NULL, expires BIGINT NOT NULL)`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS subscription_packages (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, price INT NOT NULL, account_limit INT DEFAULT 1)`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS user_subscriptions (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, package_id INT NOT NULL, end_date DATETIME NOT NULL, status ENUM('active', 'expired', 'cancelled') DEFAULT 'active')`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS user_credits (user_id INT PRIMARY KEY, balance INT DEFAULT 0, updated_at DATETIME)`);
+        
+        // 2. WhatsApp Tables
+        await mysqlPool.query(`
+            CREATE TABLE IF NOT EXISTS accounts (
+                id VARCHAR(255) PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                user_id INT,
+                scanner_id INT,
+                created_at DATETIME NOT NULL,
+                auto_reply TINYINT(1) NOT NULL DEFAULT 0,
+                auto_reply_message TEXT NOT NULL,
+                is_default TINYINT(1) NOT NULL DEFAULT 0,
+                is_private TINYINT(1) NOT NULL DEFAULT 0,
+                sync_history TINYINT(1) NOT NULL DEFAULT 1
+            )
+        `);
+
+        await mysqlPool.query(`
+            CREATE TABLE IF NOT EXISTS messages (
+                id VARCHAR(255) PRIMARY KEY,
+                account_id VARCHAR(255) NOT NULL,
+                contact_jid VARCHAR(255) NOT NULL,
+                sender_jid VARCHAR(255),
+                sender_name VARCHAR(255),
+                from_me TINYINT(1) NOT NULL DEFAULT 0,
+                body TEXT NOT NULL,
+                media_type VARCHAR(50),
+                quoted_msg_id VARCHAR(255),
+                quoted_msg_body TEXT,
+                reaction TEXT,
+                edited_at DATETIME,
+                timestamp DATETIME NOT NULL,
+                status VARCHAR(50) NOT NULL DEFAULT 'sent',
+                is_read TINYINT(1) NOT NULL DEFAULT 0,
+                INDEX messages_account_contact_idx (account_id, contact_jid),
+                INDEX messages_account_id_idx (account_id),
+                INDEX messages_timestamp_idx (timestamp),
+                INDEX messages_unread_idx (account_id, from_me, is_read)
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+        `);
+
+        // Check for specific columns/indexes only if needed
+        // This is much faster than running the full CREATE TABLE or slow ALTERs every time
+        const [indices]: any = await mysqlPool.query("SHOW INDEX FROM messages WHERE Key_name = 'messages_unread_idx'");
+        if (indices.length === 0) {
+            console.log('Adding unread messages index...');
+            await mysqlPool.query("ALTER TABLE messages ADD INDEX messages_unread_idx (account_id, from_me, is_read)");
         }
+
+        console.log('MySQL Database initialized successfully.');
+
+    } catch (e) {
+        console.error('MySQL Init Error:', e);
     }
 }
 
-function ensureConversationPreferencesTable() {
-    sqlite.exec(`
-        CREATE TABLE IF NOT EXISTS conversation_preferences (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_id TEXT NOT NULL,
-            contact_key TEXT NOT NULL,
-            muted INTEGER NOT NULL DEFAULT 0,
-            archived INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-        )
-    `);
-    sqlite.exec(`
-        CREATE UNIQUE INDEX IF NOT EXISTS conversation_preferences_account_contact_unique_idx
-        ON conversation_preferences(account_id, contact_key)
-    `);
-}
+initDb();
 
-function ensureUserSettingsColumns() {
-    sqlite.exec(`
-        CREATE TABLE IF NOT EXISTS user_settings (
-            user_id TEXT PRIMARY KEY,
-            read_receipt INTEGER NOT NULL DEFAULT 1,
-            dark_mode INTEGER NOT NULL DEFAULT 1,
-            message_delay INTEGER NOT NULL DEFAULT 2000,
-            batch_size INTEGER NOT NULL DEFAULT 25,
-            batch_wait_minutes INTEGER NOT NULL DEFAULT 5,
-            use_greeting_variations INTEGER NOT NULL DEFAULT 1,
-            use_intro_variations INTEGER NOT NULL DEFAULT 1,
-            use_closing_variations INTEGER NOT NULL DEFAULT 1,
-            reject_message_check_enabled INTEGER NOT NULL DEFAULT 0,
-            reject_keywords TEXT NOT NULL DEFAULT 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum',
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-    `);
-
-    const columns = sqlite.prepare('PRAGMA table_info(user_settings)').all() as Array<{ name: string }>;
-    const names = new Set(columns.map((column) => column.name));
-
-    const requiredColumns: Array<[string, string]> = [
-        ['read_receipt', 'ALTER TABLE user_settings ADD COLUMN read_receipt INTEGER NOT NULL DEFAULT 1'],
-        ['dark_mode', 'ALTER TABLE user_settings ADD COLUMN dark_mode INTEGER NOT NULL DEFAULT 1'],
-        ['message_delay', 'ALTER TABLE user_settings ADD COLUMN message_delay INTEGER NOT NULL DEFAULT 2000'],
-        ['batch_size', 'ALTER TABLE user_settings ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 25'],
-        ['batch_wait_minutes', 'ALTER TABLE user_settings ADD COLUMN batch_wait_minutes INTEGER NOT NULL DEFAULT 5'],
-        ['use_greeting_variations', 'ALTER TABLE user_settings ADD COLUMN use_greeting_variations INTEGER NOT NULL DEFAULT 1'],
-        ['use_intro_variations', 'ALTER TABLE user_settings ADD COLUMN use_intro_variations INTEGER NOT NULL DEFAULT 1'],
-        ['use_closing_variations', 'ALTER TABLE user_settings ADD COLUMN use_closing_variations INTEGER NOT NULL DEFAULT 1'],
-        ['reject_message_check_enabled', 'ALTER TABLE user_settings ADD COLUMN reject_message_check_enabled INTEGER NOT NULL DEFAULT 0'],
-        ['reject_keywords', "ALTER TABLE user_settings ADD COLUMN reject_keywords TEXT NOT NULL DEFAULT 'mesaj red\\nred\\nmesaj ret\\nret\\nmesaj almak istemiyorum'"]
-    ];
-
-    for (const [name, statement] of requiredColumns) {
-        if (!names.has(name)) {
-            sqlite.exec(statement);
-        }
-    }
-}
-
-ensureMessageColumns();
-ensureConversationPreferencesTable();
-ensureUserSettingsColumns();
-
-export const db = drizzle(sqlite, { schema });
+export { mysqlPool };

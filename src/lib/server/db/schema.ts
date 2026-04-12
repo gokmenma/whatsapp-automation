@@ -1,138 +1,99 @@
-import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core';
+import { mysqlTable, varchar, text, int, timestamp, boolean, index, serial, datetime } from 'drizzle-orm/mysql-core';
 
-export const users = sqliteTable('users', {
-    id: text('id').primaryKey(),
-    name: text('name').notNull(),
-    email: text('email').notNull().unique(),
-    password: text('password').notNull(),
-    credits: integer('credits').notNull().default(30)
-});
-
-export const sessions = sqliteTable('sessions', {
-    id: text('id').primaryKey(),
-    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-    expires: integer('expires').notNull()
+// Local tables (formerly SQLite) for WhatsApp data and preferences - Now MySQL
+export const accounts = mysqlTable('accounts', {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    name: varchar('name', { length: 255 }).notNull(),
+    userId: varchar('user_id', { length: 255 }), // Linked to remote user ID
+    scannerId: int('scanner_id'), // Linked to remote user ID
+    createdAt: datetime('created_at', { mode: 'date' }).notNull(),
+    autoReply: boolean('auto_reply').notNull().default(false),
+    autoReplyMessage: text('auto_reply_message').notNull(),
+    isDefault: boolean('is_default').notNull().default(false),
+    isPrivate: boolean('is_private').notNull().default(false),
+    syncHistory: boolean('sync_history').notNull().default(true)
 }, (t) => ({
-    userIdIdx: index('sessions_user_id_idx').on(t.userId)
+    userIdIdx: index('accounts_user_id_idx').on(t.userId),
+    scannerIdIdx: index('accounts_scanner_id_idx').on(t.scannerId)
 }));
 
-export const accounts = sqliteTable('accounts', {
-    id: text('id').primaryKey(), // Truly unique safe ID
-    name: text('name').notNull(), // The display name
-    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-    autoReply: integer('auto_reply', { mode: 'boolean' }).notNull().default(false),
-    autoReplyMessage: text('auto_reply_message').notNull().default('Merhaba, şu an müsait değilim. En kısa sürede size geri dönüş yapacağım.'),
-    isDefault: integer('is_default', { mode: 'boolean' }).notNull().default(false)
-}, (t) => ({
-    userIdIdx: index('accounts_user_id_idx').on(t.userId)
-}));
-
-export const userSettings = sqliteTable('user_settings', {
-    userId: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
-    readReceipt: integer('read_receipt', { mode: 'boolean' }).notNull().default(true),
-    darkMode: integer('dark_mode', { mode: 'boolean' }).notNull().default(true),
-    messageDelay: integer('message_delay').notNull().default(2000), // Default 2 seconds
-    batchSize: integer('batch_size').notNull().default(25), // Random batch upper bound (20-300)
-    batchWaitMinutes: integer('batch_wait_minutes').notNull().default(5), // Random wait upper bound minutes (3-30)
-    useGreetingVariations: integer('use_greeting_variations', { mode: 'boolean' }).notNull().default(true),
-    useIntroVariations: integer('use_intro_variations', { mode: 'boolean' }).notNull().default(true),
-    useClosingVariations: integer('use_closing_variations', { mode: 'boolean' }).notNull().default(true),
-    rejectMessageCheckEnabled: integer('reject_message_check_enabled', { mode: 'boolean' }).notNull().default(false),
-    rejectKeywords: text('reject_keywords').notNull().default('mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum'),
+export const userSettings = mysqlTable('user_settings', {
+    userId: int('user_id').primaryKey(),
+    readReceipt: boolean('read_receipt').notNull().default(true),
+    darkMode: boolean('dark_mode').notNull().default(true),
+    messageDelay: int('message_delay').notNull().default(2000),
+    batchSize: int('batch_size').notNull().default(25),
+    batchWaitMinutes: int('batch_wait_minutes').notNull().default(5),
+    useGreetingVariations: boolean('use_greeting_variations').notNull().default(true),
+    useIntroVariations: boolean('use_intro_variations').notNull().default(true),
+    useClosingVariations: boolean('use_closing_variations').notNull().default(true),
+    rejectMessageCheckEnabled: boolean('reject_message_check_enabled').notNull().default(false),
+    rejectKeywords: text('reject_keywords').notNull(),
+    banProtectionEnabled: boolean('ban_protection_enabled').notNull().default(true),
 });
 
-export const autoReplyHistory = sqliteTable('auto_reply_history', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    accountId: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
-    contactNumber: text('contact_number').notNull(),
-    sentAt: integer('sent_at', { mode: 'timestamp' }).notNull()
+export const autoReplyHistory = mysqlTable('auto_reply_history', {
+    id: serial('id').primaryKey(),
+    accountId: varchar('account_id', { length: 255 }).notNull(),
+    contactNumber: varchar('contact_number', { length: 255 }).notNull(),
+    sentAt: datetime('sent_at', { mode: 'date' }).notNull()
 }, (t) => ({
     accountIdIdx: index('auto_reply_history_account_id_idx').on(t.accountId)
 }));
-export const creditPackages = sqliteTable('kredi_paketleri', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    name: text('ad').notNull(),
-    credits: integer('kredi').notNull(),
-    price: integer('fiyat').notNull(), // Amount in cents or Lira (I'll assume integer for price)
-    description: text('aciklama')
-});
 
-export const creditPurchases = sqliteTable('kredi_satin_alimlari', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-    packageId: integer('paket_id').references(() => creditPackages.id),
-    credits: integer('kredi').notNull(),
-    amount: integer('tutar').notNull(),
-    status: text('durum').notNull().default('completed'), // For simulation
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
-}, (t) => ({
-    userIdIdx: index('kredi_satin_alimlari_user_id_idx').on(t.userId)
-}));
-
-export const purchases = sqliteTable('purchases', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-    packageName: text('package_name').notNull(),
-    credits: integer('credits').notNull(),
-    amount: integer('amount').notNull(),
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
-}, (t) => ({
-    userIdIdx: index('purchases_user_id_idx').on(t.userId)
-}));
-
-export const logs = sqliteTable('logs', {
-    id: text('id').primaryKey(),
-    batchId: text('batch_id'),
-    accountId: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
-    recipient: text('recipient').notNull(),
-    status: text('status').notNull(), // 'success' or 'error'
+export const logs = mysqlTable('logs', {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    batchId: varchar('batch_id', { length: 255 }),
+    accountId: varchar('account_id', { length: 255 }).notNull(),
+    recipient: varchar('recipient', { length: 255 }).notNull(),
+    status: varchar('status', { length: 50 }).notNull(),
     message: text('message').notNull(),
     error: text('error'),
-    timestamp: integer('timestamp', { mode: 'timestamp' }).notNull()
+    timestamp: datetime('timestamp', { mode: 'date' }).notNull()
 }, (t) => ({
     accountIdIdx: index('logs_account_id_idx').on(t.accountId)
 }));
 
-export const messageTemplates = sqliteTable('message_templates', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-    name: text('name').notNull(),
+export const messageTemplates = mysqlTable('message_templates', {
+    id: serial('id').primaryKey(),
+    userId: int('user_id').notNull(),
+    name: varchar('name', { length: 255 }).notNull(),
     content: text('content').notNull(),
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
+    createdAt: datetime('created_at', { mode: 'date' }).notNull()
 }, (t) => ({
     userIdIdx: index('message_templates_user_id_idx').on(t.userId)
 }));
 
-export const messages = sqliteTable('messages', {
-    id: text('id').primaryKey(),
-    accountId: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
-    contactJid: text('contact_jid').notNull(),
-    senderJid: text('sender_jid'),
-    senderName: text('sender_name'),
-    fromMe: integer('from_me', { mode: 'boolean' }).notNull().default(false),
-    body: text('body').notNull().default(''),
-    mediaType: text('media_type'), // null | 'image' | 'video' | 'audio' | 'document'
-    quotedMsgId: text('quoted_msg_id'),
+export const messages = mysqlTable('messages', {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    accountId: varchar('account_id', { length: 255 }).notNull(),
+    contactJid: varchar('contact_jid', { length: 255 }).notNull(),
+    senderJid: varchar('sender_jid', { length: 255 }),
+    senderName: varchar('sender_name', { length: 255 }),
+    fromMe: boolean('from_me').notNull().default(false),
+    body: text('body').notNull(),
+    mediaType: varchar('media_type', { length: 50 }),
+    quotedMsgId: varchar('quoted_msg_id', { length: 255 }),
     quotedMsgBody: text('quoted_msg_body'),
     reaction: text('reaction'),
-    editedAt: integer('edited_at', { mode: 'timestamp' }),
-    timestamp: integer('timestamp', { mode: 'timestamp' }).notNull(),
-    status: text('status').notNull().default('sent'), // 'sent' | 'failed' | 'received'
-    isRead: integer('is_read', { mode: 'boolean' }).notNull().default(false)
+    editedAt: datetime('edited_at', { mode: 'date' }),
+    timestamp: datetime('timestamp', { mode: 'date' }).notNull(),
+    status: varchar('status', { length: 50 }).notNull().default('sent'),
+    isRead: boolean('is_read').notNull().default(false)
 }, (t) => ({
     accountContactIdx: index('messages_account_contact_idx').on(t.accountId, t.contactJid),
+    accountIdIdx: index('messages_account_id_idx').on(t.accountId),
     timestampIdx: index('messages_timestamp_idx').on(t.timestamp)
 }));
 
-export const conversationPreferences = sqliteTable('conversation_preferences', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    accountId: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
-    contactKey: text('contact_key').notNull(),
-    muted: integer('muted', { mode: 'boolean' }).notNull().default(false),
-    archived: integer('archived', { mode: 'boolean' }).notNull().default(false),
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull()
+export const conversationPreferences = mysqlTable('conversation_preferences', {
+    id: serial('id').primaryKey(),
+    accountId: varchar('account_id', { length: 255 }).notNull(),
+    contactKey: varchar('contact_key', { length: 255 }).notNull(),
+    muted: boolean('muted').notNull().default(false),
+    archived: boolean('archived').notNull().default(false),
+    createdAt: datetime('created_at', { mode: 'date' }).notNull(),
+    updatedAt: datetime('updated_at', { mode: 'date' }).notNull()
 }, (t) => ({
     accountContactKeyIdx: index('conversation_preferences_account_contact_idx').on(t.accountId, t.contactKey)
 }));

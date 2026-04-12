@@ -9,23 +9,24 @@ export async function POST({ request, locals }) {
         return json({ success: false, error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { accountId } = await request.json();
+    const { accountId, syncHistory = false } = await request.json();
     if (!accountId) {
         return json({ success: false, error: 'accountId gerekli' }, { status: 400 });
     }
 
     try {
-        const account = await db
+        const accountResult = await db
             .select()
             .from(accounts)
             .where(and(eq(accounts.id, accountId), eq(accounts.userId, locals.user.id)))
-            .get();
+            .limit(1);
+        const account = accountResult[0];
 
         if (!account) {
             return json({ success: false, error: 'Hesap bulunamadı veya yetkiniz yok' }, { status: 404 });
         }
 
-        const result = await resyncWhatsAppAccount(accountId);
+        const result = await resyncWhatsAppAccount(accountId, syncHistory);
 
         return json({
             success: true,

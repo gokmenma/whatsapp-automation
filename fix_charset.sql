@@ -1,0 +1,10 @@
+SET NAMES utf8mb4;
+UPDATE resources SET name='Kullanıcı Yönetimi' WHERE path='/admin/users';
+UPDATE resources SET name='Hesaplarım' WHERE path='/hesaplar';
+UPDATE resources SET name='Hesap Havuzu' WHERE path='/hesap-havuzu';
+UPDATE resources SET name='Mesajlar' WHERE path='/mesajlar';
+UPDATE resources SET name='Hızlı Mesaj Gönder' WHERE path='/mesaj-gonder';
+UPDATE resources SET name='Yetki Yönetimi' WHERE path='/admin/permissions';
+UPDATE resources SET name='Kredi İşlemleri' WHERE path='/admin/kredi-islemleri';
+UPDATE resources SET name='Mesaj Ayarları' WHERE path='/ayarlar';
+UPDATE resources SET name='Gönderim Raporları' WHERE path='/gonderim-raporlari';

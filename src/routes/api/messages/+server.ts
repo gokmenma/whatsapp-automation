@@ -10,10 +10,14 @@ let messagesConversationIndexEnsured = false;
 async function ensureMessagesConversationIndex() {
     if (messagesConversationIndexEnsured) return;
 
-    await db.run(sql`
-        CREATE INDEX IF NOT EXISTS messages_account_timestamp_idx
-        ON messages (account_id, timestamp DESC)
-    `);
+    try {
+        await db.execute(sql`
+            CREATE INDEX messages_account_timestamp_idx
+            ON messages (account_id, timestamp DESC)
+        `);
+    } catch (e) {
+        // Index might already exist
+    }
 
     messagesConversationIndexEnsured = true;
 }
@@ -30,25 +34,25 @@ function resolveDirectConversationNumber(accountId: string, jidOrNumber: string)
         return normalizeDirectKey(raw);
     }
 
-    const [, domain = ''] = raw.split('@');
-    const digits = normalizeDirectKey(raw);
-
-    // Keep plain phone JIDs strict to avoid accidental merges.
-    if ((domain === 's.whatsapp.net' || domain === 'c.us') && digits) {
-        return digits;
-    }
-
-    // Fallback to store-aware mapping only for lid-like or non-digit identities.
-    return getCanonicalContactNumber(accountId, raw) || digits;
+    // Always prefer canonical normalization to handle LID <-> Phone mapping
+    return getCanonicalContactNumber(accountId, raw) || normalizeDirectKey(raw);
 }
 
 function getConversationKey(accountId: string, jidOrNumber: string) {
     const raw = String(jidOrNumber || '').trim();
     if (!raw) return '';
     if (raw.endsWith('@g.us')) return raw;
+    
+    // Priority 1: Use canonical resolution (Phone <-> LID mapping)
+    const resolved = getCanonicalContactNumber(accountId, raw);
+    if (resolved && !resolved.startsWith('lid_')) return resolved;
+
+    // Priority 2: Standard phone digits
     const directDigits = normalizeDirectKey(raw);
     if (directDigits) return directDigits;
-    return getCanonicalContactNumber(accountId, raw);
+
+    // Priority 3: Final fallback
+    return resolved || raw;
 }
 
 // GET /api/messages?accountId=xxx  → list of conversations with latest message
@@ -59,14 +63,20 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 
     const accountId = url.searchParams.get('accountId');
     if (!accountId) throw error(400, 'accountId gerekli');
+    const resolvedAccountId = accountId;
 
-    // Verify account belongs to user
-    const account = await db.select().from(accounts)
-        .where(eq(accounts.id, accountId))
-        .get();
-    if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
+    // Fetch account details
+    const accountResult = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
+    const account = accountResult[0];
 
-    const preferenceRows = await db.all(sql`
+    // Verify account belongs to user (Admins/Superadmins can see all non-private accounts)
+    const isAdminOrSuper = locals.user.role === 'superadmin' || locals.user.role === 'admin';
+    const isOwner = String(account.userId) === String(locals.user.id);
+    const canAccess = isOwner || (isAdminOrSuper && !account.isPrivate);
+
+    if (!account || !canAccess) throw error(403, 'Erişim reddedildi');
+
+    const [preferenceRows]: any = await db.execute(sql`
         SELECT
             contact_key,
             muted,
@@ -90,28 +100,29 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         .replace(/\D/g, '');
 
     // One CTE query: returns 1 row per conversation with unread counts & preview.
-    // Much faster than fetching raw message rows and aggregating in JS.
-    const rows = await db.all(sql`
+    // Much faster than fetching raw message rows and aggregating in 
+    const [rows]: any = await db.execute(sql`
         WITH base AS (
             SELECT
+                id,
                 contact_jid,
-                sender_name,
-                body,
                 from_me,
+                body,
                 media_type,
                 timestamp,
                 status,
-                ROW_NUMBER() OVER (PARTITION BY contact_jid ORDER BY timestamp DESC) AS rn
+                sender_jid,
+                quoted_msg_id,
+                quoted_msg_body,
+                reaction,
+                sender_name,
+                edited_at,
+                is_read,
+                ROW_NUMBER() OVER (PARTITION BY contact_jid ORDER BY timestamp DESC) as rn
             FROM messages
             WHERE account_id = ${accountId}
               AND contact_jid NOT LIKE '%@newsletter'
               AND contact_jid NOT LIKE '%@broadcast'
-              AND contact_jid NOT LIKE '120363%@s.whatsapp.net'
-              AND (
-                  (body IS NOT NULL AND body != '')
-                  OR media_type IS NOT NULL
-                  OR status IN ('deleted_me', 'deleted_everyone')
-              )
         ),
         unread AS (
             SELECT
@@ -127,12 +138,7 @@ export const GET: RequestHandler = async ({ url, locals }) => {
               AND from_me = 0
               AND contact_jid NOT LIKE '%@newsletter'
               AND contact_jid NOT LIKE '%@broadcast'
-              AND contact_jid NOT LIKE '120363%@s.whatsapp.net'
               AND status NOT IN ('read', 'played', 'deleted_me', 'deleted_everyone')
-              AND (
-                  (body IS NOT NULL AND body != '')
-                  OR media_type IS NOT NULL
-              )
         )
         SELECT
             b.contact_jid,
@@ -154,7 +160,13 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         ) uc ON b.contact_jid = uc.contact_jid
         LEFT JOIN (SELECT * FROM unread WHERE rn = 1) lu ON b.contact_jid = lu.contact_jid
         ORDER BY b.timestamp DESC
+        LIMIT 300
     `);
+
+    // console.log(`[MessagesAPI] Found ${rows.length} base conversations for account ${accountId}`);
+    // if (rows.length === 0) {
+    //     console.warn(`[MessagesAPI] No conversations found in DB for accountId=${accountId}`);
+    // }
 
     const byCanonical = new Map<string, any>();
     const directNumberCache = new Map<string, string>();
@@ -174,7 +186,7 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         if (isGroup) return jid.split('@')[0];
         const cached = directNumberCache.get(jid);
         if (cached !== undefined) return cached;
-        const resolved = resolveDirectConversationNumber(accountId, jid);
+        const resolved = resolveDirectConversationNumber(resolvedAccountId, jid) || '';
         directNumberCache.set(jid, resolved);
         return resolved;
     }
@@ -184,8 +196,8 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         const cached = conversationNameCache.get(key);
         if (cached !== undefined) return cached;
         const resolved = isGroup
-            ? getContactName(accountId, jid)
-            : (getContactName(accountId, jid) || getContactName(accountId, `${number}@s.whatsapp.net`));
+            ? (getContactName(resolvedAccountId, jid) || '')
+            : (getContactName(resolvedAccountId, jid) || getContactName(resolvedAccountId, `${number}@s.whatsapp.net`) || '');
         conversationNameCache.set(key, resolved);
         return resolved;
     }
@@ -193,10 +205,14 @@ export const GET: RequestHandler = async ({ url, locals }) => {
     // Each row is already the latest message for its conversation — O(conversations) not O(messages)
     for (const row of rows as any[]) {
         const jid = String(row.contact_jid || '');
+        if (!jid) continue;
+
         const isGroup = jid.endsWith('@g.us');
         const number = resolveNumberForJid(jid, isGroup);
-        if (!number) continue;
-        if (!isGroup && selfNumber && number === selfNumber) continue;
+        if (!number) {
+            console.warn(`[MessagesAPI] Could not resolve number for JID: ${jid}`);
+            continue;
+        }
 
         const rowBody = String(row.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
         // Catch zero-width-space ghost rows that SQL couldn't filter
@@ -214,20 +230,44 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         const upBody = String(row.up_body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
         const unreadPreviewText = buildPreviewText(upBody, String(row.up_sender || ''), isGroup, false);
 
+        const rawTs = row.timestamp;
+        let lastMessageAt: number;
+        if (rawTs instanceof Date) {
+            lastMessageAt = Math.floor(rawTs.getTime() / 1000);
+        } else if (typeof rawTs === 'number') {
+            lastMessageAt = rawTs > 1e12 ? Math.floor(rawTs / 1000) : rawTs;
+        } else if (rawTs && !isNaN(Date.parse(String(rawTs)))) {
+            lastMessageAt = Math.floor(new Date(String(rawTs)).getTime() / 1000);
+        } else {
+            lastMessageAt = Math.floor(Date.now() / 1000);
+        }
+
+        const upRawTs = row.up_timestamp;
+        let unreadPreviewAt: number;
+        if (upRawTs instanceof Date) {
+            unreadPreviewAt = Math.floor(upRawTs.getTime() / 1000);
+        } else if (typeof upRawTs === 'number') {
+            unreadPreviewAt = upRawTs > 1e12 ? Math.floor(upRawTs / 1000) : (Number(upRawTs) || 0);
+        } else if (upRawTs && !isNaN(Date.parse(String(upRawTs)))) {
+            unreadPreviewAt = Math.floor(new Date(String(upRawTs)).getTime() / 1000);
+        } else {
+            unreadPreviewAt = 0;
+        }
+
         byCanonical.set(conversationKey, {
-            contactJid: isGroup ? jid : `${number}@s.whatsapp.net`,
+            contactJid: jid,
             name: resolvedName,
             number,
             lastMessage: lastMessage || rowBody,
             lastMessageFromMe: Boolean(row.from_me),
             lastMessageStatus: String(row.status || ''),
             lastMessageMediaType: row.media_type,
-            lastMessageAt: row.timestamp,
+            lastMessageAt,
             unreadPreview: unreadPreviewText,
             unreadPreviewFromMe: false,
             unreadPreviewStatus: String(row.up_status || ''),
             unreadPreviewMediaType: row.up_media_type || null,
-            unreadPreviewAt: row.up_timestamp || null,
+            unreadPreviewAt,
             unreadCount: Number(row.unread_count || 0),
             muted: Boolean(prefs?.muted),
             archived: Boolean(prefs?.archived)
@@ -248,15 +288,20 @@ export const PATCH: RequestHandler = async ({ request, locals }) => {
     if (!accountId || !contactJid) throw error(400, 'accountId ve contactJid gerekli');
     if (muted === undefined && archived === undefined) throw error(400, 'Güncellenecek en az bir tercih gerekli');
 
-    const account = await db.select().from(accounts)
-        .where(eq(accounts.id, String(accountId)))
-        .get();
-    if (!account || account.userId !== locals.user.id) throw error(403, 'Erişim reddedildi');
+    // Fetch account details
+    const accountResult = await db.select().from(accounts).where(eq(accounts.id, String(accountId))).limit(1);
+    const account = accountResult[0];
+
+    const isAdminOrSuper = locals.user.role === 'superadmin' || locals.user.role === 'admin';
+    const isOwner = String(account?.userId) === String(locals.user.id);
+    const canAccess = isOwner || (isAdminOrSuper && !account?.isPrivate);
+
+    if (!account || !canAccess) throw error(403, 'Erişim reddedildi');
 
     const contactKey = getConversationKey(String(accountId), String(contactJid));
     if (!contactKey) throw error(400, 'Konuşma anahtarı çözümlenemedi');
 
-    const existingRows = await db.all(sql`
+    const [existingRows]: any = await db.execute(sql`
         SELECT
             id,
             muted,
@@ -273,15 +318,15 @@ export const PATCH: RequestHandler = async ({ request, locals }) => {
     const now = Math.floor(Date.now() / 1000);
 
     if (existing) {
-        await db.run(sql`
+        await db.execute(sql`
             UPDATE conversation_preferences
             SET muted = ${nextMuted ? 1 : 0},
                 archived = ${nextArchived ? 1 : 0},
-                updated_at = ${now}
+                updated_at = FROM_UNIXTIME(${now})
             WHERE id = ${Number(existing.id)}
         `);
     } else {
-        await db.run(sql`
+        await db.execute(sql`
             INSERT INTO conversation_preferences (
                 account_id,
                 contact_key,
@@ -295,8 +340,8 @@ export const PATCH: RequestHandler = async ({ request, locals }) => {
                 ${contactKey},
                 ${nextMuted ? 1 : 0},
                 ${nextArchived ? 1 : 0},
-                ${now},
-                ${now}
+                FROM_UNIXTIME(${now}),
+                FROM_UNIXTIME(${now})
             )
         `);
     }

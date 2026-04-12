@@ -2,7 +2,8 @@ import { json } from '@sveltejs/kit';
 import { stopWhatsApp } from '$lib/whatsapp';
 import { db } from '$lib/server/db';
 import { accounts } from '$lib/server/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, or } from 'drizzle-orm';
+import { hasPermission } from '$lib/server/permissions';
 
 export async function POST({ request, locals }) {
     if (!locals.user) {
@@ -16,16 +17,22 @@ export async function POST({ request, locals }) {
     }
 
     try {
-        // 1. Verify account ownership
-        const account = await db.select().from(accounts).where(
-            and(
-                eq(accounts.userId, locals.user.id),
-                eq(accounts.id, accountId)
-            )
-        ).get();
+        // Check if user is the owner OR has pool_stop permission
+        const canStopPool = await hasPermission(locals.user, 'action:pool_stop');
+        
+        const accountResult = await db.select().from(accounts).where(
+            eq(accounts.id, accountId)
+        ).limit(1);
+        const account = accountResult[0];
 
         if (!account) {
-            return json({ success: false, error: 'Hesap bulunamadı veya yetkiniz yok.' }, { status: 404 });
+            return json({ success: false, error: 'Hesap bulunamadı.' }, { status: 404 });
+        }
+
+        const isOwner = String(account.userId) === String(locals.user.id);
+        
+        if (!isOwner && !canStopPool) {
+            return json({ success: false, error: 'Hesabı durdurma yetkiniz yok.' }, { status: 403 });
         }
 
         // 2. Stop the WhatsApp client session (keeps data for quick restart)

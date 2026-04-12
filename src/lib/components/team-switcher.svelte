@@ -1,5 +1,6 @@
 <script lang="ts">
-	import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
+	import { page } from '$app/state';
+import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import { useSidebar } from "$lib/components/ui/sidebar/index.js";
 	import ChevronsUpDownIcon from "@lucide/svelte/icons/chevrons-up-down";
@@ -17,7 +18,7 @@
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	let { accounts = [], teams = [] }: { accounts?: any[]; teams?: any[] } = $props();
 	const sidebar = useSidebar();
-	const availableAccounts = $derived(accounts.length > 0 ? accounts : teams);
+	const availableAccounts = $derived(accounts.length > 0 ? accounts.filter((a: any) => a.userId) : teams);
 	let switchingAccountId = $state('');
 	let optimisticActiveAccountId = $state('');
 	let uiActiveAccountId = $state('');
@@ -42,7 +43,10 @@
 
 		if (window.location.pathname.startsWith('/mesajlar')) {
 			const fromUrl = new URLSearchParams(window.location.search).get('account');
-			if (fromUrl) uiActiveAccountId = fromUrl;
+			if (fromUrl) {
+				uiActiveAccountId = fromUrl;
+				window.localStorage.setItem('activeUiAccountId', fromUrl);
+			}
 		}
 
 		const onAccountSelected = (event: Event) => {
@@ -58,6 +62,13 @@
 	});
 
 	$effect(() => {
+		const fromUrl = page.url.searchParams.get('account');
+		if (fromUrl && fromUrl !== uiActiveAccountId) {
+			uiActiveAccountId = fromUrl;
+		}
+	});
+
+	$effect(() => {
 		if (!optimisticActiveAccountId) return;
 		const synced = availableAccounts.some((a: any) => a.id === optimisticActiveAccountId && a.isDefault);
 		if (synced) {
@@ -67,15 +78,20 @@
 	});
 
 	async function selectAccount(acc: any) {
-		if (acc.isDefault || switchingAccountId) return;
-		const previousAccountId = String(activeAccount?.id || '').trim();
-		optimisticActiveAccountId = acc.id;
-		uiActiveAccountId = acc.id;
-		switchingAccountId = acc.id;
+		const targetId = String(acc.id || '').trim();
+		const currentActiveId = String(activeAccount?.id || '').trim();
+		
+		if (targetId === currentActiveId || switchingAccountId) return;
+		
+		const previousAccountId = currentActiveId;
+		uiActiveAccountId = targetId;
+		optimisticActiveAccountId = targetId;
+		switchingAccountId = targetId;
+		
 		if (typeof window !== 'undefined') {
-			window.localStorage.setItem('activeUiAccountId', acc.id);
+			window.localStorage.setItem('activeUiAccountId', targetId);
 			window.dispatchEvent(new CustomEvent('account:selected', {
-				detail: { accountId: acc.id }
+				detail: { accountId: targetId }
 			}));
 		}
 		
@@ -88,7 +104,13 @@
 			const data = await res.json();
 			if (data.success) {
 				toast.success(`${acc.name} varsayılan olarak ayarlandı.`);
-				await invalidateAll(); // Refresh data from server
+				if (window.location.pathname.startsWith('/mesajlar')) {
+					const url = new URL(window.location.href);
+					url.searchParams.set('account', acc.id);
+					await goto(url.toString(), { keepFocus: true, invalidateAll: true });
+				} else {
+					await invalidateAll();
+				}
 				switchingAccountId = '';
 				optimisticActiveAccountId = '';
 			} else {
@@ -163,32 +185,58 @@
 				side={sidebar.isMobile ? "bottom" : "right"}
 				sideOffset={4}
 			>
-				<DropdownMenu.Label class="text-muted-foreground text-xs uppercase tracking-widest font-bold px-2 py-1.5">Hesaplar</DropdownMenu.Label>
-				{#each availableAccounts as acc, index (acc.id)}
+                {#if availableAccounts.some(a => a.status === 'ready')}
+				    <DropdownMenu.Label class="text-primary text-[10px] uppercase tracking-widest font-black px-2 py-1 bg-primary/5 mb-1.5 flex items-center gap-1.5">
+                        <div class="h-1.5 w-1.5 rounded-full bg-primary animate-pulse"></div>
+                        Aktif Hesaplar
+                    </DropdownMenu.Label>
+                    {#each availableAccounts.filter(a => a.status === 'ready') as acc, index (acc.id)}
+                        <DropdownMenu.Item onSelect={() => selectAccount(acc)} disabled={Boolean(switchingAccountId)} class="gap-3 p-2 cursor-pointer transition-colors hover:bg-primary/5 disabled:opacity-60 disabled:cursor-not-allowed">
+                            <div class="flex size-7 items-center justify-center rounded-md border bg-muted group-hover:border-primary/50 font-extrabold text-xs">
+                                {acc.name.charAt(0)}
+                            </div>
+                            <div class="flex flex-col flex-1">
+                                <div class="flex items-center gap-2">
+                                    <span class="font-bold text-sm">{acc.name}</span>
+                                    {#if acc.unreadCount > 0}
+                                        <span class="bg-primary text-primary-foreground text-[10px] px-1.5 py-0.5 rounded-full font-black min-w-[1.2rem] text-center shadow-sm">
+                                            {acc.unreadCount > 99 ? '99+' : acc.unreadCount}
+                                        </span>
+                                    {/if}
+                                </div>
+                            </div>
+                            {#if switchingAccountId === acc.id}
+                                <div class="w-4 h-4 border-2 border-primary/70 border-t-transparent rounded-full animate-spin"></div>
+                            {:else if acc.isDefault}
+                                <div class="w-1.5 h-1.5 rounded-full bg-primary ring-4 ring-primary/10"></div>
+                            {/if}
+                        </DropdownMenu.Item>
+                    {/each}
+                    <DropdownMenu.Separator />
+                {/if}
+
+                <DropdownMenu.Label class="text-muted-foreground text-[10px] uppercase tracking-widest font-bold px-2 py-1.5">Tüm Hesaplar</DropdownMenu.Label>
+				{#each availableAccounts.filter(a => a.status !== 'ready') as acc, index (acc.id)}
 					<DropdownMenu.Item onSelect={() => selectAccount(acc)} disabled={Boolean(switchingAccountId)} class="gap-3 p-2 cursor-pointer transition-colors hover:bg-primary/5 disabled:opacity-60 disabled:cursor-not-allowed">
 						<div class="flex size-7 items-center justify-center rounded-md border bg-muted group-hover:border-primary/50 font-bold text-xs">
 							{acc.name.charAt(0)}
 						</div>
-						<div class="flex flex-col flex-1">
+						<div class="flex flex-col flex-1 opacity-70">
 							<div class="flex items-center gap-2">
 								<span class="font-bold text-sm">{acc.name}</span>
-								{#if acc.unreadCount > 0}
-									<span class="bg-primary text-primary-foreground text-[10px] px-1.5 py-0.5 rounded-full font-black min-w-[1.2rem] text-center shadow-sm">
-										{acc.unreadCount > 99 ? '99+' : acc.unreadCount}
-									</span>
-								{/if}
 							</div>
 							<span class="text-[10px] text-muted-foreground">ID: {acc.id.substring(0, 8)}...</span>
 						</div>
 						{#if switchingAccountId === acc.id}
 							<div class="w-4 h-4 border-2 border-primary/70 border-t-transparent rounded-full animate-spin"></div>
 						{:else if acc.isDefault}
-							<div class="w-1.5 h-1.5 rounded-full bg-primary ring-4 ring-primary/10"></div>
+							<div class="w-1.5 h-1.5 rounded-full bg-primary ring-4 ring-primary/10 opacity-50"></div>
 						{/if}
-						<DropdownMenu.Shortcut class="text-[10px]">⌘{index + 1}</DropdownMenu.Shortcut>
 					</DropdownMenu.Item>
 				{:else}
-                    <div class="p-4 text-xs text-muted-foreground italic text-center">Hesap bulunamadı</div>
+                    {#if !availableAccounts.some(a => a.status === 'ready')}
+                        <div class="p-4 text-xs text-muted-foreground italic text-center">Hesap bulunamadı</div>
+                    {/if}
 				{/each}
 				<DropdownMenu.Separator />
 				<DropdownMenu.Item class="gap-2 p-2 cursor-pointer" onSelect={() => goto('/hesaplar')}>
