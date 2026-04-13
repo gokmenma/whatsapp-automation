@@ -35,6 +35,7 @@
     import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
     import ChevronUpIcon from '@lucide/svelte/icons/chevron-up';
     import CheckIcon from '@lucide/svelte/icons/check';
+    import RefreshCcw from '@lucide/svelte/icons/refresh-ccw';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as Dialog from '$lib/components/ui/dialog';
     import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
@@ -208,20 +209,35 @@
         String(attachedMedia?.filename || '').toLowerCase().endsWith('.pdf')
     ));
 
-    function resolvePreferredAccountId(accounts: any[], currentId: any = '') {
+    function resolvePreferredAccountId(accountList: any[], currentId: any = '') {
         const idStr = String(currentId || '').trim();
-        if (!accounts || accounts.length === 0) return '';
+        if (!accountList || accountList.length === 0) return '';
 
-        const current = accounts.find((a: any) => String(a.id) === idStr);
-        if (current) return String(current.id);
+        // Priority 1: URL Parameter (most specific)
+        if (typeof window !== 'undefined') {
+            const urlAccount = new URL(window.location.href).searchParams.get('account');
+            if (urlAccount && accountList.some((a: any) => String(a.id) === urlAccount)) return urlAccount;
+        }
 
-        const firstReady = accounts.find((a: any) => a.status === 'ready');
-        if (firstReady) return String(firstReady.id);
+        // Priority 2: localStorage (user's last choice)
+        if (typeof window !== 'undefined') {
+            const stored = window.localStorage.getItem('activeUiAccountId');
+            if (stored && accountList.some((a: any) => String(a.id) === stored)) return stored;
+        }
 
-        const defaultAccount = accounts.find((a: any) => a.isDefault);
+        // Priority 3: Keep current if valid
+        const current = accountList.find((a: any) => String(a.id) === idStr);
+        if (current) return idStr;
+
+        // Priority 4: Default account from DB
+        const defaultAccount = accountList.find((a: any) => a.isDefault);
         if (defaultAccount) return String(defaultAccount.id);
 
-        return String(accounts[0]?.id || '');
+        // Priority 5: First ready account
+        const firstReady = accountList.find((a: any) => a.status === 'ready');
+        if (firstReady) return String(firstReady.id);
+
+        return String(accountList[0]?.id || '');
     }
 
     // Derived
@@ -610,11 +626,9 @@
 
     // Load messages for selected contact
     async function scrollMessagesToBottom(behavior: ScrollBehavior = 'auto') {
-        // With newest on top, we probably want to scroll to the top instead,
-        // or just skip auto-scrolling to bottom on initial load.
         await tick();
         if (messagesContainerEl) {
-            messagesContainerEl.scrollTo({ top: 0, behavior });
+            messagesContainerEl.scrollTo({ top: messagesContainerEl.scrollHeight, behavior });
         }
     }
 
@@ -650,7 +664,7 @@
                     });
 
                 if (changed) {
-                    messages = incoming;
+                    messages = [...incoming].reverse();
                     prefetchIncomingMessageLinkPreviews(incoming);
                     // Load avatars for group sender JIDs
                     if (isGroupJid(selectedContact?.jid)) {
@@ -662,7 +676,8 @@
                 if (selectedContact?.jid) {
                     conversations = conversations.map((conv) => {
                         if (conv.contactJid !== selectedContact?.jid) return conv;
-                        const latest = incoming[incoming.length - 1];
+                        // Find the truly latest message (highest timestamp)
+                        const latest = [...incoming].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
                         if (!latest) {
                             return { ...conv, unreadCount: 0 };
                         }
@@ -696,7 +711,7 @@
         if (!selectedContact || !selectedAccountId || loadingMoreMessages || !hasMoreMessages || messages.length === 0) return;
         
         loadingMoreMessages = true;
-        const oldestTs = messages[messages.length - 1].timestamp;
+        const oldestTs = messages[0].timestamp;
         const jid = encodeURIComponent(selectedContact.jid);
         
         try {
@@ -707,8 +722,15 @@
                 hasMoreMessages = !!d.hasMore;
                 
                 if (older.length > 0) {
-                    messages = [...messages, ...older];
+                    const oldScrollHeight = messagesContainerEl?.scrollHeight || 0;
+                    messages = [...[...older].reverse(), ...messages];
                     prefetchIncomingMessageLinkPreviews(older);
+
+                    await tick();
+                    if (messagesContainerEl) {
+                        const newScrollHeight = messagesContainerEl.scrollHeight;
+                        messagesContainerEl.scrollTop = newScrollHeight - oldScrollHeight;
+                    }
                     
                     if (isGroupJid(selectedContact?.jid)) {
                         const senderJids = new Set<string>(older.map((m: any) => String(m?.senderJid || m?.sender_jid || '').trim()).filter((j: string) => j.length > 0));
@@ -1608,9 +1630,9 @@
     }
 
     function statusTickClass(status: string | null | undefined) {
-        if (status === 'read' || status === 'played') return 'text-sky-500';
+        if (status === 'read' || status === 'played') return 'text-[#53bdeb]';
         if (status === 'failed') return 'text-destructive';
-        return 'text-muted-foreground';
+        return 'text-muted-foreground/60';
     }
 
     function isDoubleTickStatus(status: string | null | undefined) {
@@ -1886,7 +1908,7 @@
 
     // Control polling based on selectedContact and messages state
     $effect(() => {
-        if (selectedContact && messages.length > 0) {
+        if (selectedContact) {
             startPolling();
         } else {
             stopPolling();
@@ -2128,14 +2150,19 @@
         const activeAccountId = nextAccountId;
         void (async () => {
             await loadConversations(activeAccountId);
-            if (selectedAccountId === activeAccountId) {
+            if (activeAccountId === selectedAccountId) {
                 startConversationsStream(activeAccountId, { skipInitialSnapshot: true });
+                
+                // Handling initial conversation selection
                 if (pendingInitialContactJid) {
-                    const conv = conversations.find((c) => c.contactJid === pendingInitialContactJid);
+                    const conv = conversations.find((c) => String(c.contactJid) === pendingInitialContactJid);
                     if (conv) {
                         pendingInitialContactJid = '';
                         await selectConversation(conv);
                     }
+                } else if (!selectedContact && conversations.length > 0) {
+                    // Task 2: Default to the first conversation if none is selected
+                    await selectConversation(conversations[0]);
                 }
             }
         })();
@@ -2308,7 +2335,7 @@
                     {@const typingPreview = getTypingPreview(String(conv.contactJid || ''))}
                     <button class="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors text-left border-b border-border/50 cursor-pointer {selectionMode && isSelected ? 'bg-primary/8 border-l-2 border-l-primary' : ''} {(!selectionMode && isActive) ? 'bg-primary/10 border-l-2 border-l-primary' : ''}" onclick={() => selectConversation(conv)} oncontextmenu={(e) => handleConvContextMenu(e, conv)}>{#if selectionMode}<div class="shrink-0 w-5 h-5 rounded-md border flex items-center justify-center text-[11px] font-bold {isSelected ? 'bg-primary text-primary-foreground border-primary' : 'border-muted-foreground/50 text-transparent'}">✓</div>{/if}
                         {#if avatarUrls[conv.contactJid]}<img src={avatarUrls[conv.contactJid] || ''} alt={conv.name} class="shrink-0 w-10 h-10 rounded-full object-cover" onerror={() => clearAvatarUrl(conv.contactJid)} />{:else}<div class="shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-semibold" style="background-color: {avatarColor(conv.name)};">{getInitials(conv.name)}</div>{/if}
-                        <div class="flex-1 min-w-0"><div class="flex items-baseline justify-between gap-1"><div class="flex items-center gap-2 min-w-0"><span class="font-medium text-sm truncate">{conv.name}</span>{#if conv.muted}<span class="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Sessizde</span>{/if}</div><span class="text-xs shrink-0 {unreadCount > 0 ? 'text-emerald-600 font-semibold' : 'text-muted-foreground'}">{formatConvTime(conv.lastMessageAt)}</span></div><div class="flex items-center gap-2 mt-0.5"><div class="flex items-center gap-1 min-w-0 flex-1">{#if previewFromMe}<span class={"message-status text-xs " + statusTickClass(previewStatus)} aria-hidden="true">{#if isDoubleTickStatus(previewStatus)}<span class="message-status-double"><span>✓</span><span>✓</span></span>{:else if isFailedStatus(previewStatus)}!{:else}✓{/if}</span>{/if}<span class="text-xs truncate {typingPreview ? 'text-emerald-600 font-medium' : (unreadCount > 0 ? 'text-emerald-600 font-medium' : 'text-muted-foreground')}">{#if typingPreview}{typingPreview}{:else}{previewMediaType ? mediaIcon(previewMediaType) : previewText}{/if}</span></div>{#if unreadCount > 0}<span class="shrink-0 inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[11px] font-semibold text-white">{unreadCount > 99 ? '99+' : unreadCount}</span>{/if}</div></div>
+                        <div class="flex-1 min-w-0"><div class="flex items-baseline justify-between gap-1"><div class="flex items-center gap-2 min-w-0"><span class="font-medium text-sm truncate">{conv.name}</span>{#if conv.muted}<span class="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Sessizde</span>{/if}</div><span class="text-xs shrink-0 {unreadCount > 0 ? 'text-emerald-600 font-semibold' : 'text-muted-foreground'}">{formatConvTime(conv.lastMessageAt)}</span></div><div class="flex items-center gap-2 mt-0.5">                                                <div class="flex items-center gap-1 min-w-0 flex-1">{#if previewFromMe}<span class={statusTickClass(previewStatus)} aria-hidden="true">{#if isDoubleTickStatus(previewStatus)}<svg viewBox="0 0 18 11" width="16" height="10" class="shrink-0" fill="currentColor"><path d="M17.394 1.48a.72.72 0 0 0-1.018 0l-8.508 8.508L4.31 6.43a.72.72 0 1 0-1.018 1.018l4.066 4.066a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Zm-4.99 0a.72.72 0 0 0-1.018 0l-7.9 7.9-2.066-2.066a.72.72 0 0 0-1.018 1.018l2.574 2.574a.72.72 0 0 0 1.018 0l8.41-8.41a.72.72 0 0 0 0-1.016Z"></path></svg>{:else if isFailedStatus(previewStatus)}!{:else}<svg viewBox="0 0 16 11" width="14" height="10" class="shrink-0" fill="currentColor"><path d="M15.01 1.48a.72.72 0 0 0-1.018 0L5.484 10.003l-4.06-4.06a.72.72 0 1 0-1.018 1.018l4.06 4.06a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Z"></path></svg>{/if}</span>{/if}<span class="text-xs truncate {typingPreview ? 'text-emerald-600 font-medium' : (unreadCount > 0 ? 'text-emerald-600 font-medium' : 'text-muted-foreground')}">{#if typingPreview}{typingPreview}{:else}{previewMediaType ? mediaIcon(previewMediaType) : previewText}{/if}</span></div>{#if unreadCount > 0}<span class="shrink-0 inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[11px] font-semibold text-white">{unreadCount > 99 ? '99+' : unreadCount}</span>{/if}</div></div>
                     </button>
                 {/each}
             </div>
@@ -2339,7 +2366,7 @@
         {#if !selectedContact}
             <div class="flex flex-1 flex-col items-center justify-center gap-4 text-center p-8"><div class="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center"><MessageSquareIcon class="w-10 h-10 text-primary/60" /></div><div><p class="text-lg font-semibold">WhatsApp Mesajları</p><p class="text-sm text-muted-foreground mt-1">Sol taraftan bir konuşma seçin</p></div></div>
         {:else}
-            <div class="flex items-center gap-3 px-4 py-3 border-b border-border bg-muted/30 text-left hover:bg-muted/45 transition-colors" onclick={openContactInfo}><button class="md:hidden p-1 rounded-md hover:bg-muted" onclick={(e) => { e.stopPropagation(); clearSelectedConversation(); }}><ArrowLeftIcon class="w-5 h-5" /></button>{#if selectedContact?.jid && avatarUrls[selectedContact.jid]}<img src={avatarUrls[selectedContact.jid] || ''} alt={selectedContact.name} class="w-9 h-9 rounded-full object-cover shrink-0" onerror={() => clearAvatarUrl(selectedContact?.jid || '')} />{:else}<div class="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-semibold shrink-0" style="background-color: {avatarColor(selectedContact.name)};">{getInitials(selectedContact.name)}</div>{/if}<div class="flex-1 min-w-0"><p class="font-semibold text-sm truncate">{selectedContact.name}</p><p class="text-xs {typingIndicatorText && typingIndicatorChatJid === selectedContact.jid ? 'text-emerald-600 font-medium' : 'text-muted-foreground'}">{#if typingIndicatorText && typingIndicatorChatJid === selectedContact.jid}{typingIndicatorText}{:else}+{selectedContact.number}{/if}</p></div></div>
+            <div class="flex items-center gap-3 px-4 py-3 border-b border-border bg-muted/30 text-left hover:bg-muted/45 transition-colors" onclick={openContactInfo}><button class="md:hidden p-1 rounded-md hover:bg-muted" onclick={(e) => { e.stopPropagation(); clearSelectedConversation(); }}><ArrowLeftIcon class="w-5 h-5" /></button>{#if selectedContact?.jid && avatarUrls[selectedContact.jid]}<img src={avatarUrls[selectedContact.jid] || ''} alt={selectedContact.name} class="w-9 h-9 rounded-full object-cover shrink-0" onerror={() => clearAvatarUrl(selectedContact?.jid || '')} />{:else}<div class="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-semibold shrink-0" style="background-color: {avatarColor(selectedContact.name)};">{getInitials(selectedContact.name)}</div>{/if}<div class="flex-1 min-w-0"><p class="font-semibold text-sm truncate">{selectedContact.name}</p><p class="text-xs {typingIndicatorText && typingIndicatorChatJid === selectedContact.jid ? 'text-emerald-600 font-medium' : 'text-muted-foreground'}">{#if typingIndicatorText && typingIndicatorChatJid === selectedContact.jid}{typingIndicatorText}{:else}+{selectedContact.number}{/if}</p></div><button class="p-2 rounded-full hover:bg-muted transition-colors text-muted-foreground hover:text-primary" onclick={(e) => { e.stopPropagation(); loadMessages(false); }} title="Yenile"><RefreshCcw class="w-4 h-4 {loadingMessages ? 'animate-spin' : ''}" /></button></div>
 
             <Dialog.Root bind:open={contactInfoOpen}><Dialog.Content class="sm:max-w-md bg-[#f7f7f6] border-[#e5e5e3]"><Dialog.Header><Dialog.Title>Kişi bilgisi</Dialog.Title></Dialog.Header>{#if selectedContact}{@const mediaCount = messages.filter((m) => Boolean(m?.mediaType || m?.media_type)).length}<div class="mt-1 space-y-3"><div class="rounded-2xl border border-border/60 bg-background px-4 py-4 text-center">{#if avatarUrls[selectedContact.jid]}<img src={avatarUrls[selectedContact.jid] || ''} alt={selectedContact.name} class="mx-auto h-24 w-24 rounded-full object-cover" onerror={() => clearAvatarUrl(selectedContact?.jid || '')} />{:else}<div class="mx-auto h-24 w-24 rounded-full flex items-center justify-center text-white text-2xl font-semibold" style="background-color: {avatarColor(selectedContact.name)};">{getInitials(selectedContact.name)}</div>{/if}<p class="mt-3 text-2xl font-semibold leading-tight">{selectedContact.name}</p><p class="mt-1 text-sm text-muted-foreground">+{selectedContact.number}</p><button class="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/50 px-4 py-2 text-sm hover:bg-muted" type="button"><SearchIcon class="w-4 h-4" /> Ara</button></div><div class="rounded-2xl border border-border/60 bg-background overflow-hidden"><div class="flex items-center justify-between px-4 py-3 text-sm"><div class="flex items-center gap-2"><FileIcon class="w-4 h-4 text-muted-foreground" /><span>Medya, bağlantı ve belgeler</span></div><span class="text-muted-foreground">{mediaCount}</span></div><div class="h-px bg-border/70"></div><div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground"><div class="flex items-center gap-2"><HeartIcon class="w-4 h-4" /><span>Yıldızlı mesajlar</span></div><span>0</span></div><div class="h-px bg-border/70"></div><div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground"><div class="flex items-center gap-2"><BellOffIcon class="w-4 h-4" /><span>Bildirimleri sessize al</span></div><span>Kapalı</span></div></div><div class="rounded-2xl border border-border/60 bg-background px-4 py-3 text-xs text-muted-foreground"><div class="font-medium text-foreground mb-1">WhatsApp JID</div><div class="break-all">{selectedContact.jid}</div></div></div>{/if}</Dialog.Content></Dialog.Root>
 
@@ -2350,7 +2377,20 @@
                 {:else if messages.length === 0}
                     <div class="flex flex-col items-center justify-center py-20 text-center opacity-40"><MessageSquareIcon class="w-12 h-12 mb-2" /><p class="text-sm">Bu konuşmada henüz mesaj yok</p></div>
                 {:else}
-                    <div class="flex flex-col">
+                        {#if hasMoreMessages}
+                            <div class="flex justify-center py-6 mb-6 border-b border-border/10">
+                                <button class="flex items-center gap-2 px-6 py-2 rounded-full bg-muted/40 hover:bg-muted text-xs font-semibold text-muted-foreground transition-all hover:scale-105 active:scale-95 border border-border/30 shadow-sm" onclick={loadMoreMessages} disabled={loadingMoreMessages}>
+                                    {#if loadingMoreMessages}
+                                        <div class="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+                                        <span>Yükleniyor...</span>
+                                    {:else}
+                                        <ArrowUpCircle class="w-4 h-4 text-primary/70" />
+                                        <span>Daha Eski Mesajları Yükle</span>
+                                    {/if}
+                                </button>
+                            </div>
+                        {/if}
+
                         {#each messages as msg, i (msg.id)}
                             {@const isFromMe = Boolean(msg.fromMe || msg.from_me)}
                             {@const isDeleted = (msg.status === 'deleted_me' || msg.status === 'deleted_everyone')}
@@ -2366,10 +2406,9 @@
                             <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} items-start gap-1.5 {isSameSender ? 'mt-0.5' : 'mt-4'}"><div class="relative flex flex-col max-w-[75%] z-10"><div class="flex flex-col text-[14.2px] shadow-sm {isDeleted ? 'bg-muted/70 opacity-80' : (isFromMe ? 'bg-[#d9fdd3] dark:bg-[#005c4b] text-[#111b21] dark:text-[#e9edef]' : 'bg-white dark:bg-[#202c33] text-[#111b21] dark:text-[#e9edef]')} rounded-lg {isFromMe ? 'rounded-tr-none' : 'rounded-lg rounded-tl-none'}" oncontextmenu={(e) => handleMessageContextMenu(e, msg)}>{#if !isFromMe && isGroupJid(selectedContact?.jid) && senderName}<div class="px-2.5 pt-1.5 pb-0 text-[12.5px] font-bold text-sky-600 dark:text-sky-400">{senderName}</div>{/if}
                                 {#if !isDeleted && mediaKind === 'image'}<div class="px-1 pt-1 pb-0"><button type="button" onclick={() => openMediaViewer(mediaUrl, 'image')} class="block w-full max-w-[320px] rounded-lg overflow-hidden"><img src={mediaUrl} alt="Fotoğraf" class="w-full h-auto max-h-[320px] object-cover" loading="lazy" /></button></div>{:else if !isDeleted && mediaKind === 'video'}<div class="px-1 pt-1 pb-0"><video controls class="w-full max-w-[320px] max-h-[320px] rounded-xl overflow-hidden block" preload="metadata"><source src={mediaUrl} /></video></div>{/if}
                                 {#if bodyText}<div class="px-2.5 py-1.5 whitespace-pre-wrap break-words leading-relaxed">{@html parseMessageFormatting(bodyText)}</div>{/if}
-                                <div class="flex items-center justify-end gap-1 px-2.5 pb-1 -mt-1 ml-auto"><span class="text-[10.5px] text-muted-foreground leading-none">{formatTime(msg.timestamp)}</span>{#if isFromMe}<span class={"text-xs leading-none " + statusTickClass(msg.status)}>{#if isDoubleTickStatus(msg.status)}✓✓{:else}✓{/if}</span>{/if}</div></div>{#if msg.reaction && msg.reaction !== '[]'}{@const reactions = parseMessageReactions(msg.reaction)}<div class="absolute -bottom-2 {isFromMe ? 'right-0' : 'left-0'} flex items-center gap-0.5 pointer-events-none">{#each reactions as r}<div class="px-1 py-0.5 rounded-full bg-background border border-border text-[10px] pointer-events-auto">{r.emoji}</div>{/each}</div>{/if}</div></div>
+                                <div class="flex items-center justify-end gap-1 px-2.5 pb-1.5 ml-auto"><span class="text-[10.5px] text-muted-foreground/70 leading-none">{formatTime(msg.timestamp)}</span>{#if isFromMe}<span class={"leading-none " + statusTickClass(msg.status)}>{#if isDoubleTickStatus(msg.status)}<svg viewBox="0 0 18 11" width="16" height="10" fill="currentColor" class="translate-y-0.5"><path d="M17.394 1.48a.72.72 0 0 0-1.018 0l-8.508 8.508L4.31 6.43a.72.72 0 1 0-1.018 1.018l4.066 4.066a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Zm-4.99 0a.72.72 0 0 0-1.018 0l-7.9 7.9-2.066-2.066a.72.72 0 0 0-1.018 1.018l2.574 2.574a.72.72 0 0 0 1.018 0l8.41-8.41a.72.72 0 0 0 0-1.016Z"></path></svg>{:else}<svg viewBox="0 0 16 11" width="14" height="10" fill="currentColor" class="translate-y-0.5"><path d="M15.01 1.48a.72.72 0 0 0-1.018 0L5.484 10.003l-4.06-4.06a.72.72 0 1 0-1.018 1.018l4.06 4.06a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Z"></path></svg>{/if}</span>{/if}</div></div>{#if msg.reaction && msg.reaction !== '[]'}{@const reactions = parseMessageReactions(msg.reaction)}<div class="absolute -bottom-2 {isFromMe ? 'right-0' : 'left-0'} flex items-center gap-0.5 pointer-events-none">{#each reactions as r}<div class="px-1 py-0.5 rounded-full bg-background border border-border text-[10px] pointer-events-auto">{r.emoji}</div>{/each}</div>{/if}</div></div>
                         {/each}
-                        {#if hasMoreMessages}<div class="flex justify-center py-6 mt-6 border-t border-border/10"><button class="flex items-center gap-2 px-6 py-2 rounded-full bg-muted/40 hover:bg-muted text-xs font-semibold text-muted-foreground transition-all hover:scale-105 active:scale-95 border border-border/30 shadow-sm" onclick={loadMoreMessages} disabled={loadingMoreMessages}>{#if loadingMoreMessages}<div class="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin"></div><span>Yükleniyor...</span>{:else}<ArrowUpCircle class="w-4 h-4 text-primary/70" /><span>Daha Eski Mesajları Yükle</span>{/if}</button></div>{/if}<div class="h-4" bind:this={messagesEndEl}></div>
-                    </div>
+                        <div class="h-4" bind:this={messagesEndEl}></div>
                 {/if}</div></div></div>
 
             {#if messageMenu}<div class="fixed min-w-40 bg-background border border-border rounded-lg shadow-lg py-1 z-50" style="left: {messageMenu.x}px; top: {messageMenu.y}px;" onmousedown={(e) => e.preventDefault()} role="menu" tabindex="0"><div class="flex items-center justify-around px-2 py-2 border-b border-border/50 bg-muted/20 gap-1">{#each ['👍', '❤️', '😂', '😮', '😢', '🙏'] as emoji}<button class="text-xl hover:scale-125 transition-transform p-1" onclick={() => sendReaction(messageMenu!.msg, emoji)}>{emoji}</button>{/each}</div><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={() => startReplyToMessage(messageMenu!.msg)}><CornerUpLeftIcon class="w-4 h-4" /> Cevapla</button><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={() => copyMessageText(messageMenu!.msg)}><FileIcon class="w-4 h-4" /> Kopyala</button><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={openMessageDeleteDialog}><TrashIcon class="w-4 h-4" /> Sil</button></div>{/if}

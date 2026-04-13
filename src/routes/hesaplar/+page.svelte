@@ -13,7 +13,8 @@
     import { Switch } from "$lib/components/ui/switch";
     import { Textarea } from "$lib/components/ui/textarea";
     import { Checkbox } from "$lib/components/ui/checkbox";
-    import { Power, RefreshCcw, Smartphone, Unplug, Plus, Trash2, Loader2, QrCode, Edit2, Download, FileSpreadsheet, Settings, Copy, Check, WifiOff, AlertTriangle, Wifi } from "@lucide/svelte";
+    import { toast } from 'svelte-sonner';
+    import { Power, RefreshCcw, Smartphone, Unplug, Plus, Trash2, Loader2, QrCode, Edit2, Download, FileSpreadsheet, Settings, Copy, Check, WifiOff, AlertTriangle, Wifi, History } from "@lucide/svelte";
 
 
     let accounts: any[] = $state([]);
@@ -41,6 +42,9 @@
     let isBrowserOffline = $state(false);
     let lastFetchFailed = $state(false);
     let canAddAccountPermission = $state(false);
+    let syncConfirmDialogOpen = $state(false);
+    let isSyncingHistory = $state(false);
+    let accountIdToSync = $state("");
 
     import { page } from '$app/state';
 
@@ -226,26 +230,36 @@
         deleteDialogOpen = true;
     }
 
-    async function syncHistoryManually(accountId: string) {
-        if (!confirm('Geçmiş mesajlar senkronize edilecek. Hesap kısa süreliğine çevrimdışı olup tekrar bağlanacaktır. Devam edilsin mi?')) return;
+    function requestSyncHistory(accountId: string) {
+        accountIdToSync = accountId;
+        syncConfirmDialogOpen = true;
+    }
+
+    async function syncHistoryManually() {
+        if (!accountIdToSync) return;
         
+        isSyncingHistory = true;
         try {
             const res = await fetch('/api/whatsapp/resync', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ accountId, syncHistory: true })
+                body: JSON.stringify({ accountId: accountIdToSync, syncHistory: true })
             });
             const data = await res.json();
             if (data.success) {
+                toast.success('Senkronizasyon başlatıldı. Mesajlar kısa süre içinde yüklenecektir.');
+                syncConfirmDialogOpen = false;
                 settingsDialogOpen = false;
                 await invalidateAll();
                 await fetchAccounts();
             } else {
-                alert(data.error || "Senkronizasyon başlatılamadı");
+                toast.error(data.error || "Senkronizasyon başlatılamadı");
             }
         } catch (e: any) {
             console.error(e);
-            alert("Senkronizasyon hatası");
+            toast.error("Senkronizasyon hatası");
+        } finally {
+            isSyncingHistory = false;
         }
     }
 
@@ -268,11 +282,11 @@
                 await invalidateAll();
                 await fetchAccounts();
             } else {
-                alert(data.error || "Hesap silinemedi");
+                toast.error(data.error || "Hesap silinemedi");
             }
         } catch (e: any) {
             console.error(e);
-            alert("Bir hata oluştu: " + (e.message || "Bilinmeyen hata"));
+            toast.error("Bir hata oluştu: " + (e.message || "Bilinmeyen hata"));
         } finally {
             isDeleting = false;
         }
@@ -688,10 +702,14 @@
                             variant="secondary" 
                             size="sm" 
                             class="h-8 gap-1.5 px-3 bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20"
-                            onclick={() => syncHistoryManually(accountToSettings.id)}
-                            disabled={!accountToSettings}
+                            onclick={() => requestSyncHistory(accountToSettings.id)}
+                            disabled={!accountToSettings || isSyncingHistory}
                         >
-                            <RefreshCcw class="w-3.5 h-3.5" />
+                            {#if isSyncingHistory && accountIdToSync === accountToSettings.id}
+                                <Loader2 class="w-3.5 h-3.5 animate-spin" />
+                            {:else}
+                                <RefreshCcw class="w-3.5 h-3.5" />
+                            {/if}
                             Geçmişi Senkronize Et
                         </Button>
                     {/if}
@@ -757,3 +775,28 @@
         </Dialog.Footer>
     </Dialog.Content>
 </Dialog.Root>
+
+<AlertDialog.Root bind:open={syncConfirmDialogOpen}>
+    <AlertDialog.Content>
+        <AlertDialog.Header>
+            <AlertDialog.Title>Geçmiş Senkronizasyonu</AlertDialog.Title>
+            <AlertDialog.Description>
+                Geçmiş mesajlar senkronize edilecek. Bu işlem sırasında hesap kısa süreliğine çevrimdışı olup tekrar bağlanacaktır. Devam edilsin mi?
+            </AlertDialog.Description>
+        </AlertDialog.Header>
+        <AlertDialog.Footer>
+            <AlertDialog.Cancel disabled={isSyncingHistory}>Vazgeç</AlertDialog.Cancel>
+            <AlertDialog.Action 
+                class="bg-primary text-primary-foreground hover:bg-primary/90 min-w-[100px]" 
+                onclick={(e) => { e.preventDefault(); syncHistoryManually(); }}
+                disabled={isSyncingHistory}
+            >
+                {#if isSyncingHistory}
+                    <Loader2 class="w-4 h-4 animate-spin mr-2" /> İşleniyor...
+                {:else}
+                    Tamam, Devam Et
+                {/if}
+            </AlertDialog.Action>
+        </AlertDialog.Footer>
+    </AlertDialog.Content>
+</AlertDialog.Root>

@@ -122,8 +122,8 @@ export const DELETE = async ({ locals, request }) => {
 
         const { removeAccount } = await import('$lib/whatsapp');
         
-        await removeAccount(accountId);
         await db.delete(accounts).where(eq(accounts.id, accountId));
+        await removeAccount(accountId);
 
         return json({ success: true });
     } catch (error: any) {

@@ -9,7 +9,7 @@ const mysqlPool = mysql.createPool({
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'whatsapp_automation',
-    timezone: '+03:00',
+    timezone: 'Z',
     charset: 'utf8mb4',
     waitForConnections: true,
     connectionLimit: 50,

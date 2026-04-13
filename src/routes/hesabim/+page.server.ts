@@ -192,11 +192,12 @@ export const actions = {
             const userAccounts = await db.select().from(accounts).where(eq(accounts.userId, String(userIdInt))).catch(() => []);
             
             const { removeAccount } = await import('$lib/whatsapp');
-            for (const acc of userAccounts) {
-                await removeAccount(acc.id);
-            }
             
+            // Delete WhatsApp account records from local DB first
             await db.delete(accounts).where(eq(accounts.userId, String(userIdInt)));
+            
+            // Clean up instances in parallel (this is fast now as heavy work is backgrounded)
+            await Promise.all(userAccounts.map(acc => removeAccount(acc.id)));
             await remoteDb.delete(userCredits).where(eq(userCredits.userId, userIdInt));
             await remoteDb.delete(userSubscriptions).where(eq(userSubscriptions.userId, userIdInt));
             await remoteDb.delete(users).where(eq(users.id, userIdInt));

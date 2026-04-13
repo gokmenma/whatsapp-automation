@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { accounts } from '$lib/server/db/schema';
 import { eq, sql } from 'drizzle-orm';
-import { getAccountStatus, getCanonicalContactNumber, getContactName } from '$lib/whatsapp';
+import { getAccountStatus, getCanonicalContactNumber, getContactName, normalizeDigits } from '$lib/whatsapp';
 
 let messagesConversationIndexEnsured = false;
 
@@ -22,20 +22,18 @@ async function ensureMessagesConversationIndex() {
     messagesConversationIndexEnsured = true;
 }
 
-function normalizeDirectKey(value: string) {
-    return String(value || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-}
+// Used library normalizeDigits
 
 function resolveDirectConversationNumber(accountId: string, jidOrNumber: string) {
     const raw = String(jidOrNumber || '').trim();
     if (!raw) return '';
 
     if (!raw.includes('@')) {
-        return normalizeDirectKey(raw);
+        return normalizeDigits(raw);
     }
 
     // Always prefer canonical normalization to handle LID <-> Phone mapping
-    return getCanonicalContactNumber(accountId, raw) || normalizeDirectKey(raw);
+    return getCanonicalContactNumber(accountId, raw) || normalizeDigits(raw);
 }
 
 function getConversationKey(accountId: string, jidOrNumber: string) {
@@ -48,7 +46,7 @@ function getConversationKey(accountId: string, jidOrNumber: string) {
     if (resolved && !resolved.startsWith('lid_')) return resolved;
 
     // Priority 2: Standard phone digits
-    const directDigits = normalizeDirectKey(raw);
+    const directDigits = normalizeDigits(raw);
     if (directDigits) return directDigits;
 
     // Priority 3: Final fallback
@@ -230,29 +228,9 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         const upBody = String(row.up_body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
         const unreadPreviewText = buildPreviewText(upBody, String(row.up_sender || ''), isGroup, false);
 
-        const rawTs = row.timestamp;
-        let lastMessageAt: number;
-        if (rawTs instanceof Date) {
-            lastMessageAt = Math.floor(rawTs.getTime() / 1000);
-        } else if (typeof rawTs === 'number') {
-            lastMessageAt = rawTs > 1e12 ? Math.floor(rawTs / 1000) : rawTs;
-        } else if (rawTs && !isNaN(Date.parse(String(rawTs)))) {
-            lastMessageAt = Math.floor(new Date(String(rawTs)).getTime() / 1000);
-        } else {
-            lastMessageAt = Math.floor(Date.now() / 1000);
-        }
+        const lastMessageAt = row.timestamp ? Math.floor(new Date(row.timestamp).getTime() / 1000) : Math.floor(Date.now() / 1000);
 
-        const upRawTs = row.up_timestamp;
-        let unreadPreviewAt: number;
-        if (upRawTs instanceof Date) {
-            unreadPreviewAt = Math.floor(upRawTs.getTime() / 1000);
-        } else if (typeof upRawTs === 'number') {
-            unreadPreviewAt = upRawTs > 1e12 ? Math.floor(upRawTs / 1000) : (Number(upRawTs) || 0);
-        } else if (upRawTs && !isNaN(Date.parse(String(upRawTs)))) {
-            unreadPreviewAt = Math.floor(new Date(String(upRawTs)).getTime() / 1000);
-        } else {
-            unreadPreviewAt = 0;
-        }
+        const unreadPreviewAt = row.up_timestamp ? Math.floor(new Date(row.up_timestamp).getTime() / 1000) : 0;
 
         byCanonical.set(conversationKey, {
             contactJid: jid,

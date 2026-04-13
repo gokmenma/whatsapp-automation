@@ -568,7 +568,7 @@ function extractMessageText(content: any) {
     if (!body && content?.documentMessage?.fileName) body = String(content.documentMessage.fileName).trim();
     if (!body && content?.audioMessage) body = '[Ses mesajı]';
     if (!body && content?.stickerMessage) body = '[Çıkartma]';
-    if (!body && (content?.imageMessage || content?.videoMessage)) body = '[Medya]';
+    if (!body && (content?.imageMessage || content?.videoMessage)) body = '';
     if (!body && content?.locationMessage) body = '[Konum]';
     if (!body && (content?.contactMessage || content?.contactsArrayMessage)) body = '[Kişi bilgisi]';
     if (!body && content?.pollCreationMessage) body = '[Anket]';
@@ -624,8 +624,10 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
         
         // If syncHistory was not explicitly passed (e.g. from auto-init), use the one from DB
         const dbAccount = rows[0];
-        // Note: We no longer auto-override to DB value here because we want 
-        // the function parameter to be the source of truth for the manual call.
+        if (syncHistory === false && Boolean(dbAccount.syncHistory) && !manualStops.has(accountId)) {
+            syncHistory = true;
+            console.log(`[${accountId}] Using syncHistory=true from database setting.`);
+        }
     } catch (dbErr) {
         console.error(`[${accountId}] Database check failed during initialization:`, dbErr);
         // We continue anyway to avoid locking out accounts during temporary DB hiccups
@@ -677,7 +679,19 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
         logger,
         browser: Browsers.macOS('Desktop'),
         syncFullHistory: syncHistory, // User preference
-        shouldSyncHistoryMessage: () => syncHistory, // User preference
+        shouldSyncHistoryMessage: (msg: proto.IWebMessageInfo) => {
+            if (!syncHistory) return false;
+            try {
+                const tsValue = Number(msg.messageTimestamp) || 0;
+                if (tsValue > 0) {
+                    const msgDate = new Date(tsValue * 1000);
+                    const limitDate = new Date();
+                    limitDate.setDate(limitDate.getDate() - 90); // Last 90 days
+                    return msgDate > limitDate;
+                }
+            } catch (e) {}
+            return true; // Default to sync if timestamp is missing/weird
+        },
         getMessage: async (key) => {
             return undefined; // We can add local message retrieval later if needed
         },
@@ -821,7 +835,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
             const digits = normalizeDigits(c.id);
             if (digits && !c.id.endsWith('@lid')) store!.numberToJid.set(digits, c.id);
             if (c.lid && c.id.endsWith('@s.whatsapp.net')) {
-                const lidId = String(c.lid).trim().toLowerCase();
+                const lidId = getLidKey(c.lid);
                 store!.lidToJid.set(lidId, c.id);
                 store!.jidToLid.set(c.id, lidId);
             }
@@ -871,6 +885,15 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                             forceUnread = true;
                             seenCounts.set(jid, seenSoFar + 1);
                         }
+                    }
+
+                    // Extra safety filter: Only store messages from last 3 days
+                    const tsValue = Number(msg.messageTimestamp) || 0;
+                    if (tsValue > 0) {
+                        const msgDate = new Date(tsValue * 1000);
+                    const limitDate = new Date();
+                    limitDate.setDate(limitDate.getDate() - 90);
+                    if (msgDate < limitDate) continue; 
                     }
 
                     await processAndStoreMessage(msg, true, forceUnread);
@@ -1512,7 +1535,12 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
             }
         }
 
-        if (!msg.message && !msg.stubType) return;
+        if (!msg.message && !msg.stubType) {
+            console.log(`[STORE] Skipping message without content: ${msg.key.id}`);
+            return;
+        }
+        
+        console.log(`[STORE] Processing message ${msg.key.id} from ${msg.key.remoteJid} (fromMe=${msg.key.fromMe})`);
 
         try {
             const upsertName = (targetJid?: string | null) => {
@@ -1753,7 +1781,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 const isLidJid = jidForSave.endsWith('@lid');
                 const isSuspiciousLength = canonicalDirectNumber.length > 13;
                 
-                if (!isGroupJid && (!canonicalDirectNumber || isSuspiciousLength || isLidJid)) {
+                if (!isHistory && !isGroupJid && (!canonicalDirectNumber || isSuspiciousLength || isLidJid)) {
                     try {
                         const lookupResults = await sock.onWhatsApp(jidForSave);
                         if (lookupResults && lookupResults.length > 0 && lookupResults[0].exists) {
@@ -1784,15 +1812,13 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                     .split(':')[0]
                     .replace(/\D/g, '');
 
-                if (!isGroupJid && selfNumber && canonicalDirectNumber === selfNumber) {
-                    return;
-                }
-
+                // Removed self-message skip logic to ensure all activity (even messages to self) is recorded.
                 const normalizedJid = isGroupJid
                     ? jidForSave
-                    : `${canonicalDirectNumber}@s.whatsapp.net`;
+                    : (canonicalDirectNumber ? `${canonicalDirectNumber}@s.whatsapp.net` : jidForSave);
 
-                if (!isGroupJid && !canonicalDirectNumber) {
+                if (!isGroupJid && !canonicalDirectNumber && !isLidJid) {
+                    console.log(`[STORE] Skipping message with NO canonical number for account=${accountId}, jid=${jidForSave}`);
                     return;
                 }
 
@@ -1906,6 +1932,9 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
     sock.ev.on('messages.upsert', async (m) => {
         const isNotify = m.type === 'notify';
         
+        if (m.messages.length > 0) {
+            console.log(`[UPSERT] Received ${m.messages.length} messages for account=${accountId}, type=${m.type}`);
+        }
         for (const msg of m.messages) {
             await processAndStoreMessage(msg, false);
 
@@ -2528,94 +2557,83 @@ export async function stopWhatsApp(accountId: string) {
 export async function removeAccount(accountId: string) {
     let client = clients.get(accountId);
     
-    // If client is not active in memory, but we have session files, 
-    // try to briefly connect just to logout (send revocation signal)
-    if (!client) {
-        const sessionPath = path.join(AUTH_PATH, `session-${accountId}`);
-        const sessionExists = fs.existsSync(sessionPath) && fs.readdirSync(sessionPath).length > 0;
-        
-        if (sessionExists) {
-            try {
-                console.log(`[${accountId}] Account is offline but session files exist. Starting temporary connection for logout...`);
-                await initializeWhatsApp(accountId);
-                
-                // Reduced wait for temporary connection (2 seconds total)
-                for (let i = 0; i < 4; i++) {
-                    await delay(500);
-                    client = clients.get(accountId);
-                    const s = statuses.get(accountId);
-                    if (s?.status === 'ready') {
-                        console.log(`[${accountId}] Temporary connection reached READY state.`);
-                        break;
-                    }
-                    if (s?.status === 'disconnected' && s.lastError?.includes('loggedOut')) {
-                        console.log(`[${accountId}] Account is already logged out according to servers.`);
-                        break;
-                    }
-                }
-            } catch (e) {
-                console.warn(`[${accountId}] Failed to initialize temporary connection for logout:`, e);
-            }
-        } else {
-            console.log(`[${accountId}] No session files found. No remote logout required.`);
-        }
-    }
-
+    // 1. Immediate memory cleanup so the app forgets this account ASAP
+    const status = statuses.get(accountId);
+    if (status) status.status = "disconnected";
+    
+    // If it's already running, we can trigger logout immediately
     if (client) {
         try {
-            const currentStatus = statuses.get(accountId)?.status;
-            console.log(`[${accountId}] Starting logout process. Current status: ${currentStatus}`);
-            
-            // If it's not ready yet but we just started it, wait a bit more for the socket to be stable
-            if (currentStatus !== 'ready' && currentStatus !== 'connecting') {
-                console.log(`[${accountId}] Waiting for socket to reach a logout-capable state...`);
-                for (let i = 0; i < 2; i++) {
-                    await delay(1000);
-                    const s = statuses.get(accountId)?.status;
-                    if (s === 'ready' || s === 'connecting') break;
+            console.log(`[${accountId}] Connected. Fast logout triggered.`);
+            // We don't await the full logout here to keep the UI snappy, 
+            // but we give it a tiny bit of time.
+            client.logout().catch(() => {});
+            await delay(500);
+        } catch {}
+    }
+
+    // Stop and release locks immediately so they don't block the background process or future re-adds
+    await stopWhatsApp(accountId);
+    statuses.delete(accountId);
+    releaseSessionLock(accountId);
+    pendingMessageStatuses.delete(accountId);
+    reconnectTimers.delete(accountId);
+
+    // 2. Background Task: Official Logout & Deep Cleanup
+    (async () => {
+        console.log(`[${accountId}] Background removal process started.`);
+        try {
+            // If it was offline, we must connect briefly to send the revocation signal (Logout)
+            // so the device is actually removed from the user's phone "Linked Devices" list.
+            if (!client) {
+                const sessionPath = path.join(AUTH_PATH, `session-${accountId}`);
+                const hasSession = fs.existsSync(sessionPath) && fs.readdirSync(sessionPath).length > 0;
+                
+                if (hasSession) {
+                    console.log(`[${accountId}] Background: Attempting stealthy connection for logout...`);
+                    try {
+                        // This will run in background; UI won't see it because account is gone from DB
+                        await initializeWhatsApp(accountId);
+                        
+                        // Wait for connection to reach a state where logout is possible
+                        for (let i = 0; i < 20; i++) {
+                            await delay(1000);
+                            const s = statuses.get(accountId);
+                            if (s?.status === 'ready') {
+                                const bgClient = clients.get(accountId);
+                                if (bgClient) {
+                                    console.log(`[${accountId}] Background: Sending official logout signal...`);
+                                    await bgClient.logout().catch(() => {});
+                                    await delay(2000); // Give it time to propagate
+                                }
+                                break;
+                            }
+                            if (s?.status === 'disconnected' && s.lastError?.includes('loggedOut')) {
+                                console.log(`[${accountId}] Background: Already logged out on server.`);
+                                break;
+                            }
+                        }
+                    } catch (err) {
+                        console.warn(`[${accountId}] Background logout attempt failed:`, err);
+                    } finally {
+                        await stopWhatsApp(accountId);
+                        statuses.delete(accountId);
+                    }
                 }
             }
 
-            console.log(`[${accountId}] Sending logout signal to WhatsApp...`);
-            // Increased timeout and added more wait
-            await Promise.race([
-                client.logout(),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Logout timed out')), 5000))
-            ]);
-            console.log(`[${accountId}] Logout command accepted by WhatsApp servers.`);
-            await delay(1000); // Wait for the 'close' event to propagate
-        } catch (e: any) {
-            console.warn(`[${accountId}] Logout operation failed or was ignored:`, e?.message || e);
-            // If logout fails, we still proceed to stop and delete, but the phone link might persist
-        }
-    }
-    
-    console.log(`[${accountId}] Stopping WhatsApp instance and clearing status.`);
-    await stopWhatsApp(accountId);
-    statuses.delete(accountId);
-    
-    // Release lock before starting deletions
-    releaseSessionLock(accountId);
-    await delay(100);
+            // 3. Deep Purge (Database & Files)
+            const { db } = await import('./server/db');
+            const { messages, logs, autoReplyHistory, conversationPreferences } = await import('./server/db/schema');
+            const { eq } = await import('drizzle-orm');
 
-    // Run deletions in parallel to maximize speed
-    await Promise.all([
-        // 1. Database Purge
-        (async () => {
-            try {
-                const { db } = await import('./server/db');
-                const { messages, logs, autoReplyHistory, conversationPreferences } = await import('./server/db/schema');
-                const { eq } = await import('drizzle-orm');
-                console.log(`[${accountId}] Purging database records...`);
-                await db.delete(messages).where(eq(messages.accountId, accountId));
-                await db.delete(logs).where(eq(logs.accountId, accountId));
-                await db.delete(autoReplyHistory).where(eq(autoReplyHistory.accountId, accountId));
-                await db.delete(conversationPreferences).where(eq(conversationPreferences.accountId, accountId));
-            } catch (e: any) { console.error(`[${accountId}] DB purge error:`, e.message); }
-        })(),
+            console.log(`[${accountId}] Background: Purging database records...`);
+            await db.delete(messages).where(eq(messages.accountId, accountId));
+            await db.delete(logs).where(eq(logs.accountId, accountId));
+            await db.delete(autoReplyHistory).where(eq(autoReplyHistory.accountId, accountId));
+            await db.delete(conversationPreferences).where(eq(conversationPreferences.accountId, accountId));
 
-        // 2. File Cleanup (Media + Sessions + Store)
-        (async () => {
+            console.log(`[${accountId}] Background: Cleaning up files...`);
             try {
                 const sessionPath = path.resolve(AUTH_PATH, `session-${accountId}`);
                 if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
@@ -2627,14 +2645,14 @@ export async function removeAccount(accountId: string) {
                 if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
 
                 const lockPath = getSessionLockPath(accountId);
-                if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
-            } catch (e: any) { console.error(`[${accountId}] File cleanup error:`, e.message); }
-        })()
-    ]);
+                if (fs.existsSync(lockPath)) try { fs.unlinkSync(lockPath); } catch {}
+            } catch (fe) { console.error(`[${accountId}] File cleanup error:`, fe); }
 
-    // Clean up memory maps
-    pendingMessageStatuses.delete(accountId);
-    reconnectTimers.delete(accountId);
+            console.log(`[${accountId}] Background removal of ${accountId} completed.`);
+        } catch (e: any) {
+            console.error(`[${accountId}] Background removal error:`, e.message);
+        }
+    })();
 }
 
 export async function getLogs(userId?: number) {
@@ -2969,12 +2987,9 @@ export function getCanonicalContactNumber(accountId: string, input: string): str
         }
 
         // LID digits are NOT real phone numbers — they are internal WhatsApp identifiers.
-        // If we couldn't resolve the LID via mapping, return empty string to force 
-        // external resolution (like onWhatsApp) instead of creating a ghost conversation 
-        // using raw LID digits as a fake phone number.
-        // LID resolution failures are common during history sync and shouldn't clutter the console.
-        // console.warn(`[JID RESOLVE] LID ${raw} could not be resolved from known mappings. Returning empty.`);
-        return '';
+        // If we couldn't resolve the LID via mapping, return the digits anyway 
+        // to avoid skipping the message during history sync.
+        return userDigits;
     }
 
     // === Strategy 2: Known phone JID (already in jidToLid map) ===
@@ -3014,10 +3029,9 @@ export function getCanonicalContactNumber(accountId: string, input: string): str
         return resolved;
     }
 
-    // Safety: If userDigits is longer than the E.164 maximum (15 digits), 
-    // it cannot be a real phone number.
-    if (userDigits.length > 15) {
-        // console.warn(`[JID RESOLVE] ${raw} has ${userDigits.length}-digit number — exceeding E.164 limit. Returning empty.`);
+    // Safety: If userDigits is longer than the expanded limit (25 digits), 
+    // it cannot be a real identifier.
+    if (userDigits.length > 25) {
         return '';
     }
 

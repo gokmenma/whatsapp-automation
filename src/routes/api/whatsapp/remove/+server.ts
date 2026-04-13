@@ -28,11 +28,11 @@ export async function POST({ request, locals }) {
             return json({ success: false, error: 'Hesap bulunamadı veya yetkiniz yok' }, { status: 404 });
         }
 
-        // Now remove from WhatsApp instances (and delete session data/logout)
-        await removeAccount(accountId);
-
-        // Finally delete from database
+        // First delete from database so it disappears from UI immediately
         await db.delete(accounts).where(eq(accounts.id, accountId));
+
+        // Now remove from WhatsApp instances (and delete session data/logout) in background-ready way
+        await removeAccount(accountId);
         
         return json({ success: true, message: `Account ${accountId} removed` });
     } catch (e: any) {

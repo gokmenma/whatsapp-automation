@@ -2,6 +2,7 @@
     import { onMount } from 'svelte';
     import { invalidateAll } from '$app/navigation';
     import { page } from '$app/stores';
+    import { toast } from 'svelte-sonner';
     import * as Card from "$lib/components/ui/card";
     import { Button } from "$lib/components/ui/button";
     import { Badge } from "$lib/components/ui/badge";
@@ -10,7 +11,7 @@
     import { Input } from "$lib/components/ui/input";
     import * as AlertDialog from "$lib/components/ui/alert-dialog";
     import * as Avatar from "$lib/components/ui/avatar";
-    import { Loader2, Globe, QrCode, UserPlus, Smartphone, Check, Trash2, Plus, Power, RefreshCcw, Settings, AlertTriangle, Pencil, Edit2, Users, Filter, X, Search } from "@lucide/svelte";
+    import { Loader2, Globe, QrCode, UserPlus, Smartphone, Check, Trash2, Plus, Power, Settings, AlertTriangle, Pencil, Edit2, Users, Filter, X, Search, History, RefreshCcw } from "@lucide/svelte";
 
     let accounts = $state([]);
     let users = $state([]);
@@ -21,6 +22,9 @@
     let selectedAccount = $state(null);
     let targetUserId = $state("");
     let userSearchQuery = $state("");
+    let syncConfirmDialogOpen = $state(false);
+    let isSyncingHistory = $state(false);
+    let accountIdToSync = $state("");
     let targetUser = $derived(users.find(u => String(u.id) === targetUserId));
 
     let selectedScannerId = $state(null);
@@ -140,6 +144,36 @@
     let isDialogOpen = $state(false);
     let newAccountName = $state("");
     let isAddingAccount = $state(false);
+    let syncHistory = $state(false);
+
+    function requestSyncHistory(id: string) {
+        accountIdToSync = id;
+        syncConfirmDialogOpen = true;
+    }
+
+    async function resyncAccount() {
+        if (!accountIdToSync) return;
+        isSyncingHistory = true;
+        try {
+            const res = await fetch(`/api/whatsapp/resync`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ accountId: accountIdToSync, syncHistory: true })
+            });
+            if (res.ok) {
+                toast.success('Senkronizasyon başlatıldı. Mesajlar kısa süre içinde yüklenecektir.');
+                syncConfirmDialogOpen = false;
+                await fetchPool();
+            } else {
+                const d = await res.json();
+                toast.error(d.error || 'Senkronizasyon başlatılamadı.');
+            }
+        } catch (e) {
+            toast.error('Bağlantı hatası oluştu.');
+        } finally {
+            isSyncingHistory = false;
+        }
+    }
 
     async function addAccount() {
         if (!newAccountName.trim()) return;
@@ -151,21 +185,22 @@
                 body: JSON.stringify({ 
                     accountId: newAccountName, 
                     isPool: true,
-                    syncHistory: false
+                    syncHistory: syncHistory
                 }) 
             });
             const data = await res.json();
             if (data.success) {
                 newAccountName = "";
+                syncHistory = false;
                 isDialogOpen = false;
                 await invalidateAll();
                 await fetchPool();
             } else {
-                alert(data.error || "Hesap eklenemedi");
+                toast.error(data.error || "Hesap eklenemedi");
             }
         } catch (e: any) {
             console.error(e);
-            alert("Bir hata oluştu: " + (e.message || "Bilinmeyen hata"));
+            toast.error("Bir hata oluştu: " + (e.message || "Bilinmeyen hata"));
         } finally {
             isAddingAccount = false;
         }
@@ -514,6 +549,17 @@
                         {/if}
                         
                         <div class="flex items-center gap-2 flex-1">
+                            {#if acc.status === "ready"}
+                                <Button variant="outline" size="sm" class="flex-1 h-8 text-[11px] gap-1 px-2 group-hover:border-primary/50 transition-colors" onclick={() => requestSyncHistory(acc.id)} disabled={isSyncingHistory && accountIdToSync === acc.id}>
+                                    {#if isSyncingHistory && accountIdToSync === acc.id}
+                                        <Loader2 class="w-3 h-3 animate-spin text-primary" />
+                                    {:else}
+                                        <History class="w-3 h-3 text-primary" />
+                                    {/if}
+                                    Senkronize
+                                </Button>
+                            {/if}
+
                             {#if canManagePool}
                                 <Button variant="outline" size="sm" class="flex-1 h-8 text-[11px] gap-1" onclick={() => openAssignDialog(acc)}>
                                     <UserPlus class="w-3 h-3" /> Atama
@@ -569,6 +615,15 @@
                             }
                         }}
                     />
+                </div>
+                <div class="flex items-center space-x-2 py-1">
+                    <input type="checkbox" id="sync-history" bind:checked={syncHistory} class="w-4 h-4 rounded border-gray-300 text-primary focus:ring-primary" />
+                    <Label
+                        for="sync-history"
+                        class="text-xs font-medium leading-none cursor-pointer"
+                    >
+                        Geçmiş Mesajları Senkronize Et
+                    </Label>
                 </div>
             </div>
             <Dialog.Footer>
@@ -762,10 +817,36 @@
                 disabled={isAssigning || (targetUserId !== "" && targetUser && targetUser.accountCount >= targetUser.accountLimit && selectedAccount && String(selectedAccount.userId) !== targetUserId)}
             >
                 {#if isAssigning}
-                    <Loader2 class="w-4 h-4 animate-spin mr-2" />
+                    <Loader2 class="w-4 h-4 animate-spin mr-2" /> Atanıyor...
+                {:else}
+                    Hesabı Ata
                 {/if}
-                Atamayı Kaydet
             </Button>
         </Dialog.Footer>
     </Dialog.Content>
 </Dialog.Root>
+
+<AlertDialog.Root bind:open={syncConfirmDialogOpen}>
+    <AlertDialog.Content>
+        <AlertDialog.Header>
+            <AlertDialog.Title>Geçmiş Senkronizasyonu</AlertDialog.Title>
+            <AlertDialog.Description>
+                Geçmiş mesajlar senkronize edilecek. Bu işlem sırasında hesap kısa süreliğine çevrimdışı olup tekrar bağlanacaktır. Devam edilsin mi?
+            </AlertDialog.Description>
+        </AlertDialog.Header>
+        <AlertDialog.Footer>
+            <AlertDialog.Cancel disabled={isSyncingHistory}>Vazgeç</AlertDialog.Cancel>
+            <AlertDialog.Action 
+                class="bg-primary text-primary-foreground hover:bg-primary/90 min-w-[100px]" 
+                onclick={(e) => { e.preventDefault(); resyncAccount(); }}
+                disabled={isSyncingHistory}
+            >
+                {#if isSyncingHistory}
+                    <Loader2 class="w-4 h-4 animate-spin mr-2" /> İşleniyor...
+                {:else}
+                    Tamam, Devam Et
+                {/if}
+            </AlertDialog.Action>
+        </AlertDialog.Footer>
+    </AlertDialog.Content>
+</AlertDialog.Root>
