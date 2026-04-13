@@ -140,7 +140,10 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
             return !isGhostRow;
         })
         .map((m) => {
-            const timestamp = m.timestamp ? Math.floor(new Date(m.timestamp).getTime() / 1000) : Math.floor(Date.now() / 1000);
+            const date = new Date(m.timestamp);
+            // Add 3 hours for Turkey time if the database value is treated as UTC
+            date.setHours(date.getHours() + 3);
+            const timestamp = m.timestamp ? Math.floor(date.getTime() / 1000) : Math.floor(Date.now() / 1000);
             
             return {
                 ...m,

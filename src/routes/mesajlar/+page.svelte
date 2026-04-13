@@ -26,6 +26,8 @@
     import BanIcon from '@lucide/svelte/icons/ban';
     import EraserIcon from '@lucide/svelte/icons/eraser';
     import TrashIcon from '@lucide/svelte/icons/trash-2';
+    import PdfThumbnail from '$lib/components/PdfThumbnail.svelte';
+    import DocumentMessage from '$lib/components/DocumentMessage.svelte';
     import BoldIcon from '@lucide/svelte/icons/bold';
     import ItalicIcon from '@lucide/svelte/icons/italic';
     import StrikethroughIcon from '@lucide/svelte/icons/strikethrough';
@@ -108,6 +110,8 @@
     let typingIndicatorText = $state('');
     let typingIndicatorUntil = $state(0);
     let typingIndicatorChatJid = $state('');
+    let showScrollToBottomButton = $state(false);
+    let unreadMessagesWhileScrolling = $state(0);
     let typingByChat = $state<Record<string, { text: string; until: number }>>({});
     type LinkPreview = {
         url: string;
@@ -695,9 +699,17 @@
                     });
                 }
 
-                if (scrollToBottom || changed) {
-                    const behavior: ScrollBehavior = scrollToBottom ? initialScrollBehavior : 'smooth';
-                    await scrollMessagesToBottom(behavior);
+                if (scrollToBottom) {
+                    await scrollMessagesToBottom(initialScrollBehavior);
+                } else if (changed) {
+                    // Smart scroll: only scroll to bottom if user is already near the bottom
+                    const threshold = 150;
+                    const isNearBottom = messagesContainerEl && 
+                        (messagesContainerEl.scrollHeight - messagesContainerEl.scrollTop - messagesContainerEl.clientHeight < threshold);
+                    
+                    if (isNearBottom) {
+                        await scrollMessagesToBottom('smooth');
+                    }
                 }
             }
         } catch (e) {
@@ -708,7 +720,7 @@
     }
 
     async function loadMoreMessages() {
-        if (!selectedContact || !selectedAccountId || loadingMoreMessages || !hasMoreMessages || messages.length === 0) return;
+        if (!selectedContact || !selectedAccountId || loadingMoreMessages || messages.length === 0) return;
         
         loadingMoreMessages = true;
         const oldestTs = messages[0].timestamp;
@@ -1013,13 +1025,42 @@
     function handleMessageContextMenu(e: MouseEvent, msg: any) {
         e.preventDefault();
         contextMenu = null;
+        
+        // Position menu relative to the target element if possible, or use mouse coordinates
+        const target = e.currentTarget as HTMLElement;
+        const rect = target.getBoundingClientRect();
+        
         const menuHeight = canEditMessage(msg) ? 360 : 330;
         const menuWidth = 220;
-        const rawY = e.clientY;
-        const rawX = e.clientX;
-        const y = rawY + menuHeight > window.innerHeight ? Math.max(8, rawY - menuHeight) : rawY;
-        const x = rawX + menuWidth > window.innerWidth ? Math.max(8, rawX - menuWidth) : rawX;
+        
+        // Try to place the menu to the left of the message for outgoing, right for incoming
+        const isFromMe = Boolean(msg.fromMe || msg.from_me);
+        
+        let x = isFromMe ? rect.left - menuWidth - 8 : rect.right + 8;
+        let y = e.clientY - (menuHeight / 2);
+        
+        // Fallback for tight screens
+        if (x < 8) x = rect.right + 8;
+        if (x + menuWidth > window.innerWidth) x = rect.left - menuWidth - 8;
+        if (x < 8) x = e.clientX; // desperate fallback
+        
+        // Bounds checking for Y
+        if (y < 8) y = 8;
+        if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 8;
+        
         messageMenu = { x, y, msg };
+    }
+
+    function handleScroll() {
+        if (!messagesContainerEl) return;
+        const { scrollTop, scrollHeight, clientHeight } = messagesContainerEl;
+        // If we are more than 400px away from the bottom, show the button
+        const distanceToBottom = scrollHeight - scrollTop - clientHeight;
+        showScrollToBottomButton = distanceToBottom > 400;
+        
+        if (!showScrollToBottomButton) {
+            unreadMessagesWhileScrolling = 0;
+        }
     }
 
     function openMessageInfo(msg: any) {
@@ -2160,9 +2201,9 @@
                         pendingInitialContactJid = '';
                         await selectConversation(conv);
                     }
-                } else if (!selectedContact && conversations.length > 0) {
-                    // Task 2: Default to the first conversation if none is selected
-                    await selectConversation(conversations[0]);
+                } else if (!selectedContact && visibleConversations.length > 0) {
+                    // Default to the first ACTUAL conversation, not the archived header
+                    await selectConversation(visibleConversations[0]);
                 }
             }
         })();
@@ -2371,21 +2412,21 @@
             <Dialog.Root bind:open={contactInfoOpen}><Dialog.Content class="sm:max-w-md bg-[#f7f7f6] border-[#e5e5e3]"><Dialog.Header><Dialog.Title>Kişi bilgisi</Dialog.Title></Dialog.Header>{#if selectedContact}{@const mediaCount = messages.filter((m) => Boolean(m?.mediaType || m?.media_type)).length}<div class="mt-1 space-y-3"><div class="rounded-2xl border border-border/60 bg-background px-4 py-4 text-center">{#if avatarUrls[selectedContact.jid]}<img src={avatarUrls[selectedContact.jid] || ''} alt={selectedContact.name} class="mx-auto h-24 w-24 rounded-full object-cover" onerror={() => clearAvatarUrl(selectedContact?.jid || '')} />{:else}<div class="mx-auto h-24 w-24 rounded-full flex items-center justify-center text-white text-2xl font-semibold" style="background-color: {avatarColor(selectedContact.name)};">{getInitials(selectedContact.name)}</div>{/if}<p class="mt-3 text-2xl font-semibold leading-tight">{selectedContact.name}</p><p class="mt-1 text-sm text-muted-foreground">+{selectedContact.number}</p><button class="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/50 px-4 py-2 text-sm hover:bg-muted" type="button"><SearchIcon class="w-4 h-4" /> Ara</button></div><div class="rounded-2xl border border-border/60 bg-background overflow-hidden"><div class="flex items-center justify-between px-4 py-3 text-sm"><div class="flex items-center gap-2"><FileIcon class="w-4 h-4 text-muted-foreground" /><span>Medya, bağlantı ve belgeler</span></div><span class="text-muted-foreground">{mediaCount}</span></div><div class="h-px bg-border/70"></div><div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground"><div class="flex items-center gap-2"><HeartIcon class="w-4 h-4" /><span>Yıldızlı mesajlar</span></div><span>0</span></div><div class="h-px bg-border/70"></div><div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground"><div class="flex items-center gap-2"><BellOffIcon class="w-4 h-4" /><span>Bildirimleri sessize al</span></div><span>Kapalı</span></div></div><div class="rounded-2xl border border-border/60 bg-background px-4 py-3 text-xs text-muted-foreground"><div class="font-medium text-foreground mb-1">WhatsApp JID</div><div class="break-all">{selectedContact.jid}</div></div></div>{/if}</Dialog.Content></Dialog.Root>
 
             <div class="flex-1 relative overflow-hidden"><div class="absolute inset-0 pointer-events-none opacity-[0.4] dark:opacity-[0.1]" style="background-image: url('/wa-premium-bg.png'); background-repeat: repeat; background-size: 500px; background-position: center; z-index: 0;"></div>
-                <div class="absolute inset-0 overflow-y-auto px-4 py-3 space-y-1 z-10" bind:this={messagesContainerEl}><div class="flex flex-col min-h-full">
+                <div class="absolute inset-0 overflow-y-auto px-4 py-3 space-y-1 z-10" bind:this={messagesContainerEl} onscroll={handleScroll}><div class="flex flex-col min-h-full">
                 {#if loadingMessages && messages.length === 0}
                     <div class="flex justify-center py-12"><div class="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin"></div></div>
                 {:else if messages.length === 0}
                     <div class="flex flex-col items-center justify-center py-20 text-center opacity-40"><MessageSquareIcon class="w-12 h-12 mb-2" /><p class="text-sm">Bu konuşmada henüz mesaj yok</p></div>
                 {:else}
-                        {#if hasMoreMessages}
-                            <div class="flex justify-center py-6 mb-6 border-b border-border/10">
-                                <button class="flex items-center gap-2 px-6 py-2 rounded-full bg-muted/40 hover:bg-muted text-xs font-semibold text-muted-foreground transition-all hover:scale-105 active:scale-95 border border-border/30 shadow-sm" onclick={loadMoreMessages} disabled={loadingMoreMessages}>
+                        {#if messages.length > 0}
+                            <div class="flex justify-center py-4 mb-2">
+                                <button class="flex items-center gap-2 px-6 py-2 rounded-full bg-primary/5 hover:bg-primary/10 text-xs font-bold text-primary transition-all hover:scale-105 active:scale-95 border border-primary/20 shadow-sm" onclick={loadMoreMessages} disabled={loadingMoreMessages}>
                                     {#if loadingMoreMessages}
                                         <div class="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
                                         <span>Yükleniyor...</span>
                                     {:else}
                                         <ArrowUpCircle class="w-4 h-4 text-primary/70" />
-                                        <span>Daha Eski Mesajları Yükle</span>
+                                        <span>{hasMoreMessages || messages.length >= 50 ? 'Daha Eski Mesajları Yükle' : 'WhatsApp\'tan Daha Fazlasını Tara'}</span>
                                     {/if}
                                 </button>
                             </div>
@@ -2403,13 +2444,26 @@
                             {@const bodyText = String(msg.body || '').trim()}
                             {@const isSameSender = !showDateSep && i > 0 && Boolean(messages[i-1].fromMe) === isFromMe && resolveGroupSenderName(messages[i-1]) === senderName}
                             {#if showDateSep}<div class="flex justify-center py-6 mt-2 first:mt-0"><span class="text-xs bg-muted/90 text-muted-foreground px-4 py-1 rounded-full border border-border/40 font-medium shadow-sm">{new Date(msgTs).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Istanbul' })}</span></div>{/if}
-                            <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} items-start gap-1.5 {isSameSender ? 'mt-0.5' : 'mt-4'}"><div class="relative flex flex-col max-w-[75%] z-10"><div class="flex flex-col text-[14.2px] shadow-sm {isDeleted ? 'bg-muted/70 opacity-80' : (isFromMe ? 'bg-[#d9fdd3] dark:bg-[#005c4b] text-[#111b21] dark:text-[#e9edef]' : 'bg-white dark:bg-[#202c33] text-[#111b21] dark:text-[#e9edef]')} rounded-lg {isFromMe ? 'rounded-tr-none' : 'rounded-lg rounded-tl-none'}" oncontextmenu={(e) => handleMessageContextMenu(e, msg)}>{#if !isFromMe && isGroupJid(selectedContact?.jid) && senderName}<div class="px-2.5 pt-1.5 pb-0 text-[12.5px] font-bold text-sky-600 dark:text-sky-400">{senderName}</div>{/if}
-                                {#if !isDeleted && mediaKind === 'image'}<div class="px-1 pt-1 pb-0"><button type="button" onclick={() => openMediaViewer(mediaUrl, 'image')} class="block w-full max-w-[320px] rounded-lg overflow-hidden"><img src={mediaUrl} alt="Fotoğraf" class="w-full h-auto max-h-[320px] object-cover" loading="lazy" /></button></div>{:else if !isDeleted && mediaKind === 'video'}<div class="px-1 pt-1 pb-0"><video controls class="w-full max-w-[320px] max-h-[320px] rounded-xl overflow-hidden block" preload="metadata"><source src={mediaUrl} /></video></div>{/if}
-                                {#if bodyText}<div class="px-2.5 py-1.5 whitespace-pre-wrap break-words leading-relaxed">{@html parseMessageFormatting(bodyText)}</div>{/if}
-                                <div class="flex items-center justify-end gap-1 px-2.5 pb-1.5 ml-auto"><span class="text-[10.5px] text-muted-foreground/70 leading-none">{formatTime(msg.timestamp)}</span>{#if isFromMe}<span class={"leading-none " + statusTickClass(msg.status)}>{#if isDoubleTickStatus(msg.status)}<svg viewBox="0 0 18 11" width="16" height="10" fill="currentColor" class="translate-y-0.5"><path d="M17.394 1.48a.72.72 0 0 0-1.018 0l-8.508 8.508L4.31 6.43a.72.72 0 1 0-1.018 1.018l4.066 4.066a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Zm-4.99 0a.72.72 0 0 0-1.018 0l-7.9 7.9-2.066-2.066a.72.72 0 0 0-1.018 1.018l2.574 2.574a.72.72 0 0 0 1.018 0l8.41-8.41a.72.72 0 0 0 0-1.016Z"></path></svg>{:else}<svg viewBox="0 0 16 11" width="14" height="10" fill="currentColor" class="translate-y-0.5"><path d="M15.01 1.48a.72.72 0 0 0-1.018 0L5.484 10.003l-4.06-4.06a.72.72 0 1 0-1.018 1.018l4.06 4.06a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Z"></path></svg>{/if}</span>{/if}</div></div>{#if msg.reaction && msg.reaction !== '[]'}{@const reactions = parseMessageReactions(msg.reaction)}<div class="absolute -bottom-2 {isFromMe ? 'right-0' : 'left-0'} flex items-center gap-0.5 pointer-events-none">{#each reactions as r}<div class="px-1 py-0.5 rounded-full bg-background border border-border text-[10px] pointer-events-auto">{r.emoji}</div>{/each}</div>{/if}</div></div>
+                            <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} items-start gap-1.5 {isSameSender ? 'mt-0.5' : 'mt-4'}"><div class="relative flex flex-col max-w-[75%] z-10"><div class="flex flex-col text-[14.2px] shadow-sm {isDeleted ? 'bg-muted/70 opacity-80' : (isFromMe ? 'bg-[#d9fdd3] dark:bg-[#005c4b] text-[#111b21] dark:text-[#e9edef]' : 'bg-white dark:bg-[#202c33] text-[#111b21] dark:text-[#e9edef]')} rounded-lg {isFromMe ? 'rounded-tr-none' : 'rounded-lg rounded-tl-none'}" oncontextmenu={(e) => handleMessageContextMenu(e, msg)}>{#if !isFromMe && isGroupJid(selectedContact?.jid) && senderName}<div class="px-2.5 pt-1.5 pb-0 text-[12.5px] font-bold text-sky-600 dark:text-sky-400">{senderName}</div>{/if}{#if !isDeleted && mediaKind === 'image'}<div class="px-1 pt-1 pb-0"><button type="button" onclick={() => openMediaViewer(mediaUrl, 'image')} class="block w-full max-w-[320px] rounded-lg overflow-hidden"><img src={mediaUrl} alt="Fotoğraf" class="w-full h-auto max-h-[320px] object-cover" loading="lazy" /></button></div>{:else if !isDeleted && mediaKind === 'video'}<div class="px-1 pt-1 pb-0"><video controls class="w-full max-w-[320px] max-h-[320px] rounded-xl overflow-hidden block" preload="metadata"><source src={mediaUrl} /></video></div>{:else if !isDeleted && mediaKind === 'document'}<div class="px-1 pt-1 pb-0"><DocumentMessage {mediaUrl} {bodyText} onclick={() => openMediaViewer(mediaUrl, 'document', bodyText)} /></div>{/if}
+                                {#if bodyText && mediaKind !== 'document'}<div class="px-2.5 py-1.5 whitespace-pre-wrap break-words leading-relaxed">{@html parseMessageFormatting(bodyText)}</div>{/if}
+
+
+                                <div class="flex items-center justify-end gap-1 px-2.5 pb-1.5 ml-auto"><span class="text-[10.5px] text-muted-foreground/70 leading-none">{formatTime(msg.timestamp)}</span>{#if isFromMe}<span class={"leading-none " + statusTickClass(msg.status)}>{#if isDoubleTickStatus(msg.status)}<svg viewBox="0 0 18 11" width="16" height="10" fill="currentColor" class="translate-y-0.5"><path d="M17.394 1.48a.72.72 0 0 0-1.018 0l-8.508 8.508L4.31 6.43a.72.72 0 1 0-1.018 1.018l4.066 4.066a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Zm-4.99 0a.72.72 0 0 0-1.018 0l-7.9 7.9-2.066-2.066a.72.72 0 0 0-1.018 1.018l2.574 2.574a.72.72 0 0 0 1.018 0l8.41-8.41a.72.72 0 0 0 0-1.016Z"></path></svg>{:else}<svg viewBox="0 0 16 11" width="14" height="10" fill="currentColor" class="translate-y-0.5"><path d="M15.01 1.48a.72.72 0 0 0-1.018 0L5.484 10.003l-4.06-4.06a.72.72 0 1 0-1.018 1.018l4.06 4.06a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Z"></path></svg>{/if}</span>{/if}</div></div>{#if msg.reaction && msg.reaction !== '[]'}{@const reactions = parseMessageReactions(msg.reaction)}<div class="absolute -bottom-3.5 right-2 flex items-center gap-0.5 pointer-events-none drop-shadow-sm z-30">{#each reactions as r}<div class="px-1.5 py-0.5 rounded-full bg-slate-50 dark:bg-slate-800 border-2 border-background text-[11.5px] font-medium pointer-events-auto hover:rotate-6 transition-transform">{r.emoji}</div>{/each}</div>{/if}</div></div>
                         {/each}
                         <div class="h-4" bind:this={messagesEndEl}></div>
-                {/if}</div></div></div>
+                {/if}
+
+                {#if showScrollToBottomButton}
+                    <button class="fixed bottom-24 right-8 w-10 h-10 rounded-full bg-background border border-border shadow-lg flex items-center justify-center text-muted-foreground hover:bg-muted transition-all active:scale-95 z-50" onclick={() => scrollMessagesToBottom('smooth')}>
+                        <ChevronDownIcon class="w-5 h-5" />
+                        {#if unreadMessagesWhileScrolling > 0}
+                            <span class="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500 text-[10px] font-bold text-white ring-2 ring-background">
+                                {unreadMessagesWhileScrolling}
+                            </span>
+                        {/if}
+                    </button>
+                {/if}
+                </div></div></div>
 
             {#if messageMenu}<div class="fixed min-w-40 bg-background border border-border rounded-lg shadow-lg py-1 z-50" style="left: {messageMenu.x}px; top: {messageMenu.y}px;" onmousedown={(e) => e.preventDefault()} role="menu" tabindex="0"><div class="flex items-center justify-around px-2 py-2 border-b border-border/50 bg-muted/20 gap-1">{#each ['👍', '❤️', '😂', '😮', '😢', '🙏'] as emoji}<button class="text-xl hover:scale-125 transition-transform p-1" onclick={() => sendReaction(messageMenu!.msg, emoji)}>{emoji}</button>{/each}</div><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={() => startReplyToMessage(messageMenu!.msg)}><CornerUpLeftIcon class="w-4 h-4" /> Cevapla</button><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={() => copyMessageText(messageMenu!.msg)}><FileIcon class="w-4 h-4" /> Kopyala</button><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={openMessageDeleteDialog}><TrashIcon class="w-4 h-4" /> Sil</button></div>{/if}
 
@@ -2418,7 +2472,7 @@
             <div class="px-4 py-3 border-t border-border bg-background">
                 {#if editingMessageId}<div class="mb-2 flex items-start justify-between gap-3 rounded-xl border border-amber-300/60 bg-amber-50/60 px-3 py-2"><div class="min-w-0"><div class="text-[11px] font-semibold text-amber-700">Mesaj duzenleniyor</div><div class="text-xs text-amber-700/80">Yeni mesaj gitmez, mevcut mesaj guncellenir.</div></div><button class="shrink-0 rounded-md p-1 hover:bg-amber-100" type="button" onclick={clearEditingMessage}><XIcon class="w-4 h-4 text-amber-700" /></button></div>{/if}
                 {#if replyingTo}<div class="mb-2 flex items-start justify-between gap-3 rounded-xl border border-border bg-muted/35 px-3 py-2"><div class="min-w-0"><div class="text-[11px] font-semibold text-sky-700">{replyingTo.senderName || 'Mesaja cevap'}</div><div class="text-xs text-muted-foreground max-h-9 overflow-hidden whitespace-pre-wrap break-all">{replyingTo.body}</div></div><button class="shrink-0 rounded-md p-1 hover:bg-muted" type="button" onclick={clearReplyToMessage}><XIcon class="w-4 h-4 text-muted-foreground" /></button></div>{/if}
-                {#if attachedMedia && (isImageAttachment || isVideoAttachment || isPdfAttachment)}<div class="mb-2 inline-block rounded-lg border border-border bg-muted/30 p-1">{#if isImageAttachment}<img src={attachedMedia?.data || ''} alt={attachedMedia?.filename || 'Gorsel'} class="max-h-28 max-w-56 rounded-md object-cover" />{:else if isVideoAttachment}<video src={attachedMedia?.data || ''} class="max-h-28 max-w-56 rounded-md" controls preload="metadata"></video>{:else if isPdfAttachment}<button type="button" class="flex w-56 items-center gap-2 rounded-md border border-border/60 bg-background px-2.5 py-2 text-left hover:bg-muted/50 transition-colors" onclick={() => openMediaViewer(attachedMedia?.data || '', 'document', attachedMedia?.filename || 'PDF dosyası')}><div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border/60 bg-rose-50 text-[10px] font-bold tracking-wide text-rose-600">PDF</div><div class="min-w-0 flex-1"><p class="truncate text-xs font-medium">{attachedMedia?.filename || 'PDF dosyası'}</p><p class="text-[10px] text-muted-foreground">Dokunarak aç</p></div></button>{/if}</div>{/if}
+                {#if attachedMedia && (isImageAttachment || isVideoAttachment || isPdfAttachment)}<div class="mb-2 inline-block rounded-lg border border-border bg-muted/30 p-1">{#if isImageAttachment}<img src={attachedMedia?.data || ''} alt={attachedMedia?.filename || 'Gorsel'} class="max-h-28 max-w-56 rounded-md object-cover" />{:else if isVideoAttachment}<video src={attachedMedia?.data || ''} class="max-h-28 max-w-56 rounded-md" controls preload="metadata"></video>{:else if isPdfAttachment}<DocumentMessage mediaUrl={attachedMedia?.data} bodyText={attachedMedia?.filename} onclick={() => openMediaViewer(attachedMedia?.data || '', 'document', attachedMedia?.filename || 'PDF dosyası')} />{/if}</div>{/if}
                 <div class="flex items-end gap-2"><div class="flex-1 bg-muted/50 rounded-2xl border border-border px-4 py-2.5 flex items-end gap-2"><div class="relative group shrink-0"><button class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105" onclick={() => mediaInputEl?.click()} type="button"><PaperclipIcon class="w-4 h-4 text-muted-foreground" /></button><span class="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Dosya ekle</span></div>
                 <div class="relative group shrink-0"><button class="p-1 rounded-md hover:bg-muted transition-colors hover:scale-105" onclick={() => { isEmojiPickerOpen = !isEmojiPickerOpen; }} type="button"><SmileIcon class="w-4 h-4 text-muted-foreground" /></button><span class="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1 px-2 py-1 text-[10px] rounded bg-foreground text-background opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">Emoji</span>
                 {#if isEmojiPickerOpen}<div bind:this={emojiPickerEl} class="absolute bottom-full left-0 mb-2 w-64 rounded-xl border border-border bg-background shadow-xl p-3 z-30"><div class="text-[11px] font-semibold text-muted-foreground mb-2">Hizli ifadeler</div><div class="grid grid-cols-8 gap-1.5">{#each quickEmojis as emoji}<button class="h-7 w-7 rounded-md hover:bg-muted text-base leading-none flex items-center justify-center" type="button" onclick={async () => { await insertEmoji(emoji); }}>{emoji}</button>{/each}</div></div>{/if}</div><input bind:this={mediaInputEl} type="file" class="hidden" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt" onchange={handleMediaSelect} />
