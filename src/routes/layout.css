@@ -33,7 +33,7 @@
 	--sidebar-foreground: oklch(0.145 0 0);
 	--sidebar-primary: oklch(0.205 0 0);
 	--sidebar-primary-foreground: oklch(0.985 0 0);
-	--sidebar-accent: oklch(0.97 0 0);
+	--sidebar-accent: oklch(0.94 0 0);
 	--sidebar-accent-foreground: oklch(0.205 0 0);
 	--sidebar-border: oklch(0.922 0 0);
 	--sidebar-ring: oklch(0.708 0 0);
@@ -187,4 +187,27 @@
 	&::-webkit-scrollbar {
 		display: none;
 	}
+}
+
+/* Sidebar Active State Enhancements */
+[data-sidebar="menu-button"][data-active="true"] {
+	background-color: var(--sidebar-accent) !important;
+	font-weight: 600 !important;
+	color: var(--sidebar-accent-foreground) !important;
+	position: relative;
+}
+
+[data-sidebar="menu-button"][data-active="true"]::after {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 25%;
+	bottom: 25%;
+	width: 3px;
+	background-color: var(--primary);
+	border-radius: 0 4px 4px 0;
+}
+
+.dark [data-sidebar="menu-button"][data-active="true"] {
+	background-color: var(--sidebar-accent) !important;
 }

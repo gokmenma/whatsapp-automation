@@ -24,10 +24,11 @@
 	} = $props();
 
 	function isItemActive(url: string) {
-		if (url === "/") {
+		const path = url.split('?')[0];
+		if (path === "/") {
 			return $page.url.pathname === "/";
 		}
-		return $page.url.pathname.startsWith(url);
+		return $page.url.pathname === path || $page.url.pathname.startsWith(path + '/');
 	}
 
 	function isGroupActive(item: any) {

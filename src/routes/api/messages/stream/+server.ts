@@ -3,6 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { accounts } from '$lib/server/db/schema';
 import { eq, sql } from 'drizzle-orm';
+import { getMessageEmitter } from '$lib/whatsapp';
 
 function encoder() {
     return new TextEncoder();
@@ -33,6 +34,8 @@ export const GET: RequestHandler = async ({ url, locals }) => {
     const textEncoder = encoder();
     let pollId: ReturnType<typeof setInterval> | null = null;
     let keepAliveId: ReturnType<typeof setInterval> | null = null;
+
+    let onSseRaw: ((data: any) => void) | null = null;
 
     const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -81,6 +84,18 @@ export const GET: RequestHandler = async ({ url, locals }) => {
                 }
             };
 
+            // Real-time event listener for immediate pushes
+            onSseRaw = (data: { accountId: string, message: string }) => {
+                if (String(data.accountId) === String(accountId)) {
+                    try {
+                        controller.enqueue(textEncoder.encode(data.message));
+                    } catch (e) {
+                        // Controller might be closed
+                    }
+                }
+            };
+            getMessageEmitter().on('sse_raw', onSseRaw);
+
             pushEvent('ready', { accountId });
             void sendSnapshotIfChanged();
 
@@ -89,7 +104,9 @@ export const GET: RequestHandler = async ({ url, locals }) => {
             }, 5000);
 
             keepAliveId = setInterval(() => {
-                controller.enqueue(textEncoder.encode(': keepalive\n\n'));
+                try {
+                    controller.enqueue(textEncoder.encode(': keepalive\n\n'));
+                } catch (e) {}
             }, 15000);
         },
         cancel() {
@@ -100,6 +117,10 @@ export const GET: RequestHandler = async ({ url, locals }) => {
             if (keepAliveId) {
                 clearInterval(keepAliveId);
                 keepAliveId = null;
+            }
+            if (onSseRaw) {
+                getMessageEmitter().off('sse_raw', onSseRaw);
+                onSseRaw = null;
             }
         }
     });

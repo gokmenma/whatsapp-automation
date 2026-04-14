@@ -68,6 +68,7 @@ async function initDb() {
                 media_type VARCHAR(50),
                 quoted_msg_id VARCHAR(255),
                 quoted_msg_body TEXT,
+                quoted_msg_sender_name VARCHAR(255),
                 reaction TEXT,
                 edited_at DATETIME,
                 timestamp DATETIME NOT NULL,
@@ -81,11 +82,28 @@ async function initDb() {
         `);
 
         // Check for specific columns/indexes only if needed
-        // This is much faster than running the full CREATE TABLE or slow ALTERs every time
+        const [cols]: any = await mysqlPool.query("SHOW COLUMNS FROM messages LIKE 'quoted_msg_sender_name'");
+        if (cols.length === 0) {
+            console.log('Adding quoted_msg_sender_name column...');
+            await mysqlPool.query("ALTER TABLE messages ADD COLUMN quoted_msg_sender_name VARCHAR(255) AFTER quoted_msg_body");
+        }
+
         const [indices]: any = await mysqlPool.query("SHOW INDEX FROM messages WHERE Key_name = 'messages_unread_idx'");
         if (indices.length === 0) {
             console.log('Adding unread messages index...');
             await mysqlPool.query("ALTER TABLE messages ADD INDEX messages_unread_idx (account_id, from_me, is_read)");
+        }
+
+        const [contactTsIdx]: any = await mysqlPool.query("SHOW INDEX FROM messages WHERE Key_name = 'messages_account_contact_timestamp_idx'");
+        if (contactTsIdx.length === 0) {
+            console.log('Adding account_contact_timestamp index...');
+            await mysqlPool.query("ALTER TABLE messages ADD INDEX messages_account_contact_timestamp_idx (account_id, contact_jid, timestamp DESC)");
+        }
+
+        const [accountTsIdx]: any = await mysqlPool.query("SHOW INDEX FROM messages WHERE Key_name = 'messages_account_timestamp_idx'");
+        if (accountTsIdx.length === 0) {
+            console.log('Adding account_timestamp index...');
+            await mysqlPool.query("ALTER TABLE messages ADD INDEX messages_account_timestamp_idx (account_id, timestamp DESC)");
         }
 
         console.log('MySQL Database initialized successfully.');

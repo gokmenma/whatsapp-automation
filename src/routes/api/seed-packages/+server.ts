@@ -1,6 +1,4 @@
-import { db, remoteDb } from '$lib/server/db';
-import { creditPackages as localCreditPackages } from '$lib/server/db/schema';
-import { subscriptionPackages, creditPackages as remoteCreditPackages } from '$lib/server/db/remote-schema';
+import { remoteDb } from '$lib/server/db';
 import { json } from '@sveltejs/kit';
 import { sql } from 'drizzle-orm';
 
@@ -40,19 +38,6 @@ export async function GET() {
                 VALUES (${pkg.name}, ${pkg.credits}, ${pkg.price})
                 ON DUPLICATE KEY UPDATE ad = ad
             `);
-        }
-
-        // 3. Seed Local Credit Packages (SQLite - legacy or fallback)
-        try {
-            await db.insert(localCreditPackages).values(
-                credPacks.map(p => ({
-                    name: p.name,
-                    credits: p.credits,
-                    price: p.price
-                }))
-            ).onConflictDoNothing();
-        } catch (localErr) {
-            console.warn('Local seed optional:', localErr);
         }
 
         return json({ success: true, message: 'Veritabanı paketleri başarıyla senkronize edildi.' });

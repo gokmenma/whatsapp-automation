@@ -56,7 +56,37 @@ if (!globalRef.baileysManualStops) globalRef.baileysManualStops = new Set<string
 if (!globalRef.baileysReconnectTimers) globalRef.baileysReconnectTimers = new Map<string, NodeJS.Timeout>();
 if (!globalRef.messageEventEmitter) globalRef.messageEventEmitter = new EventEmitter();
 
-export const WHATSAPP_LIB_VERSION = "2026-04-10-V3";
+export const WHATSAPP_LIB_VERSION = "2026-04-13-V4";
+
+// Shared database resources to avoid repeated dynamic imports
+let sharedDb: any = null;
+let sharedRemoteDb: any = null;
+let sharedSchema: any = null;
+
+async function getSharedDb() {
+    if (!sharedDb) {
+        const { db, remoteDb } = await import('./server/db');
+        sharedDb = db;
+        sharedRemoteDb = remoteDb;
+    }
+    return sharedDb;
+}
+
+async function getSharedRemoteDb() {
+    if (!sharedRemoteDb) {
+        const { db, remoteDb } = await import('./server/db');
+        sharedDb = db;
+        sharedRemoteDb = remoteDb;
+    }
+    return sharedRemoteDb;
+}
+
+async function getSharedSchema() {
+    if (!sharedSchema) {
+        sharedSchema = await import('./server/db/schema');
+    }
+    return sharedSchema;
+}
 
 export const getMessageEmitter = () => globalRef.messageEventEmitter as EventEmitter;
 
@@ -130,6 +160,28 @@ export function normalizeDigits(value: string | undefined | null): string {
     const digitsOnly = userPart.replace(/\D/g, '');
     if (digitsOnly.length > 5 && digitsOnly.length === userPart.length) return digitsOnly;
     return userPart;
+}
+
+export function getJidForLid(accountId: string, lid: string) {
+    const store = stores.get(accountId);
+    if (!store) return null;
+    const cleanLid = String(lid || '').trim().toLowerCase();
+    // Try both raw lid and canonical @lid key
+    return store.lidToJid.get(cleanLid) || store.lidToJid.get(getLidKey(cleanLid)) || null;
+}
+
+export function getLidForJid(accountId: string, jid: string) {
+    const store = stores.get(accountId);
+    if (!store) return null;
+    const cleanJid = String(jid || '').trim().toLowerCase();
+    return store.jidToLid.get(cleanJid) || null;
+}
+
+export function getJidForNumber(accountId: string, number: string) {
+    const store = stores.get(accountId);
+    if (!store) return null;
+    const digits = normalizeDigits(number);
+    return store.numberToJid.get(digits) || null;
 }
 
 export function normalizeNameValue(value: string | undefined | null): string {
@@ -452,8 +504,8 @@ export async function sendWhatsAppReaction(
         throw new Error(`Hesap hazır değil (${status?.status || 'disconnected'})`);
     }
 
-    const { db } = await import('./server/db');
-    const { messages } = await import('./server/db/schema');
+    const db = await getSharedDb();
+    const { messages } = await getSharedSchema();
     const { eq, and, or, like } = await import('drizzle-orm');
 
     // Find the message in DB to get contactJid, fromMe, and senderJid
@@ -610,8 +662,8 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
 
     // CRITICAL: Verify if account still exists in Database before connecting
     try {
-        const { db: dbInst } = await import('./server/db');
-        const { accounts: accountsTable } = await import('./server/db/schema');
+        const dbInst = await getSharedDb();
+        const { accounts: accountsTable } = await getSharedSchema();
         const { eq } = await import('drizzle-orm');
         const rows = await dbInst.select().from(accountsTable).where(eq(accountsTable.id, accountId)).limit(1);
         if (rows.length === 0) {
@@ -869,36 +921,66 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 return tsB - tsA;
             });
 
-            const seenCounts = new Map<string, number>();
+            // Pre-calculate which messages should be 'unread' and filter by date
+            const processedItems = sortedMessages.map(msg => {
+                const jid = msg.key?.remoteJid;
+                const fromMe = !!msg.key?.fromMe;
+                let forceUnread = false;
 
-            for (const msg of sortedMessages) {
-                try {
-                    const jid = msg.key?.remoteJid;
-                    const fromMe = !!msg.key?.fromMe;
-                    let forceUnread = false;
-
-                    // If chat has N unread, only the N most recent incoming messages should be 'unread'
-                    if (jid && !fromMe) {
-                        const totalUnread = unreadCounts.get(jid) || 0;
-                        const seenSoFar = seenCounts.get(jid) || 0;
-                        if (seenSoFar < totalUnread) {
-                            forceUnread = true;
-                            seenCounts.set(jid, seenSoFar + 1);
-                        }
+                // If chat has N unread, only the N most recent incoming messages should be 'unread'
+                if (jid && !fromMe) {
+                    const totalUnread = unreadCounts.get(jid) || 0;
+                    const seenSoFar = seenCounts.get(jid) || 0;
+                    if (seenSoFar < totalUnread) {
+                        forceUnread = true;
+                        seenCounts.set(jid, seenSoFar + 1);
                     }
+                }
 
-                    // Extra safety filter: Only store messages from last 3 days
-                    const tsValue = Number(msg.messageTimestamp) || 0;
-                    if (tsValue > 0) {
-                        const msgDate = new Date(tsValue * 1000);
+                // Safety filter: Only store messages from last 90 days
+                const tsValue = Number(msg.messageTimestamp) || 0;
+                if (tsValue > 0) {
+                    const msgDate = new Date(tsValue * 1000);
                     const limitDate = new Date();
                     limitDate.setDate(limitDate.getDate() - 90);
-                    if (msgDate < limitDate) continue; 
-                    }
+                    if (msgDate < limitDate) return null;
+                }
+                
+                return { msg, forceUnread };
+            }).filter((item): item is { msg: any; forceUnread: boolean } => item !== null);
 
-                    await processAndStoreMessage(msg, true, forceUnread);
-                } catch (err) {
-                    // Silently continue for individual history messages
+            console.log(`[${accountId}] Processing ${processedItems.length} filtered historical messages in parallel chunks...`);
+
+            // Process in batches with bulk database inserts
+            const chunkSize = 200;
+            const dbInst = await getSharedDb();
+            const { messages: messagesTable } = await getSharedSchema();
+            const bucket = getHistoryProgressBucket(accountId);
+            
+            for (let i = 0; i < processedItems.length; i += chunkSize) {
+                const chunk = processedItems.slice(i, i + chunkSize);
+                
+                // Prepare all messages in the chunk (pre-parsing, normalization)
+                const dataObjects = await Promise.all(
+                    chunk.map(item => processAndStoreMessage(item.msg, true, item.forceUnread))
+                );
+                
+                // Filter out non-message types (protocol, reactions) that return undefined/null
+                const validData = dataObjects.filter(d => d !== null && d !== undefined);
+                
+                if (validData.length > 0) {
+                    try {
+                        await dbInst.insert(messagesTable).ignore().values(validData);
+                        bucket.count += validData.length;
+                        console.log(`[${accountId}] History sync: ${bucket.count}/${processedItems.length} messages stored (bulk).`);
+                    } catch (bulkErr: any) {
+                        console.error(`[${accountId}] Bulk insert error, falling back to sequential for this chunk:`, bulkErr.message);
+                        for (const data of validData) {
+                            try {
+                                await dbInst.insert(messagesTable).ignore().values(data);
+                            } catch (e) {}
+                        }
+                    }
                 }
             }
             console.log(`[${accountId}] Finished processing historical messages.`);
@@ -947,8 +1029,8 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                     
                     // Final safety check before background reconnect: is it still in DB?
                     try {
-                        const { db: dbInst } = await import('./server/db');
-                        const { accounts: accountsTable } = await import('./server/db/schema');
+                        const dbInst = await getSharedDb();
+                        const { accounts: accountsTable } = await getSharedSchema();
                         const { eq } = await import('drizzle-orm');
                         const rows = await dbInst.select().from(accountsTable).where(eq(accountsTable.id, accountId)).limit(1);
                         if (rows.length === 0) {
@@ -992,8 +1074,8 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
             if (sock.user?.name) {
                 void (async () => {
                     try {
-                        const { db } = await import('./server/db');
-                        const { accounts } = await import('./server/db/schema');
+                        const db = await getSharedDb();
+                        const { accounts } = await getSharedSchema();
                         const { eq } = await import('drizzle-orm');
                         const [acc] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
                         
@@ -1020,7 +1102,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
             return;
         }
         try {
-            const { db: dbInst } = await import('./server/db');
+            const dbInst = await getSharedDb();
             const { sql } = await import('drizzle-orm');
             const prefixedId = `${accountId}:${targetId}`;
             const [rows]: any = await dbInst.execute(sql`
@@ -1084,7 +1166,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
         const body = String(newBody || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
 
         try {
-            const { db: dbInst } = await import('./server/db');
+            const dbInst = await getSharedDb();
             const { sql } = await import('drizzle-orm');
             const prefixedId = `${accountId}:${targetId}`;
             if (body) {
@@ -1182,7 +1264,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
         if (!targetId || !senderJid) return;
 
         try {
-            const { db: dbInst } = await import('./server/db');
+            const dbInst = await getSharedDb();
             const { sql } = await import('drizzle-orm');
             const cleanTargetId = targetId.includes(':') ? targetId.split(':').pop()! : targetId;
             const prefixedId = `${accountId}:${cleanTargetId}`;
@@ -1300,14 +1382,13 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
         if (!targetId || !nextStatus) return;
 
         try {
-            const { db: dbInst } = await import('./server/db');
+            const dbInst = await getSharedDb();
             const { sql } = await import('drizzle-orm');
             const prefixedId = `${accountId}:${targetId}`;
             const [rows]: any = await dbInst.execute(sql`
-                SELECT id, status
+                SELECT id, status, from_me
                 FROM messages
                 WHERE account_id = ${accountId}
-                  AND from_me = 1
                   AND (
                     id = ${prefixedId}
                     OR id = ${targetId}
@@ -1315,11 +1396,11 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                   )
             `);
 
-                        if (!rows || (rows as any[]).length === 0) {
-                                // Status events can arrive before the outgoing message row is inserted.
-                                rememberPendingStatus(accountId, targetId, nextStatus);
-                                return;
-                        }
+            if (!rows || (rows as any[]).length === 0) {
+                // Status events can arrive before the outgoing message row is inserted.
+                rememberPendingStatus(accountId, targetId, nextStatus);
+                return;
+            }
 
             let updated = 0;
             for (const row of rows as any[]) {
@@ -1327,9 +1408,11 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 if (currentStatus === 'deleted_me' || currentStatus === 'deleted_everyone') continue;
 
                 if (statusRank(nextStatus) >= statusRank(currentStatus) && currentStatus !== nextStatus) {
+                    const isReadUpdate = (nextStatus === 'read' || nextStatus === 'played');
                     await dbInst.execute(sql`
                         UPDATE messages
                         SET status = ${nextStatus}
+                            ${isReadUpdate ? sql`, is_read = 1` : sql``}
                         WHERE account_id = ${accountId}
                           AND id = ${String(row.id)}
                     `);
@@ -1339,6 +1422,16 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
 
             if (updated > 0) {
                 console.log(`[${accountId}] Status updated (${source}) targetId=${targetId} -> ${nextStatus} remoteJid=${remoteJid || '-'} rows=${updated}`);
+                
+                // Emit SSE event for immediate UI update
+                const sseData = {
+                    type: 'messages',
+                    accountId,
+                    jid: remoteJid,
+                    action: 'status_update'
+                };
+                const sseMsg = `event: ${sseData.type}\ndata: ${JSON.stringify(sseData)}\n\n`;
+                getMessageEmitter().emit('sse_raw', { accountId, message: sseMsg });
             }
         } catch (e: any) {
             console.error(`[${accountId}] Status update error:`, e.message);
@@ -1466,7 +1559,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
         if (!normalizedRemoteJid) return;
 
         try {
-            const { db: dbInst } = await import('./server/db');
+            const dbInst = await getSharedDb();
             const { sql } = await import('drizzle-orm');
 
             if (normalizedRemoteJid.endsWith('@g.us')) {
@@ -1514,6 +1607,17 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                       AND is_read = 0
                 `);
             }
+
+            // Emit SSE event for immediate UI update
+            const sseData = {
+                type: 'messages',
+                accountId,
+                jid: normalizedRemoteJid,
+                action: 'read'
+            };
+            const sseMsg = `event: ${sseData.type}\ndata: ${JSON.stringify(sseData)}\n\n`;
+            getMessageEmitter().emit('sse_raw', { accountId, message: sseMsg });
+
         } catch (e: any) {
             console.error(`[${accountId}] Sync incoming read->DB error:`, e?.message || e);
         }
@@ -1606,8 +1710,8 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
 
         if (content) {
             try {
-                const { db: dbInst } = await import('./server/db');
-                const { messages: messagesTable } = await import('./server/db/schema');
+                const dbInst = await getSharedDb();
+                const { messages: messagesTable } = await getSharedSchema();
 
                 // Handle protocol events (edit/revoke) by updating existing message rows.
                 const protocolMessage = (content as any)?.protocolMessage;
@@ -1675,6 +1779,8 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 const contextInfo = extractContextInfo(content as any);
                 const quotedMsgId = String(contextInfo?.stanzaId || '').trim();
                 const quotedMsgBody = extractMessageText(contextInfo?.quotedMessage || null);
+                const quotedMsgSenderJid = contextInfo?.participant || null;
+                const quotedMsgSenderName = quotedMsgSenderJid ? (getContactName(accountId, quotedMsgSenderJid) || quotedMsgSenderJid.split('@')[0]) : null;
 
                 const mediaType = (content as any)?.imageMessage ? 'image' :
                     (content as any)?.videoMessage ? 'video' :
@@ -1823,20 +1929,9 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 }
 
                 const msgStatus = normalizeMessageStatus(msg.status);
-                let isRead = isFromMe;
-                if (!isRead) {
-                    if (msgStatus === 'read' || msgStatus === 'played') {
-                        isRead = true;
-                    } else if (isHistory) {
-                        // For history, mark as read unless explicitly identified as one of the N unread messages
-                        isRead = !forceUnread;
-                    } else {
-                        // Real-time messages are unread by default
-                        isRead = false;
-                    }
-                }
+                const isRead = isFromMe || (msgStatus === 'read' || msgStatus === 'played') || (isHistory && !forceUnread);
 
-                await dbInst.insert(messagesTable).ignore().values({
+                const data = {
                     id: messageId,
                     accountId,
                     contactJid: normalizedJid,
@@ -1847,79 +1942,76 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                     mediaType,
                     quotedMsgId: quotedMsgId ? `${accountId}:${quotedMsgId}` : null,
                     quotedMsgBody: quotedMsgBody || null,
+                    quotedMsgSenderName: quotedMsgSenderName || null,
                     reaction: null,
                     timestamp: safeTimestamp,
                     status: isFromMe ? (consumePendingStatus(accountId, msg.key.id || '') || 'sent') : (isRead ? 'read' : 'received'),
                     isRead: isRead
-                });
-                
+                };
+
                 if (isHistory) {
-                    const bucket = getHistoryProgressBucket(accountId);
-                    bucket.count++;
-                    if (bucket.count % 100 === 0) {
-                        console.log(`[${accountId}] History sync progress: ${bucket.count} messages stored...`);
-                    }
+                    return data;
                 }
 
-                if (!isHistory) {
-                    if (!isFromMe) {
-                        const emitter = getMessageEmitter();
-                        const pushName = msg.pushName || getContactName(accountId, normalizedJid);
-                        
-                        emitter.emit('new_message', {
-                            accountId,
-                            id: messageId,
-                            jid: normalizedJid,
-                            body: body || (mediaType ? `[${mediaType}]` : 'Yeni mesaj'),
-                            pushName: pushName,
-                            fromMe: isFromMe,
-                            timestamp: safeTimestamp.getTime()
-                        });
-                    }
-
-                    const sseData = {
-                        type: 'messages',
-                        accountId,
-                        jid: normalizedJid,
-                        fromMe: isFromMe
-                    };
-                    
-                    const sseMsg = `event: ${sseData.type}\ndata: ${JSON.stringify(sseData)}\n\n`;
+                await dbInst.insert(messagesTable).ignore().values(data);
+                
+                if (!isFromMe) {
                     const emitter = getMessageEmitter();
-                    emitter.emit('sse_raw', { accountId, message: sseMsg });
+                    const pushName = msg.pushName || getContactName(accountId, normalizedJid);
+                    
+                    emitter.emit('new_message', {
+                        accountId,
+                        id: messageId,
+                        jid: normalizedJid,
+                        body: body || (mediaType ? `[${mediaType}]` : 'Yeni mesaj'),
+                        pushName: pushName,
+                        fromMe: isFromMe,
+                        timestamp: safeTimestamp.getTime()
+                    });
+                }
 
-                    if (mediaType && msg.key.id) {
-                        try {
-                            const rawMsgId = msg.key.id;
-                            const thumb =
-                                (content as any)?.documentMessage?.jpegThumbnail ||
-                                (content as any)?.imageMessage?.jpegThumbnail ||
-                                (content as any)?.videoMessage?.jpegThumbnail ||
-                                null;
-                            if (thumb) {
-                                const thumbsDir = path.join(MEDIA_PATH, accountId, 'thumbs');
-                                if (!fs.existsSync(thumbsDir)) fs.mkdirSync(thumbsDir, { recursive: true });
-                                const thumbPath = path.join(thumbsDir, `${rawMsgId}.jpg`);
-                                if (!fs.existsSync(thumbPath)) {
-                                    const thumbBuffer = Buffer.isBuffer(thumb) ? thumb : Buffer.from(thumb);
-                                    fs.writeFileSync(thumbPath, thumbBuffer);
-                                }
-                            }
-                        } catch (thumbErr: any) {}
-                    }
+                const sseData = {
+                    type: 'messages',
+                    accountId,
+                    jid: normalizedJid,
+                    fromMe: isFromMe
+                };
+                
+                const sseMsg = `event: ${sseData.type}\ndata: ${JSON.stringify(sseData)}\n\n`;
+                const emitter = getMessageEmitter();
+                emitter.emit('sse_raw', { accountId, message: sseMsg });
 
-                    if (mediaType && msg.key.id) {
-                        try {
-                            const rawMsgId = msg.key.id;
-                            const rawDir = path.join(MEDIA_PATH, accountId, 'raw');
-                            if (!fs.existsSync(rawDir)) fs.mkdirSync(rawDir, { recursive: true });
-                            const rawPath = path.join(rawDir, `${rawMsgId}.bin`);
-                            if (!fs.existsSync(rawPath)) {
-                                const bytes = proto.WebMessageInfo.encode(msg as any).finish();
-                                fs.writeFileSync(rawPath, Buffer.from(bytes));
+                if (mediaType && msg.key.id) {
+                    try {
+                        const rawMsgId = msg.key.id;
+                        const thumb =
+                            (content as any)?.documentMessage?.jpegThumbnail ||
+                            (content as any)?.imageMessage?.jpegThumbnail ||
+                            (content as any)?.videoMessage?.jpegThumbnail ||
+                            null;
+                        if (thumb) {
+                            const thumbsDir = path.join(MEDIA_PATH, accountId, 'thumbs');
+                            if (!fs.existsSync(thumbsDir)) fs.mkdirSync(thumbsDir, { recursive: true });
+                            const thumbPath = path.join(thumbsDir, `${rawMsgId}.jpg`);
+                            if (!fs.existsSync(thumbPath)) {
+                                const thumbBuffer = Buffer.isBuffer(thumb) ? thumb : Buffer.from(thumb);
+                                fs.writeFileSync(thumbPath, thumbBuffer);
                             }
-                        } catch (mediaErr: any) {}
-                    }
+                        }
+                    } catch (thumbErr: any) {}
+                }
+
+                if (mediaType && msg.key.id) {
+                    try {
+                        const rawMsgId = msg.key.id;
+                        const rawDir = path.join(MEDIA_PATH, accountId, 'raw');
+                        if (!fs.existsSync(rawDir)) fs.mkdirSync(rawDir, { recursive: true });
+                        const rawPath = path.join(rawDir, `${rawMsgId}.bin`);
+                        if (!fs.existsSync(rawPath)) {
+                            const bytes = proto.WebMessageInfo.encode(msg as any).finish();
+                            fs.writeFileSync(rawPath, Buffer.from(bytes));
+                        }
+                    } catch (mediaErr: any) {}
                 }
 
             } catch (dbErr: any) {
@@ -1945,8 +2037,9 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
             if (!from || from.includes('@g.us')) continue; // Ignore groups
 
             try {
-                const { db, remoteDb } = await import('./server/db');
-                const { accounts: accountsTable, userSettings, autoReplyHistory } = await import('./server/db/schema');
+                const db = await getSharedDb();
+                const remoteDb = await getSharedRemoteDb();
+                const { accounts: accountsTable, userSettings, autoReplyHistory } = await getSharedSchema();
                 const { userCredits } = await import('./server/db/remote-schema');
                 const { eq, sql, and } = await import('drizzle-orm');
 
@@ -2009,8 +2102,8 @@ export function getAccountStatus(accountId: string) {
 export async function getAllAccounts(storedAccounts: any[]) {
     if (!storedAccounts || storedAccounts.length === 0) return [];
     
-    const { db } = await import('./server/db');
-    const { messages } = await import('./server/db/schema');
+    const db = await getSharedDb();
+    const { messages } = await getSharedSchema();
     const { eq, and, count, notLike, inArray } = await import('drizzle-orm');
 
     const accountIds = storedAccounts.map(a => a.id);
@@ -2068,8 +2161,9 @@ export async function sendWhatsAppMessage(
     batchId?: string,
     replyTo?: { id?: string; body?: string; fromMe?: boolean; senderJid?: string | null; senderName?: string | null; mediaType?: string | null }
 ) {
-    const { db, remoteDb } = await import('./server/db');
-    const { accounts, logs, userSettings, messages } = await import('./server/db/schema');
+    const db = await getSharedDb();
+    const remoteDb = await getSharedRemoteDb();
+    const { accounts, logs, userSettings, messages } = await getSharedSchema();
     const { userCredits } = await import('./server/db/remote-schema');
     const { eq, sql, and, desc } = await import('drizzle-orm');
 
@@ -2623,8 +2717,8 @@ export async function removeAccount(accountId: string) {
             }
 
             // 3. Deep Purge (Database & Files)
-            const { db } = await import('./server/db');
-            const { messages, logs, autoReplyHistory, conversationPreferences } = await import('./server/db/schema');
+            const db = await getSharedDb();
+            const { messages, logs, autoReplyHistory, conversationPreferences } = await getSharedSchema();
             const { eq } = await import('drizzle-orm');
 
             console.log(`[${accountId}] Background: Purging database records...`);
@@ -2657,8 +2751,8 @@ export async function removeAccount(accountId: string) {
 
 export async function getLogs(userId?: number) {
     try {
-        const { db } = await import('./server/db');
-        const { logs, accounts } = await import('./server/db/schema');
+        const db = await getSharedDb();
+        const { logs, accounts } = await getSharedSchema();
         const { desc, eq, inArray } = await import('drizzle-orm');
 
         if (userId !== undefined && userId !== null && !isNaN(userId)) {
@@ -2857,7 +2951,7 @@ export async function markConversationAsReadOnWhatsApp(accountId: string, target
     if (normalizedTargetJids.length === 0) return;
 
     try {
-        const { db: dbInst } = await import('./server/db');
+        const dbInst = await getSharedDb();
         const { sql } = await import('drizzle-orm');
 
         const readKeys: any[] = [];
@@ -3043,8 +3137,8 @@ export async function initAllAccounts() {
     globalRef.baileysInitialized = true;
     
     try {
-        const { db } = await import('./server/db');
-        const { accounts } = await import('./server/db/schema');
+        const db = await getSharedDb();
+        const { accounts } = await getSharedSchema();
         const storedAccounts = await db.select().from(accounts);
         
         console.log(`Auto-initializing ${storedAccounts.length} accounts with Baileys...`);

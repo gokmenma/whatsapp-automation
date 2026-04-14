@@ -60,6 +60,7 @@ export const GET: RequestHandler = async ({ url, locals }) => {
     await ensureMessagesConversationIndex();
 
     const accountId = url.searchParams.get('accountId');
+    console.log(`[API] GET /api/messages accountId=${accountId}`);
     if (!accountId) throw error(400, 'accountId gerekli');
     const resolvedAccountId = accountId;
 
@@ -92,169 +93,80 @@ export const GET: RequestHandler = async ({ url, locals }) => {
         ])
     );
 
-    const selfNumber = String(getAccountStatus(accountId)?.user?.id || '')
-        .split('@')[0]
-        .split(':')[0]
-        .replace(/\D/g, '');
-
-    // One CTE query: returns 1 row per conversation with unread counts & preview.
-    // Much faster than fetching raw message rows and aggregating in 
-    const [rows]: any = await db.execute(sql`
-        WITH base AS (
-            SELECT
-                id,
-                contact_jid,
-                from_me,
-                body,
-                media_type,
-                timestamp,
-                status,
-                sender_jid,
-                quoted_msg_id,
-                quoted_msg_body,
-                reaction,
-                sender_name,
-                edited_at,
-                is_read,
-                ROW_NUMBER() OVER (PARTITION BY contact_jid ORDER BY timestamp DESC) as rn
-            FROM messages
-            WHERE account_id = ${accountId}
-              AND contact_jid NOT LIKE '%@newsletter'
-              AND contact_jid NOT LIKE '%@broadcast'
-        ),
-        unread AS (
-            SELECT
-                contact_jid,
-                body,
-                sender_name,
-                media_type,
-                timestamp,
-                status,
-                ROW_NUMBER() OVER (PARTITION BY contact_jid ORDER BY timestamp DESC) AS rn
-            FROM messages
-            WHERE account_id = ${accountId}
-              AND from_me = 0
-              AND contact_jid NOT LIKE '%@newsletter'
-              AND contact_jid NOT LIKE '%@broadcast'
-              AND status NOT IN ('read', 'played', 'deleted_me', 'deleted_everyone')
-        )
-        SELECT
-            b.contact_jid,
-            b.sender_name,
-            b.body,
-            b.from_me,
-            b.media_type,
-            b.timestamp,
-            b.status,
-            COALESCE(uc.cnt, 0)  AS unread_count,
-            lu.body              AS up_body,
-            lu.sender_name       AS up_sender,
-            lu.status            AS up_status,
-            lu.media_type        AS up_media_type,
-            lu.timestamp         AS up_timestamp
-        FROM (SELECT * FROM base WHERE rn = 1) b
-        LEFT JOIN (
-            SELECT contact_jid, COUNT(*) AS cnt FROM unread GROUP BY contact_jid
-        ) uc ON b.contact_jid = uc.contact_jid
-        LEFT JOIN (SELECT * FROM unread WHERE rn = 1) lu ON b.contact_jid = lu.contact_jid
-        ORDER BY b.timestamp DESC
-        LIMIT 300
-    `);
-
-    // console.log(`[MessagesAPI] Found ${rows.length} base conversations for account ${accountId}`);
-    // if (rows.length === 0) {
-    //     console.warn(`[MessagesAPI] No conversations found in DB for accountId=${accountId}`);
-    // }
-
-    const byCanonical = new Map<string, any>();
-    const directNumberCache = new Map<string, string>();
-    const conversationNameCache = new Map<string, string>();
-
-    function buildPreviewText(body: string, senderName: string, isGroup: boolean, fromMe: boolean) {
-        const cleaned = body.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-        if (!cleaned) return '';
-        if (isGroup && !fromMe) {
-            const sender = senderName.trim();
-            if (sender) return `${sender}: ${cleaned}`;
-        }
-        return cleaned;
+    // Fetch conversations with latest message and unread counts in one optimized query
+    let rows: any[] = [];
+    try {
+        const [queryResult]: any = await db.execute(sql`
+            SELECT 
+                m.contact_jid,
+                m.id as lastMessageId,
+                m.body as lastMessageBody,
+                m.media_type as mediaType,
+                m.timestamp as lastMessageTimestamp,
+                m.from_me as fromMe,
+                m.status as status,
+                m.sender_name as senderName,
+                m.sender_jid as senderJid,
+                COALESCE(u.cnt, 0) as unreadCount
+            FROM messages m
+            INNER JOIN (
+                SELECT contact_jid, MAX(timestamp) as max_ts
+                FROM messages
+                WHERE account_id = ${accountId}
+                  AND contact_jid NOT LIKE '%@newsletter'
+                  AND contact_jid NOT LIKE '%@broadcast'
+                GROUP BY contact_jid
+            ) m2 ON m.contact_jid = m2.contact_jid AND m.timestamp = m2.max_ts
+            LEFT JOIN (
+                SELECT contact_jid, COUNT(*) as cnt
+                FROM messages
+                WHERE account_id = ${accountId} AND from_me = 0 AND is_read = 0
+                GROUP BY contact_jid
+            ) u ON m.contact_jid = u.contact_jid
+            WHERE m.account_id = ${accountId}
+            GROUP BY m.contact_jid
+            ORDER BY m.timestamp DESC
+            LIMIT 300
+        `);
+        rows = (queryResult as any) || [];
+    } catch (err: any) {
+        console.error(`[API] Database error fetching conversations for ${accountId}:`, err.message || err);
+        throw error(500, 'Veritabanı hatası: ' + (err.message || 'Bilinmeyen hata'));
     }
 
-    function resolveNumberForJid(jid: string, isGroup: boolean) {
-        if (isGroup) return jid.split('@')[0];
-        const cached = directNumberCache.get(jid);
-        if (cached !== undefined) return cached;
-        const resolved = resolveDirectConversationNumber(resolvedAccountId, jid) || '';
-        directNumberCache.set(jid, resolved);
-        return resolved;
-    }
-
-    function resolveConversationName(jid: string, isGroup: boolean, number: string) {
-        const key = isGroup ? `group:${jid}` : `direct:${number}`;
-        const cached = conversationNameCache.get(key);
-        if (cached !== undefined) return cached;
-        const resolved = isGroup
-            ? (getContactName(resolvedAccountId, jid) || '')
-            : (getContactName(resolvedAccountId, jid) || getContactName(resolvedAccountId, `${number}@s.whatsapp.net`) || '');
-        conversationNameCache.set(key, resolved);
-        return resolved;
-    }
-
-    // Each row is already the latest message for its conversation — O(conversations) not O(messages)
-    for (const row of rows as any[]) {
-        const jid = String(row.contact_jid || '');
-        if (!jid) continue;
-
+    const conversations: any[] = [];
+    for (const row of (rows as any[]) || []) {
+        const jid = String(row.contact_jid || row.contactJid || '').trim();
+        if (!jid || jid === 'undefined') continue;
+        
         const isGroup = jid.endsWith('@g.us');
-        const number = resolveNumberForJid(jid, isGroup);
-        if (!number) {
-            console.warn(`[MessagesAPI] Could not resolve number for JID: ${jid}`);
-            continue;
-        }
+        const number = isGroup ? jid.split('@')[0] : (getCanonicalContactNumber(accountId, jid) || normalizeDigits(jid));
+        
+        const prefs = preferenceMap.get(isGroup ? jid : number);
+        
+        const date = new Date(row.lastMessageTimestamp);
+        date.setHours(date.getHours() + 3);
 
-        const rowBody = String(row.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-        // Catch zero-width-space ghost rows that SQL couldn't filter
-        const isGhostRow = !row.media_type && !rowBody && row.status !== 'deleted_me' && row.status !== 'deleted_everyone';
-        if (isGhostRow) continue;
+        const contactName = isGroup ? jid : (number + '@s.whatsapp.net');
 
-        const conversationKey = isGroup ? jid : number;
-        if (byCanonical.has(conversationKey)) continue; // deduplicate same-number different-JID variants
-
-        const prefs = preferenceMap.get(conversationKey);
-        const resolvedName = resolveConversationName(jid, isGroup, number);
-
-        const lastMessage = buildPreviewText(rowBody, String(row.sender_name || ''), isGroup, Boolean(row.from_me));
-
-        const upBody = String(row.up_body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-        const unreadPreviewText = buildPreviewText(upBody, String(row.up_sender || ''), isGroup, false);
-
-        const lastMessageAt = row.timestamp ? Math.floor(new Date(row.timestamp).getTime() / 1000) : Math.floor(Date.now() / 1000);
-
-        const unreadPreviewAt = row.up_timestamp ? Math.floor(new Date(row.up_timestamp).getTime() / 1000) : 0;
-
-        byCanonical.set(conversationKey, {
+        conversations.push({
+            id: jid,
             contactJid: jid,
-            name: resolvedName,
-            number,
-            lastMessage: lastMessage || rowBody,
-            lastMessageFromMe: Boolean(row.from_me),
-            lastMessageStatus: String(row.status || ''),
-            lastMessageMediaType: row.media_type,
-            lastMessageAt,
-            unreadPreview: unreadPreviewText,
-            unreadPreviewFromMe: false,
-            unreadPreviewStatus: String(row.up_status || ''),
-            unreadPreviewMediaType: row.up_media_type || null,
-            unreadPreviewAt,
-            unreadCount: Number(row.unread_count || 0),
+            name: getContactName(accountId, contactName) || jid.split('@')[0],
+            number: number,
+            lastMessage: String(row.lastMessageBody || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim(),
+            lastMessageAt: Math.floor(date.getTime() / 1000),
+            lastMessageFromMe: Boolean(row.fromMe),
+            lastMessageStatus: row.status,
+            lastMessageMediaType: row.mediaType,
+            senderName: row.senderName,
+            unreadCount: Number(row.unreadCount),
             muted: Boolean(prefs?.muted),
             archived: Boolean(prefs?.archived)
         });
     }
 
-    const conversations = Array.from(byCanonical.values())
-        .sort((a, b) => Number(b.lastMessageAt || 0) - Number(a.lastMessageAt || 0));
-
+    console.log(`[API] Returning ${conversations.length} conversations for accountId=${accountId}`);
     return json({ conversations });
 };
 

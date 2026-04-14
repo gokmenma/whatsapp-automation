@@ -106,13 +106,36 @@
     let selectedConversationJids = $state<Set<string>>(new Set());
     let conversationsPaneWidth = $state(340);
     let resizingConversationsPane = $state(false);
-    let avatarUrls = $state<Record<string, string | null>>({});
+    let forwardDialogOpen = $state(false);
+    let messageToForward = $state<any>(null);
+    let forwardTargetJids = $state(new Set<string>());
+    let forwardingInProgress = $state(false);
+    let avatarUrls = $state<Record<string, string>>({});
+    let avatarColorCache = new Map<string, string>();
+
+
+    function scrollToMessage(msgId: string) {
+        if (!msgId) return;
+        const targetId = msgId.startsWith('msg-') ? msgId : `msg-${msgId}`;
+        const el = document.getElementById(targetId);
+        if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el.animate([
+                { backgroundColor: 'transparent' },
+                { backgroundColor: 'rgba(16, 185, 129, 0.2)' },
+                { backgroundColor: 'transparent' }
+            ], {
+                duration: 2000,
+                easing: 'ease-in-out'
+            });
+        }
+    }
     let typingIndicatorText = $state('');
     let typingIndicatorUntil = $state(0);
     let typingIndicatorChatJid = $state('');
     let showScrollToBottomButton = $state(false);
     let unreadMessagesWhileScrolling = $state(0);
-    let typingByChat = $state<Record<string, { text: string; until: number }>>({});
+    let typingByChat = $state<Record<string, { text: string; until: number; participantJid?: string; participantName?: string }>>({});
     type LinkPreview = {
         url: string;
         title: string;
@@ -247,18 +270,28 @@
     // Derived
     let readyAccounts = $derived(data.accounts.filter((a: any) => a.status === 'ready'));
     let selectedAccountName = $derived(data.accounts.find((a: any) => String(a.id) === String(selectedAccountId))?.name || 'Seçili Hesap Yok');
-    let filteredConversations = $derived(
-        searchQuery.trim()
-            ? conversations.filter(c =>
-                c.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                c.number?.includes(searchQuery)
-              )
-            : conversations
-    );
-    let archivedConversationCount = $derived(conversations.filter((conv) => conv.archived).length);
-    let visibleConversations = $derived(
-        filteredConversations.filter((conv) => isArchivedView ? conv.archived : !conv.archived)
-    );
+
+    let visibleConversations = $derived.by(() => {
+        let results = [...conversations];
+        
+        // Filter by search
+        if (searchQuery.trim()) {
+            const q = searchQuery.toLowerCase();
+            results = results.filter(c => 
+                c.name?.toLowerCase().includes(q) || 
+                c.number?.includes(q)
+            );
+        }
+        
+        // Filter by archive
+        results = results.filter(c => isArchivedView ? c.archived : !c.archived);
+        
+        return results;
+    });
+
+    let archivedConversationCount = $derived(conversations.filter(c => c.archived).length);
+
+
 
     function buildConversationSnapshot(conv: any) {
         return [
@@ -472,10 +505,14 @@
             conversations.map((conv) => [String(conv?.contactJid || ''), conv])
         );
         const normalizedConversations: any[] = [];
+        const seenJids = new Set<string>();
 
         for (const originalConv of nextConversations) {
             const conv = { ...originalConv };
-            const key = String(conv.contactJid || '');
+            const key = String(conv.contactJid || '').trim();
+            if (!key || key === 'undefined' || seenJids.has(key)) continue;
+            seenJids.add(key);
+
             const prevConv = previousByJid.get(key);
             const prevUnread = Math.max(0, Number(prevConv?.unreadCount || 0));
             const nextUnreadRaw = Math.max(0, Number(conv?.unreadCount || 0));
@@ -500,9 +537,7 @@
             if (isActiveConversation) {
                 effectiveUnread = 0;
             } else if (conversationsSnapshotInitialized) {
-                // Keep a local unread fallback so incoming messages still show badge
-                // even when backend unread state lags behind for closed conversations.
-                if (messageChanged && isIncomingByDirection && nextUnreadRaw === 0) {
+                if (messageChanged && isIncomingByDirection && nextUnreadRaw === 0 && conv.lastMessageStatus !== 'read' && conv.lastMessageStatus !== 'played') {
                     effectiveUnread = Math.max(prevUnread + 1, 1);
                 }
             }
@@ -518,27 +553,27 @@
 
             const snapshot = buildConversationSnapshot(conv);
             nextSnapshots.set(key, snapshot);
-            normalizedConversations.push(conv);
-
-            if (!conversationsSnapshotInitialized) continue;
-
-            const unreadIncreased = effectiveUnread > prevUnread;
-            const isMuted = toBool(conv?.muted);
-            const isArchived = toBool(conv?.archived);
             
-            // Fix: Only notify if the message itself changed (not just unread count) 
-            // and it's not the active conversation.
-            const shouldNotifyForConversation = 
-                !isActiveConversation && 
-                messageChanged && 
-                (isIncomingByDirection || unreadIncreased) && 
-                !isMuted && 
-                !isArchived;
+            // Notification logic
+            if (conversationsSnapshotInitialized) {
+                const unreadIncreased = effectiveUnread > prevUnread;
+                const isMuted = toBool(conv?.muted);
+                const isArchived = toBool(conv?.archived);
+                
+                const shouldNotifyForConversation = 
+                    !isActiveConversation && 
+                    messageChanged && 
+                    (isIncomingByDirection || unreadIncreased) && 
+                    !isMuted && 
+                    !isArchived;
 
-            if (shouldNotifyForConversation) {
-                shouldPlayNotification = true;
-                incomingConversationsToNotify.push(conv);
+                if (shouldNotifyForConversation) {
+                    shouldPlayNotification = true;
+                    incomingConversationsToNotify.push(conv);
+                }
             }
+
+            normalizedConversations.push(conv);
         }
 
         conversationSnapshots = nextSnapshots;
@@ -577,6 +612,7 @@
 
         const accountId = activeAccountId;
         const requestId = ++conversationsRequestSeq;
+        console.log(`[Conversations] Starting load requestId=${requestId} accountId=${accountId}`);
         conversationsFetchInFlight = true;
         loadingConversations = true;
         const abortController = new AbortController();
@@ -594,8 +630,14 @@
                 const responseData = await res.json();
                 if (requestId !== conversationsRequestSeq || accountId !== selectedAccountId) return;
                 const nextConversations = responseData.conversations || [];
+                console.log(`[Conversations] API returned ${nextConversations.length} items for account ${accountId}`);
+                if (nextConversations.length > 0) {
+                    toast.success(`${nextConversations.length} sohbet yüklendi`);
+                } else {
+                    toast.info('Henüz mesaj kaydı bulunamadı');
+                }
                 const trackedConversations = trackConversationChanges(nextConversations);
-                conversations = trackedConversations;
+                conversations = [...trackedConversations]; // Force reactivity with spread
 
                 if (selectedContact?.jid) {
                     const refreshed = trackedConversations.find((c: any) => c.contactJid === selectedContact?.jid);
@@ -608,15 +650,19 @@
                     }
                 }
             } else {
-                conversations = [];
+                // conversations = [];
+                console.warn('[Conversations] API returned non-ok status');
             }
         } catch (e) {
+            console.error('[Conversations] Catch error:', e);
             if (requestId === conversationsRequestSeq && accountId === selectedAccountId) {
-                conversations = [];
+                // conversations = [];
             }
         } finally {
             clearTimeout(timeoutId);
             conversationsFetchInFlight = false;
+            console.log(`[Conversations] Finished load requestId=${requestId} currentSeq=${conversationsRequestSeq}`);
+            // Always clear loading state if this was the last started request
             if (requestId === conversationsRequestSeq) {
                 loadingConversations = false;
             }
@@ -631,9 +677,21 @@
     // Load messages for selected contact
     async function scrollMessagesToBottom(behavior: ScrollBehavior = 'auto') {
         await tick();
+        await tick();
         if (messagesContainerEl) {
             messagesContainerEl.scrollTo({ top: messagesContainerEl.scrollHeight, behavior });
         }
+        // Fallback for any dynamic content resizing (like PDF thumbnails loading)
+        setTimeout(() => {
+            if (messagesContainerEl) {
+                messagesContainerEl.scrollTo({ top: messagesContainerEl.scrollHeight, behavior });
+            }
+        }, 100);
+        setTimeout(() => {
+            if (messagesContainerEl) {
+                messagesContainerEl.scrollTo({ top: messagesContainerEl.scrollHeight, behavior });
+            }
+        }, 300);
     }
 
     async function loadMessages(scrollToBottom = false, initialScrollBehavior: ScrollBehavior = 'auto') {
@@ -662,6 +720,7 @@
                         return m.id !== prev.id ||
                             m.body !== prev.body ||
                             m.status !== prev.status ||
+                            Boolean(m.isRead) !== Boolean(prev.isRead) ||
                             (m.mediaType || m.media_type) !== (prev.mediaType || prev.media_type) ||
                             m.timestamp !== prev.timestamp ||
                             m.editedAt !== prev.editedAt;
@@ -768,7 +827,20 @@
         );
 
         selectedContact = { jid: conv.contactJid, name: conv.name, number: conv.number };
-        clearTypingIndicator();
+        
+        // Restore typing state if already active for this chat
+        const chatKey = normalizeTypingChatKey(conv.contactJid);
+        const activeTyping = typingByChat[chatKey];
+        if (activeTyping && activeTyping.until > Date.now()) {
+            typingIndicatorText = activeTyping.text;
+            typingIndicatorChatJid = conv.contactJid;
+            typingIndicatorUntil = activeTyping.until;
+        } else {
+            clearTypingIndicator();
+        }
+        if (typeof window !== 'undefined') {
+            window.localStorage.setItem('lastSelectedChatJid', conv.contactJid || '');
+        }
         if (selectedAccountId && conv.contactJid) {
             // Subscribe to presence
             void fetch('/api/whatsapp/presence-subscribe', {
@@ -1026,29 +1098,78 @@
         e.preventDefault();
         contextMenu = null;
         
-        // Position menu relative to the target element if possible, or use mouse coordinates
-        const target = e.currentTarget as HTMLElement;
-        const rect = target.getBoundingClientRect();
-        
-        const menuHeight = canEditMessage(msg) ? 360 : 330;
+        const menuHeight = 350;
         const menuWidth = 220;
         
-        // Try to place the menu to the left of the message for outgoing, right for incoming
-        const isFromMe = Boolean(msg.fromMe || msg.from_me);
+        let x = e.clientX + 5;
+        if (x + menuWidth > window.innerWidth) {
+            x = e.clientX - menuWidth - 10;
+        }
         
-        let x = isFromMe ? rect.left - menuWidth - 8 : rect.right + 8;
-        let y = e.clientY - (menuHeight / 2);
+        let y = e.clientY;
+        if (y + menuHeight > window.innerHeight) {
+            y = e.clientY - menuHeight;
+        }
         
-        // Fallback for tight screens
-        if (x < 8) x = rect.right + 8;
-        if (x + menuWidth > window.innerWidth) x = rect.left - menuWidth - 8;
-        if (x < 8) x = e.clientX; // desperate fallback
-        
-        // Bounds checking for Y
-        if (y < 8) y = 8;
-        if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 8;
+        if (x < 5) x = 5;
+        if (y < 5) y = 5;
         
         messageMenu = { x, y, msg };
+    }
+
+    function openForwardDialog(msg: any) {
+        messageToForward = msg;
+        forwardTargetJids = new Set();
+        forwardDialogOpen = true;
+        messageMenu = null;
+    }
+
+    function toggleForwardTarget(jid: string) {
+        if (forwardTargetJids.has(jid)) {
+            forwardTargetJids.delete(jid);
+        } else {
+            forwardTargetJids.add(jid);
+        }
+        forwardTargetJids = new Set(forwardTargetJids);
+    }
+
+    async function sendForward() {
+        if (!messageToForward || forwardTargetJids.size === 0 || forwardingInProgress) return;
+        forwardingInProgress = true;
+        
+        let successCount = 0;
+        const jids = Array.from(forwardTargetJids);
+        
+        try {
+            for (const jid of jids) {
+                const body = messageToForward.body || '';
+                const mediaType = messageToForward.mediaType || messageToForward.media_type;
+                
+                const formData = new FormData();
+                formData.append('accountId', selectedAccountId);
+                formData.append('targetJid', jid);
+                formData.append('text', body);
+                
+                const res = await fetch('/api/messages/send', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (res.ok) successCount++;
+            }
+            
+            if (successCount > 0) {
+                toast.success(`${successCount} kişiye iletildi`);
+                forwardDialogOpen = false;
+                await loadConversations();
+            } else {
+                toast.error('İletilemedi');
+            }
+        } catch (e) {
+            toast.error('İletim sırasında hata oluştu');
+        } finally {
+            forwardingInProgress = false;
+        }
     }
 
     function handleScroll() {
@@ -1541,8 +1662,10 @@
                 : null,
             quotedMsgId: replyTo?.id || null,
             quotedMsgBody: replyTo?.body || null,
+            mediaUrl: media?.data || null,
             timestamp: Math.floor(Date.now() / 1000),
-            status: 'sent'
+            status: 'sent',
+            isRead: true
         }];
         await scrollMessagesToBottom('smooth');
 
@@ -1716,9 +1839,10 @@
 
     function formatTypingText(payload: any) {
         const presence = String(payload?.presence || '').toLowerCase();
+        const chatJid = String(payload?.chatJid || '').trim();
         const participantName = String(payload?.participantName || '').trim();
         const baseText = presence === 'recording' ? 'ses kaydediyor...' : 'yazıyor...';
-        if (isGroupJid(selectedContact?.jid) && participantName) return `${participantName} ${baseText}`;
+        if (isGroupJid(chatJid) && participantName) return `${participantName} ${baseText}`;
         return baseText;
     }
 
@@ -2157,10 +2281,11 @@
     $effect(() => {
         const nextAccountId = String(selectedAccountId || '').trim();
         if (!nextAccountId) {
+            console.log('[AccountEffect] Clearing state because nextAccountId is empty');
             lastHandledAccountId = '';
-            conversations = [];
+            // conversations = [];
             selectedContact = null;
-            messages = [];
+            // messages = [];
             loadingConversations = false;
             exitSelectionMode();
             stopPolling();
@@ -2175,10 +2300,11 @@
         conversationsRequestSeq += 1;
         conversationsFetchInFlight = false;
         conversationsReloadQueued = false;
-        conversations = [];
-        loadingConversations = true;
         selectedContact = null;
-        messages = [];
+        // messages = [];
+        const urlParams = new URL(window.location.href).searchParams;
+        pendingInitialContactJid = String(urlParams.get('contact') || '').trim();
+        if (pendingInitialContactJid === 'undefined') pendingInitialContactJid = '';
         isArchivedView = false;
         exitSelectionMode();
         stopPolling();
@@ -2202,8 +2328,16 @@
                         await selectConversation(conv);
                     }
                 } else if (!selectedContact && visibleConversations.length > 0) {
-                    // Default to the first ACTUAL conversation, not the archived header
-                    await selectConversation(visibleConversations[0]);
+                    // Try to restore last selected chat from localStorage
+                    const savedJid = typeof window !== 'undefined' ? window.localStorage.getItem('lastSelectedChatJid') : null;
+                    const savedConv = savedJid ? visibleConversations.find(c => c.contactJid === savedJid) : null;
+                    
+                    if (savedConv) {
+                        await selectConversation(savedConv);
+                    } else {
+                        // Default to the first ACTUAL conversation
+                        await selectConversation(visibleConversations[0]);
+                    }
                 }
             }
         })();
@@ -2239,6 +2373,7 @@
         const urlAccount = urlParams.get('account');
         if (urlAccount && data.accounts.some((a: any) => String(a.id) === urlAccount)) selectedAccountId = urlAccount;
         pendingInitialContactJid = String(urlParams.get('contact') || '').trim();
+        if (pendingInitialContactJid === 'undefined') pendingInitialContactJid = '';
 
         startTypingStream();
         
@@ -2363,7 +2498,7 @@
         {:else if visibleConversations.length === 0}
             <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center"><MessageSquareIcon class="w-12 h-12 text-muted-foreground/40" /><p class="text-sm text-muted-foreground">{searchQuery ? 'Sonuç bulunamadı' : (isArchivedView ? 'Arşivlenmiş konuşma yok' : 'Henüz mesaj yok')}</p>{#if !searchQuery && !isArchivedView}<p class="text-xs text-muted-foreground/70">Mesaj gönderdiğinizde burada görünecek.</p><button class="text-xs text-primary hover:underline" onclick={openNewChatDialog}>Yeni konuşma başlat →</button>{/if}</div>
         {:else}
-            <div class="flex-1 overflow-y-auto">
+            <div class="flex-1 overflow-y-auto pt-3">
                 {#each visibleConversations as conv (conv.contactJid)}
                     {@const isActive = selectedContact?.jid === conv.contactJid}
                     {@const isSelected = selectedConversationJids.has(conv.contactJid)}
@@ -2374,7 +2509,7 @@
                     {@const previewMediaType = useUnreadPreview ? (conv.unreadPreviewMediaType || null) : (conv.lastMessageMediaType || null)}
                     {@const previewText = useUnreadPreview ? String(conv.unreadPreview || '').trim() : String(conv.lastMessage || '').trim()}
                     {@const typingPreview = getTypingPreview(String(conv.contactJid || ''))}
-                    <button class="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors text-left border-b border-border/50 cursor-pointer {selectionMode && isSelected ? 'bg-primary/8 border-l-2 border-l-primary' : ''} {(!selectionMode && isActive) ? 'bg-primary/10 border-l-2 border-l-primary' : ''}" onclick={() => selectConversation(conv)} oncontextmenu={(e) => handleConvContextMenu(e, conv)}>{#if selectionMode}<div class="shrink-0 w-5 h-5 rounded-md border flex items-center justify-center text-[11px] font-bold {isSelected ? 'bg-primary text-primary-foreground border-primary' : 'border-muted-foreground/50 text-transparent'}">✓</div>{/if}
+                    <button class="w-[94%] mx-auto flex items-center gap-3 px-3 py-3 transition-all text-left cursor-pointer rounded-2xl mb-1 {selectionMode && isSelected ? 'bg-primary/20 scale-[0.98]' : ''} {(!selectionMode && isActive) ? 'bg-muted shadow-sm scale-[0.99] ring-1 ring-border/50' : 'hover:bg-muted/40'}" onclick={() => selectConversation(conv)} oncontextmenu={(e) => handleConvContextMenu(e, conv)}>{#if selectionMode}<div class="shrink-0 w-5 h-5 rounded-md border flex items-center justify-center text-[11px] font-bold {isSelected ? 'bg-primary text-primary-foreground border-primary' : 'border-muted-foreground/50 text-transparent'}">✓</div>{/if}
                         {#if avatarUrls[conv.contactJid]}<img src={avatarUrls[conv.contactJid] || ''} alt={conv.name} class="shrink-0 w-10 h-10 rounded-full object-cover" onerror={() => clearAvatarUrl(conv.contactJid)} />{:else}<div class="shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-semibold" style="background-color: {avatarColor(conv.name)};">{getInitials(conv.name)}</div>{/if}
                         <div class="flex-1 min-w-0"><div class="flex items-baseline justify-between gap-1"><div class="flex items-center gap-2 min-w-0"><span class="font-medium text-sm truncate">{conv.name}</span>{#if conv.muted}<span class="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Sessizde</span>{/if}</div><span class="text-xs shrink-0 {unreadCount > 0 ? 'text-emerald-600 font-semibold' : 'text-muted-foreground'}">{formatConvTime(conv.lastMessageAt)}</span></div><div class="flex items-center gap-2 mt-0.5">                                                <div class="flex items-center gap-1 min-w-0 flex-1">{#if previewFromMe}<span class={statusTickClass(previewStatus)} aria-hidden="true">{#if isDoubleTickStatus(previewStatus)}<svg viewBox="0 0 18 11" width="16" height="10" class="shrink-0" fill="currentColor"><path d="M17.394 1.48a.72.72 0 0 0-1.018 0l-8.508 8.508L4.31 6.43a.72.72 0 1 0-1.018 1.018l4.066 4.066a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Zm-4.99 0a.72.72 0 0 0-1.018 0l-7.9 7.9-2.066-2.066a.72.72 0 0 0-1.018 1.018l2.574 2.574a.72.72 0 0 0 1.018 0l8.41-8.41a.72.72 0 0 0 0-1.016Z"></path></svg>{:else if isFailedStatus(previewStatus)}!{:else}<svg viewBox="0 0 16 11" width="14" height="10" class="shrink-0" fill="currentColor"><path d="M15.01 1.48a.72.72 0 0 0-1.018 0L5.484 10.003l-4.06-4.06a.72.72 0 1 0-1.018 1.018l4.06 4.06a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Z"></path></svg>{/if}</span>{/if}<span class="text-xs truncate {typingPreview ? 'text-emerald-600 font-medium' : (unreadCount > 0 ? 'text-emerald-600 font-medium' : 'text-muted-foreground')}">{#if typingPreview}{typingPreview}{:else}{previewMediaType ? mediaIcon(previewMediaType) : previewText}{/if}</span></div>{#if unreadCount > 0}<span class="shrink-0 inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[11px] font-semibold text-white">{unreadCount > 99 ? '99+' : unreadCount}</span>{/if}</div></div>
                     </button>
@@ -2397,8 +2532,10 @@
         </div>{/if}
 
         <AlertDialog.Root bind:open={deleteDialogOpen}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>{convToDelete?.name || convToDelete?.number} silinsin mi?</AlertDialog.Title><AlertDialog.Description>Tüm mesajlar kalıcı olarak silinecektir. Bu işlem geri alınamaz.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel disabled={deletingConversation}>Vazgeç</AlertDialog.Cancel><AlertDialog.Action onclick={confirmDelete} disabled={deletingConversation} class="bg-destructive text-white hover:bg-destructive/90">{#if deletingConversation}<span class="inline-flex items-center gap-2"><span class="w-3.5 h-3.5 border-2 border-white/90 border-t-transparent rounded-full animate-spin"></span>Siliniyor...</span>{:else}Sil{/if}</AlertDialog.Action></AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>
-
+ 
         <Dialog.Root bind:open={newChatDialogOpen}><Dialog.Content class="sm:max-w-130 max-h-[80vh] flex flex-col"><Dialog.Header><Dialog.Title>Yeni konuşma başlat</Dialog.Title><Dialog.Description>Rehberden bir kişi seçip bu ekranda mesajlaşmaya başlayın.</Dialog.Description></Dialog.Header><div class="py-2"><div class="flex items-center gap-2 bg-muted/50 rounded-lg px-3 py-2 border border-border"><SearchIcon class="w-4 h-4 text-muted-foreground shrink-0" /><input type="text" placeholder="İsim veya numara ara..." bind:value={contactSearch} class="bg-transparent text-sm flex-1 outline-none placeholder:text-muted-foreground" /></div></div><div class="flex-1 overflow-y-auto border rounded-md">{#if isLoadingContacts}<div class="p-6 text-sm text-muted-foreground text-center">Rehber yükleniyor...</div>{:else if filteredContacts.length === 0}<div class="p-6 text-sm text-muted-foreground text-center">Kişi bulunamadı</div>{:else}{#each filteredContacts as contact (contact.id)}<button class="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-muted/50 border-b border-border/60 text-left" onclick={() => startChatWithContact(contact).catch(console.error)}><div class="shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-semibold" style="background-color: {avatarColor(contact.name || contact.number)};">{getInitials(contact.name || contact.number)}</div><div class="min-w-0"><div class="font-medium text-sm truncate">{contact.name || contact.number}</div><div class="text-xs text-muted-foreground">+{contact.number}</div></div></button>{/each}{/if}</div></Dialog.Content></Dialog.Root>
+ 
+        <Dialog.Root bind:open={forwardDialogOpen}><Dialog.Content class="sm:max-w-130 max-h-[80vh] flex flex-col"><Dialog.Header><Dialog.Title>Mesajı İlet</Dialog.Title><Dialog.Description>Seçilen kişilere bu mesajı iletin.</Dialog.Description></Dialog.Header><div class="py-2"><div class="flex items-center gap-2 bg-muted/50 rounded-lg px-3 py-2 border border-border"><SearchIcon class="w-4 h-4 text-muted-foreground shrink-0" /><input type="text" placeholder="Ara..." bind:value={contactSearch} class="bg-transparent text-sm flex-1 outline-none placeholder:text-muted-foreground" /></div></div><div class="flex-1 overflow-y-auto border rounded-md divide-y divide-border/40 truncate">{#if isLoadingContacts}<div class="p-6 text-sm text-muted-foreground text-center">Rehber yükleniyor...</div>{:else if filteredContacts.length === 0}<div class="p-6 text-sm text-muted-foreground text-center">Kişi bulunamadı</div>{:else}{#each filteredContacts as contact (contact.id)}<button type="button" class="w-full flex items-center gap-3 px-3 py-3 hover:bg-muted/40 text-left transition-colors" onclick={() => toggleForwardTarget(contact.id)}><div class="shrink-0 w-5 h-5 rounded border border-border flex items-center justify-center {forwardTargetJids.has(contact.id) ? 'bg-primary border-primary text-white' : 'bg-background'}">{#if forwardTargetJids.has(contact.id)}<CheckIcon class="w-3.5 h-3.5" />{/if}</div><div class="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-semibold" style="background-color: {avatarColor(contact.name || contact.number)};">{getInitials(contact.name || contact.number)}</div><div class="min-w-0 flex-1"><div class="font-medium text-sm truncate">{contact.name || contact.number}</div><div class="text-[11px] text-muted-foreground">+{contact.number}</div></div></button>{/each}{/if}</div><Dialog.Footer class="mt-4"><button type="button" class="px-6 py-2 bg-primary text-white rounded-lg font-bold shadow-lg disabled:opacity-50 transition-all hover:scale-105 active:scale-95" disabled={forwardTargetJids.size === 0 || forwardingInProgress} onclick={sendForward}>{#if forwardingInProgress}<span class="inline-flex items-center gap-2 animate-pulse"><span class="w-3 h-3 border-2 border-white/90 border-t-transparent rounded-full animate-spin"></span>İletiliyor...</span>{:else}Gönder ({forwardTargetJids.size}){/if}</button></Dialog.Footer></Dialog.Content></Dialog.Root>
     </div>
 
     <button type="button" class="hidden md:flex w-2 shrink-0 cursor-col-resize items-stretch select-none bg-transparent" onmousedown={startResizeConversationsPane}><div class="mx-auto my-2 w-0.5 rounded-full transition-colors {resizingConversationsPane ? 'bg-primary' : 'bg-border/80 hover:bg-primary/70'}"></div></button>
@@ -2412,7 +2549,7 @@
             <Dialog.Root bind:open={contactInfoOpen}><Dialog.Content class="sm:max-w-md bg-[#f7f7f6] border-[#e5e5e3]"><Dialog.Header><Dialog.Title>Kişi bilgisi</Dialog.Title></Dialog.Header>{#if selectedContact}{@const mediaCount = messages.filter((m) => Boolean(m?.mediaType || m?.media_type)).length}<div class="mt-1 space-y-3"><div class="rounded-2xl border border-border/60 bg-background px-4 py-4 text-center">{#if avatarUrls[selectedContact.jid]}<img src={avatarUrls[selectedContact.jid] || ''} alt={selectedContact.name} class="mx-auto h-24 w-24 rounded-full object-cover" onerror={() => clearAvatarUrl(selectedContact?.jid || '')} />{:else}<div class="mx-auto h-24 w-24 rounded-full flex items-center justify-center text-white text-2xl font-semibold" style="background-color: {avatarColor(selectedContact.name)};">{getInitials(selectedContact.name)}</div>{/if}<p class="mt-3 text-2xl font-semibold leading-tight">{selectedContact.name}</p><p class="mt-1 text-sm text-muted-foreground">+{selectedContact.number}</p><button class="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/50 px-4 py-2 text-sm hover:bg-muted" type="button"><SearchIcon class="w-4 h-4" /> Ara</button></div><div class="rounded-2xl border border-border/60 bg-background overflow-hidden"><div class="flex items-center justify-between px-4 py-3 text-sm"><div class="flex items-center gap-2"><FileIcon class="w-4 h-4 text-muted-foreground" /><span>Medya, bağlantı ve belgeler</span></div><span class="text-muted-foreground">{mediaCount}</span></div><div class="h-px bg-border/70"></div><div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground"><div class="flex items-center gap-2"><HeartIcon class="w-4 h-4" /><span>Yıldızlı mesajlar</span></div><span>0</span></div><div class="h-px bg-border/70"></div><div class="flex items-center justify-between px-4 py-3 text-sm text-muted-foreground"><div class="flex items-center gap-2"><BellOffIcon class="w-4 h-4" /><span>Bildirimleri sessize al</span></div><span>Kapalı</span></div></div><div class="rounded-2xl border border-border/60 bg-background px-4 py-3 text-xs text-muted-foreground"><div class="font-medium text-foreground mb-1">WhatsApp JID</div><div class="break-all">{selectedContact.jid}</div></div></div>{/if}</Dialog.Content></Dialog.Root>
 
             <div class="flex-1 relative overflow-hidden"><div class="absolute inset-0 pointer-events-none opacity-[0.4] dark:opacity-[0.1]" style="background-image: url('/wa-premium-bg.png'); background-repeat: repeat; background-size: 500px; background-position: center; z-index: 0;"></div>
-                <div class="absolute inset-0 overflow-y-auto px-4 py-3 space-y-1 z-10" bind:this={messagesContainerEl} onscroll={handleScroll}><div class="flex flex-col min-h-full">
+                <div class="absolute inset-0 overflow-y-auto px-4 py-3 space-y-1 z-10" bind:this={messagesContainerEl} onscroll={handleScroll}><div class="flex flex-col min-h-full justify-end">
                 {#if loadingMessages && messages.length === 0}
                     <div class="flex justify-center py-12"><div class="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin"></div></div>
                 {:else if messages.length === 0}
@@ -2440,16 +2577,41 @@
                             {@const msgTs = msg.timestamp < 1e12 ? msg.timestamp * 1000 : msg.timestamp}
                             {@const showDateSep = !prevMsgInList || (new Date(msgTs).toDateString() !== new Date(prevMsgInList.timestamp < 1e12 ? prevMsgInList.timestamp * 1000 : prevMsgInList.timestamp).toDateString())}
                             {@const mediaKind = msg.mediaType || msg.media_type}
-                            {@const mediaUrl = `/api/messages/media/${encodeURIComponent(msg.id)}`}
+                            {@const mediaUrl = msg.mediaUrl || `/api/messages/media/${encodeURIComponent(msg.id)}`}
                             {@const bodyText = String(msg.body || '').trim()}
                             {@const isSameSender = !showDateSep && i > 0 && Boolean(messages[i-1].fromMe) === isFromMe && resolveGroupSenderName(messages[i-1]) === senderName}
                             {#if showDateSep}<div class="flex justify-center py-6 mt-2 first:mt-0"><span class="text-xs bg-muted/90 text-muted-foreground px-4 py-1 rounded-full border border-border/40 font-medium shadow-sm">{new Date(msgTs).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Istanbul' })}</span></div>{/if}
-                            <div class="flex {isFromMe ? 'justify-end' : 'justify-start'} items-start gap-1.5 {isSameSender ? 'mt-0.5' : 'mt-4'}"><div class="relative flex flex-col max-w-[75%] z-10"><div class="flex flex-col text-[14.2px] shadow-sm {isDeleted ? 'bg-muted/70 opacity-80' : (isFromMe ? 'bg-[#d9fdd3] dark:bg-[#005c4b] text-[#111b21] dark:text-[#e9edef]' : 'bg-white dark:bg-[#202c33] text-[#111b21] dark:text-[#e9edef]')} rounded-lg {isFromMe ? 'rounded-tr-none' : 'rounded-lg rounded-tl-none'}" oncontextmenu={(e) => handleMessageContextMenu(e, msg)}>{#if !isFromMe && isGroupJid(selectedContact?.jid) && senderName}<div class="px-2.5 pt-1.5 pb-0 text-[12.5px] font-bold text-sky-600 dark:text-sky-400">{senderName}</div>{/if}{#if !isDeleted && mediaKind === 'image'}<div class="px-1 pt-1 pb-0"><button type="button" onclick={() => openMediaViewer(mediaUrl, 'image')} class="block w-full max-w-[320px] rounded-lg overflow-hidden"><img src={mediaUrl} alt="Fotoğraf" class="w-full h-auto max-h-[320px] object-cover" loading="lazy" /></button></div>{:else if !isDeleted && mediaKind === 'video'}<div class="px-1 pt-1 pb-0"><video controls class="w-full max-w-[320px] max-h-[320px] rounded-xl overflow-hidden block" preload="metadata"><source src={mediaUrl} /></video></div>{:else if !isDeleted && mediaKind === 'document'}<div class="px-1 pt-1 pb-0"><DocumentMessage {mediaUrl} {bodyText} onclick={() => openMediaViewer(mediaUrl, 'document', bodyText)} /></div>{/if}
+                            <div id="msg-{msg.id}" class="flex {isFromMe ? 'justify-end' : 'justify-start'} items-start gap-1.5 {isSameSender ? 'mt-1.5' : 'mt-6'} {msg.reaction && msg.reaction !== '[]' ? 'mb-4' : ''}"><div class="relative flex flex-col max-w-[75%] z-10"><div class="flex flex-col text-[14.2px] shadow-sm {isDeleted ? 'bg-muted/70 opacity-80' : (isFromMe ? 'bg-[#d9fdd3] dark:bg-[#005c4b] text-[#111b21] dark:text-[#e9edef]' : 'bg-white dark:bg-[#202c33] text-[#111b21] dark:text-[#e9edef]')} rounded-lg {isFromMe ? 'rounded-tr-none' : 'rounded-lg rounded-tl-none'}" oncontextmenu={(e) => handleMessageContextMenu(e, msg)}>
+                                {#if !isDeleted && msg.quotedMsgId && msg.quotedMsgBody}
+                                    <button type="button" class="mx-1 mt-1 mb-0.5 px-2 py-1.5 bg-black/5 dark:bg-white/5 rounded-md border-l-4 border-[#06d755] text-left overflow-hidden transition-colors hover:bg-black/10 dark:hover:bg-white/10" onclick={() => scrollToMessage(msg.quotedMsgId)}>
+                                        <div class="text-[12px] font-bold text-[#06d755] truncate">
+                                            {msg.quotedMsgSenderName || 'Mesaj'}
+                                        </div>
+                                        <div class="text-[12.5px] text-muted-foreground line-clamp-2 leading-tight opacity-90">
+                                            {msg.quotedMsgBody}
+                                        </div>
+                                    </button>
+                                {/if}
+                                {#if !isFromMe && isGroupJid(selectedContact?.jid) && senderName}
+<div class="px-2.5 pt-1.5 pb-0 text-[12.5px] font-bold text-sky-600 dark:text-sky-400">{senderName}</div>{/if}{#if !isDeleted && mediaKind === 'image'}<div class="px-1 pt-1 pb-0"><button type="button" onclick={() => openMediaViewer(mediaUrl, 'image')} class="block w-full max-w-[320px] rounded-lg overflow-hidden"><img src={mediaUrl} alt="Fotoğraf" class="w-full h-auto max-h-[320px] object-cover" loading="lazy" /></button></div>{:else if !isDeleted && mediaKind === 'video'}<div class="px-1 pt-1 pb-0"><video controls class="w-full max-w-[320px] max-h-[320px] rounded-xl overflow-hidden block" preload="metadata"><source src={mediaUrl} /></video></div>{:else if !isDeleted && mediaKind === 'document'}<div class="px-1 pt-1 pb-0"><DocumentMessage {mediaUrl} {bodyText} onclick={() => openMediaViewer(mediaUrl, 'document', bodyText)} /></div>{/if}
                                 {#if bodyText && mediaKind !== 'document'}<div class="px-2.5 py-1.5 whitespace-pre-wrap break-words leading-relaxed">{@html parseMessageFormatting(bodyText)}</div>{/if}
 
 
                                 <div class="flex items-center justify-end gap-1 px-2.5 pb-1.5 ml-auto"><span class="text-[10.5px] text-muted-foreground/70 leading-none">{formatTime(msg.timestamp)}</span>{#if isFromMe}<span class={"leading-none " + statusTickClass(msg.status)}>{#if isDoubleTickStatus(msg.status)}<svg viewBox="0 0 18 11" width="16" height="10" fill="currentColor" class="translate-y-0.5"><path d="M17.394 1.48a.72.72 0 0 0-1.018 0l-8.508 8.508L4.31 6.43a.72.72 0 1 0-1.018 1.018l4.066 4.066a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Zm-4.99 0a.72.72 0 0 0-1.018 0l-7.9 7.9-2.066-2.066a.72.72 0 0 0-1.018 1.018l2.574 2.574a.72.72 0 0 0 1.018 0l8.41-8.41a.72.72 0 0 0 0-1.016Z"></path></svg>{:else}<svg viewBox="0 0 16 11" width="14" height="10" fill="currentColor" class="translate-y-0.5"><path d="M15.01 1.48a.72.72 0 0 0-1.018 0L5.484 10.003l-4.06-4.06a.72.72 0 1 0-1.018 1.018l4.06 4.06a.72.72 0 0 0 1.018 0l9.018-9.018a.72.72 0 0 0 0-1.017Z"></path></svg>{/if}</span>{/if}</div></div>{#if msg.reaction && msg.reaction !== '[]'}{@const reactions = parseMessageReactions(msg.reaction)}<div class="absolute -bottom-3.5 right-2 flex items-center gap-0.5 pointer-events-none drop-shadow-sm z-30">{#each reactions as r}<div class="px-1.5 py-0.5 rounded-full bg-slate-50 dark:bg-slate-800 border-2 border-background text-[11.5px] font-medium pointer-events-auto hover:rotate-6 transition-transform">{r.emoji}</div>{/each}</div>{/if}</div></div>
                         {/each}
+                        {#if typingIndicatorText && typingIndicatorChatJid === selectedContact?.jid}
+                            <div class="flex justify-start items-start gap-1.5 mt-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                                <div class="relative flex flex-col max-w-[75%] z-10">
+                                    <div class="flex flex-col bg-white dark:bg-[#202c33] text-[#111b21] dark:text-[#e9edef] rounded-lg rounded-tl-none px-3 py-2.5 shadow-sm border border-border/20">
+                                        <div class="flex items-center gap-1.5 h-4 px-1">
+                                            <div class="typing-dot"></div>
+                                            <div class="typing-dot"></div>
+                                            <div class="typing-dot"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        {/if}
                         <div class="h-4" bind:this={messagesEndEl}></div>
                 {/if}
 
@@ -2465,7 +2627,13 @@
                 {/if}
                 </div></div></div>
 
-            {#if messageMenu}<div class="fixed min-w-40 bg-background border border-border rounded-lg shadow-lg py-1 z-50" style="left: {messageMenu.x}px; top: {messageMenu.y}px;" onmousedown={(e) => e.preventDefault()} role="menu" tabindex="0"><div class="flex items-center justify-around px-2 py-2 border-b border-border/50 bg-muted/20 gap-1">{#each ['👍', '❤️', '😂', '😮', '😢', '🙏'] as emoji}<button class="text-xl hover:scale-125 transition-transform p-1" onclick={() => sendReaction(messageMenu!.msg, emoji)}>{emoji}</button>{/each}</div><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={() => startReplyToMessage(messageMenu!.msg)}><CornerUpLeftIcon class="w-4 h-4" /> Cevapla</button><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={() => copyMessageText(messageMenu!.msg)}><FileIcon class="w-4 h-4" /> Kopyala</button><button class="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-muted" onclick={openMessageDeleteDialog}><TrashIcon class="w-4 h-4" /> Sil</button></div>{/if}
+            {#if messageMenu}<div class="fixed min-w-48 bg-background/95 backdrop-blur-md border border-border/40 rounded-xl shadow-[0_10px_30px_rgba(0,0,0,0.1)] py-1.5 z-50 overflow-hidden" style="left: {messageMenu.x}px; top: {messageMenu.y}px;" onmousedown={(e) => e.preventDefault()} role="menu" tabindex="0"><div class="flex items-center justify-around px-2 py-2 border-b border-border/40 bg-muted/10 gap-1">{#each ['👍', '❤️', '😂', '😮', '😢', '🙏'] as emoji}<button class="text-xl hover:scale-125 transition-transform p-1" onclick={() => sendReaction(messageMenu!.msg, emoji)}>{emoji}</button>{/each}</div>
+                <button class="w-full flex items-center gap-3 text-left px-4 py-2.5 text-[13.5px] transition-colors hover:bg-muted/60" onclick={() => startReplyToMessage(messageMenu!.msg)}><CornerUpLeftIcon class="w-4 h-4 text-muted-foreground" /> <span>Cevapla</span></button>
+                <button class="w-full flex items-center gap-3 text-left px-4 py-2.5 text-[13.5px] transition-colors hover:bg-muted/60" onclick={() => openForwardDialog(messageMenu!.msg)}><ForwardIcon class="w-4 h-4 text-muted-foreground" /> <span>İlet</span></button>
+                <button class="w-full flex items-center gap-3 text-left px-4 py-2.5 text-[13.5px] transition-colors hover:bg-muted/60" onclick={() => copyMessageText(messageMenu!.msg)}><FileIcon class="w-4 h-4 text-muted-foreground" /> <span>Kopyala</span></button>
+                <div class="h-px bg-border/40 my-1"></div>
+                <button class="w-full flex items-center gap-3 text-left px-4 py-2.5 text-[13.5px] text-destructive transition-colors hover:bg-destructive/8" onclick={openMessageDeleteDialog}><TrashIcon class="w-4 h-4" /> <span>Sil</span></button>
+            </div>{/if}
 
             <AlertDialog.Root bind:open={messageDeleteDialogOpen}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>Mesaj silinsin mi?</AlertDialog.Title><AlertDialog.Description>Bu mesajı sadece sizden veya herkesten silebilirsiniz.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel onclick={() => { msgToDelete = null; }}>Vazgeç</AlertDialog.Cancel><button class="px-3 py-2 text-sm rounded-md border border-border hover:bg-muted/50 inline-flex items-center gap-2" onclick={() => deleteSingleMessage('me')}><TrashIcon class="w-4 h-4" />Benden sil</button>{#if Boolean(msgToDelete?.fromMe || msgToDelete?.from_me) && isWithin24Hours(msgToDelete?.timestamp)}<button class="px-3 py-2 text-sm rounded-md bg-destructive text-white hover:bg-destructive/90 inline-flex items-center gap-2" onclick={() => deleteSingleMessage('everyone')}><TrashIcon class="w-4 h-4" />Herkesten sil</button>{/if}</AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>
 

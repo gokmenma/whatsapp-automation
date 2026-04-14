@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { accounts } from '$lib/server/db/schema';
 import { eq, sql } from 'drizzle-orm';
-import { getCanonicalContactNumber, getContactName, getAccountStatus, normalizeDigits } from '$lib/whatsapp';
+import { getCanonicalContactNumber, getContactName, getAccountStatus, normalizeDigits, getJidForLid, getLidForJid, getJidForNumber } from '$lib/whatsapp';
 import { markConversationAsReadOnWhatsApp } from '$lib/whatsapp';
 
 // Moved normalizeDigits to lib/whatsapp.ts
@@ -46,28 +46,17 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
     // Build the list of JIDs that belong to this conversation
     let targetJidList: string[] = [contactParam];
     if (!isGroupChat && contactNumber) {
-        // Find all unique contact_jids in messages for this account that resolve to this phone number
-        // We only look at recent messages (last 30 days) to keep this fast
-        const [jidRows]: any = await db.execute(sql`
-            SELECT DISTINCT contact_jid 
-            FROM messages 
-            WHERE account_id = ${accountId} 
-              AND (
-                contact_jid LIKE ${contactNumber + '%'} 
-                OR contact_jid LIKE '%@lid' 
-                OR contact_jid LIKE '%@s.whatsapp.net'
-              )
-        `);
-
-        (jidRows as any[]).forEach(r => {
-            const jid = String(r.contact_jid || '');
-            if (jid === contactParam) return;
-            
-            // If it's a direct match or resolves to the same phone number
-            if (normalizeDigits(jid) === contactNumber || getCanonicalContactNumber(accountId, jid) === contactNumber) {
-                targetJidList.push(jid);
-            }
-        });
+        // Use fast in-memory helpers instead of slow DB queries
+        const phoneJid = `${contactNumber}@s.whatsapp.net`;
+        if (phoneJid !== contactParam) targetJidList.push(phoneJid);
+        
+        // Try to find LID for this phone/contact
+        const lid = getLidForJid(accountId, contactParam) || getLidForJid(accountId, phoneJid);
+        if (lid && lid !== contactParam) targetJidList.push(lid);
+        
+        // Final fallback: check the number mapping specifically
+        const resolvedNumberJid = getJidForNumber(accountId, contactNumber);
+        if (resolvedNumberJid && !targetJidList.includes(resolvedNumberJid)) targetJidList.push(resolvedNumberJid);
     }
 
     // Ensure uniqueness
@@ -85,29 +74,32 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
 
     console.log(`[API] Fetching messages for account=${accountId}, contact=${contactParam}, targetJids=${targetJidList.join(', ')}`);
 
-    const [queryResult] = await Promise.all([
-        db.execute(sql`
-            SELECT
-                m.id,
-                m.account_id AS accountId,
-                m.contact_jid AS contactJid,
-                m.sender_jid AS senderJid,
-                m.sender_name AS senderName,
-                m.from_me AS fromMe,
-                m.body,
-                m.media_type AS mediaType,
-                m.quoted_msg_id AS quotedMsgId,
-                m.quoted_msg_body AS quotedMsgBody,
-                m.reaction,
-                m.edited_at AS editedAt,
-                m.timestamp,
-                m.status
-            FROM messages m
-            WHERE ${queryFilter}
-            ORDER BY m.timestamp DESC
-            LIMIT ${limit + 1}
-        `)
-    ]);
+    const t0 = Date.now();
+    const [queryResult] = await db.execute(sql`
+        SELECT 
+            m.id, 
+            m.account_id AS accountId, 
+            m.contact_jid AS contactJid, 
+            m.sender_jid AS senderJid, 
+            m.sender_name AS senderName, 
+            m.from_me AS fromMe, 
+            m.body, 
+            m.media_type AS mediaType, 
+            m.quoted_msg_id AS quotedMsgId, 
+            m.quoted_msg_body AS quotedMsgBody, 
+            m.quoted_msg_sender_name AS quotedMsgSenderName, 
+            m.reaction, 
+            m.edited_at AS editedAt, 
+            m.timestamp, 
+            m.status, 
+            m.is_read AS isRead
+        FROM messages m
+        WHERE ${queryFilter}
+        ORDER BY m.timestamp DESC
+        LIMIT ${limit + 1}
+    `);
+    const t1 = Date.now();
+    console.log(`[API] Query took ${t1 - t0}ms for ${contactParam}`);
 
     // Offload background tasks (marking read) to avoid blocking the UI response
     void (async () => {
@@ -129,7 +121,7 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
         }
     })();
 
-    const rawMsgs = (queryResult as any)?.[0] || [];
+    const rawMsgs = (queryResult as any) || [];
     const hasMore = rawMsgs.length > limit;
     const items = hasMore ? rawMsgs.slice(0, limit) : rawMsgs;
 
@@ -157,6 +149,7 @@ export const GET: RequestHandler = async ({ params, url, locals }) => {
                 ),
                 body: String(m.body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim(),
                 quotedMsgBody: String(m.quotedMsgBody || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim() || null,
+                quotedMsgSenderName: String(m.quotedMsgSenderName || '').trim() || null,
                 senderName: isGroupChat
                     ? (String(m.senderName || '').trim() || (m.senderJid ? getContactName(accountId, String(m.senderJid)) : null))
                     : null

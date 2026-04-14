@@ -1,5 +1,5 @@
-import { db } from '$lib/server/db';
-import { purchases } from '$lib/server/db/schema';
+import { remoteDb } from '$lib/server/db';
+import { creditPurchases } from '$lib/server/db/remote-schema';
 import { eq, desc } from 'drizzle-orm';
 import { redirect } from '@sveltejs/kit';
 
@@ -8,10 +8,10 @@ export const load = async ({ locals }) => {
         throw redirect(303, '/login');
     }
     
-    const purchaseHistory = await db.select()
-        .from(purchases)
-        .where(eq(purchases.userId, locals.user.id))
-        .orderBy(desc(purchases.createdAt));
+    const purchaseHistory = await remoteDb.select()
+        .from(creditPurchases)
+        .where(eq(creditPurchases.userId, locals.user.id))
+        .orderBy(desc(creditPurchases.createdAt));
     
     return {
         purchases: purchaseHistory

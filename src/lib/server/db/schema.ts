@@ -75,12 +75,15 @@ export const messages = mysqlTable('messages', {
     mediaType: varchar('media_type', { length: 50 }),
     quotedMsgId: varchar('quoted_msg_id', { length: 255 }),
     quotedMsgBody: text('quoted_msg_body'),
+    quotedMsgSenderName: varchar('quoted_msg_sender_name', { length: 255 }),
     reaction: text('reaction'),
     editedAt: datetime('edited_at', { mode: 'date' }),
     timestamp: datetime('timestamp', { mode: 'date' }).notNull(),
     status: varchar('status', { length: 50 }).notNull().default('sent'),
     isRead: boolean('is_read').notNull().default(false)
 }, (t) => ({
+    accountContactTimestampIdx: index('messages_account_contact_timestamp_idx').on(t.accountId, t.contactJid, t.timestamp),
+    accountTimestampIdx: index('messages_account_timestamp_idx').on(t.accountId, t.timestamp),
     accountContactIdx: index('messages_account_contact_idx').on(t.accountId, t.contactJid),
     accountIdIdx: index('messages_account_id_idx').on(t.accountId),
     timestampIdx: index('messages_timestamp_idx').on(t.timestamp)
