@@ -413,7 +413,10 @@
 		useGreetingVariations: true,
 		useIntroVariations: true,
 		useClosingVariations: true,
-		banProtectionEnabled: true
+		banProtectionEnabled: true,
+		humanTyping: true,
+		simulateOnline: true,
+		useAccountRotation: false
 	});
 
 	async function setRejectMessageCheckEnabled(nextValue: boolean) {
@@ -455,6 +458,57 @@
 			userSettings.banProtectionEnabled = previousValue;
 			console.error('Ban protection save error:', error);
 			toast.error(error.message || 'Ban koruma ayarı kaydedilemedi.');
+		}
+	}
+
+	async function setHumanTypingEnabled(nextValue: boolean) {
+		const previousValue = userSettings.humanTyping;
+		userSettings.humanTyping = nextValue;
+		try {
+			const res = await fetch('/api/settings', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ humanTyping: nextValue })
+			});
+			if (!res.ok) throw new Error();
+			toast.success(`"Yazıyor..." simülasyonu ${nextValue ? 'açıldı' : 'kapandı'}`);
+		} catch {
+			userSettings.humanTyping = previousValue;
+			toast.error('Ayar kaydedilemedi.');
+		}
+	}
+
+	async function setSimulateOnlineEnabled(nextValue: boolean) {
+		const previousValue = userSettings.simulateOnline;
+		userSettings.simulateOnline = nextValue;
+		try {
+			const res = await fetch('/api/settings', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ simulateOnline: nextValue })
+			});
+			if (!res.ok) throw new Error();
+			toast.success(`Çevrimiçi görünümü ${nextValue ? 'açıldı' : 'kapandı'}`);
+		} catch {
+			userSettings.simulateOnline = previousValue;
+			toast.error('Ayar kaydedilemedi.');
+		}
+	}
+
+	async function toggleAccountRotation(nextValue: boolean) {
+		const previousValue = userSettings.useAccountRotation;
+		userSettings.useAccountRotation = nextValue;
+		try {
+			const res = await fetch('/api/settings', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ useAccountRotation: nextValue })
+			});
+			if (!res.ok) throw new Error();
+			toast.info(`Hesap rotasyonu ${nextValue ? 'aktif' : 'pasif'}`);
+		} catch {
+			userSettings.useAccountRotation = previousValue;
+			toast.error('Ayar kaydedilemedi.');
 		}
 	}
 
@@ -632,6 +686,9 @@
 				if (typeof data.useIntroVariations === 'boolean') antiBan.useIntroVariations = data.useIntroVariations;
 				if (typeof data.useClosingVariations === 'boolean') antiBan.useClosingVariations = data.useClosingVariations;
 				if (typeof data.banProtectionEnabled === 'boolean') userSettings.banProtectionEnabled = data.banProtectionEnabled;
+				if (typeof data.humanTyping === 'boolean') userSettings.humanTyping = data.humanTyping;
+				if (typeof data.simulateOnline === 'boolean') userSettings.simulateOnline = data.simulateOnline;
+				if (typeof data.useAccountRotation === 'boolean') userSettings.useAccountRotation = data.useAccountRotation;
 			}
 		} catch (e) {
 			console.error("Settings fetch error:", e);
@@ -688,6 +745,12 @@
 		);
 		let sentInCurrentBatch = 0;
 		let randomBatchTarget = getRandomBatchTarget(maxBatchSize);
+		let rotationIndex = 0;
+
+		const readyAccounts = accounts.filter((a: any) => a.status === 'ready');
+		if (userSettings.useAccountRotation && readyAccounts.length === 0) {
+			return alert("Rotasyon için hazır hesap bulunamadı!");
+		}
 
 		for (let i = 0; i < finalRecipients.length; i++) {
 			const item = finalRecipients[i];
@@ -720,24 +783,34 @@
 				}
 
 				finalMessage = parts.filter(Boolean).join('\n\n');
-			}
-
-			// Mesaj sonuna sadece gizli benzersiz kod ekle
-			if (finalMessage && userSettings.banProtectionEnabled) {
-				// Gizli karakterler (opsiyonel seçime bağlı)
-				if (antiBan.addRandomSuffix) {
-					const secretNum = Math.floor(Math.random() * 9000000) + 1000000;
-					finalMessage = finalMessage + encodeHiddenNumber(secretNum);
+				
+				// Anti-Ban: Görünmez benzersiz hash ekleyerek her mesajı teknik olarak farklı kıl
+				const words = finalMessage.split(' ');
+				const secretNum = Math.floor(Math.random() * 1000000);
+				const hiddenHash = encodeHiddenNumber(secretNum);
+				
+				if (words.length > 2) {
+					const midPoint = Math.floor(Math.random() * words.length);
+					words[midPoint] = words[midPoint] + hiddenHash;
+					finalMessage = words.join(' ');
+				} else {
+					finalMessage = finalMessage + hiddenHash;
 				}
 			}
 
 			currentRecipient = item.to;
 			try {
+				let activeAccountId = selectedAccountId;
+				if (userSettings.useAccountRotation && readyAccounts.length > 0) {
+					activeAccountId = readyAccounts[rotationIndex % readyAccounts.length].id;
+					rotationIndex++;
+				}
+
 				const res = await fetch('/api/whatsapp/send', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
-						accountId: selectedAccountId,
+						accountId: activeAccountId,
 						to: item.to,
 						message: finalMessage,
 						media: useFileMedia ? null : mediaData,
@@ -1440,22 +1513,79 @@
 						{/if}
 
 						{#if sendStatus === "idle"}
-							<div class="mt-4">
-									<div class="mb-3 rounded-xl border bg-muted/20 px-3 py-2 flex items-center justify-between gap-3">
-										<div>
-											<p class="text-sm font-semibold">Ban Koruma Ayarları</p>
-											<p class="text-xs text-muted-foreground">Mesajlara rastgele varyasyonlar ekleyerek hesap güvenliğini artırır.</p>
+							<div class="mt-4 space-y-4">
+								<Collapsible.Root class="w-full space-y-2">
+									<Collapsible.Trigger class="w-full flex items-center justify-between p-4 h-auto rounded-2xl bg-muted/30 hover:bg-muted/40 border-2 border-transparent hover:border-primary/20 transition-all group shadow-sm text-foreground">
+										<div class="flex items-center gap-3">
+											<div class="p-2 bg-primary/10 text-primary rounded-xl group-hover:scale-110 transition-transform">
+												<CheckCircle2 class="w-5 h-5" />
+											</div>
+											<div class="text-left leading-none">
+												<p class="text-sm font-bold uppercase tracking-tight">Güvenlik & İnsan Davranışı</p>
+												<p class="text-[10px] text-muted-foreground font-normal mt-1">Ban riskini azaltan simülasyon ayarları</p>
+											</div>
 										</div>
-										<Switch
-											checked={userSettings.banProtectionEnabled}
-											onCheckedChange={(checked) => setBanProtectionEnabled(checked === true)}
-										/>
-									</div>
+										<ChevronDown class="w-4 h-4 text-muted-foreground transition-transform group-data-open:rotate-180" />
+									</Collapsible.Trigger>
 
-									<div class="mb-3 rounded-xl border bg-muted/20 px-3 py-2 flex items-center justify-between gap-3">
+									<Collapsible.Content class="space-y-4 p-4 rounded-2xl border bg-muted/2 animate-in slide-in-from-top-2 duration-300">
+										<div class="flex items-center justify-between gap-3 pb-2 border-b border-border/50">
+											<div class="flex items-center gap-2">
+												<p class="text-[11px] font-bold text-muted-foreground uppercase">Tüm Korumaları Aktif Et</p>
+											</div>
+											<Switch
+												checked={userSettings.banProtectionEnabled}
+												onCheckedChange={(checked) => setBanProtectionEnabled(checked === true)}
+											/>
+										</div>
+
+										<div class="space-y-4">
+											<div class="flex items-center justify-between gap-3 group">
+												<div>
+													<p class="text-xs font-semibold group-hover:text-primary transition-colors">"Yazıyor..." Simülasyonu</p>
+													<p class="text-[10px] text-muted-foreground leading-tight">Gönderim öncesi "yazıyor..." bilgisi gösterilir. (Gönderimi yavaşlatır ancak güvenliği artırır)</p>
+												</div>
+												<Switch
+													disabled={!userSettings.banProtectionEnabled}
+													checked={userSettings.humanTyping}
+													onCheckedChange={(checked) => setHumanTypingEnabled(checked === true)}
+													class="scale-90"
+												/>
+											</div>
+
+											<div class="flex items-center justify-between gap-3 group">
+												<div>
+													<p class="text-xs font-semibold group-hover:text-primary transition-colors">Çevrimiçi Durumu</p>
+													<p class="text-[10px] text-muted-foreground leading-tight">Hesap ara ara "çevrimiçi" görünür.</p>
+												</div>
+												<Switch
+													disabled={!userSettings.banProtectionEnabled}
+													checked={userSettings.simulateOnline}
+													onCheckedChange={(checked) => setSimulateOnlineEnabled(checked === true)}
+													class="scale-90"
+												/>
+											</div>
+
+											<div class="flex items-center justify-between gap-3 group">
+												<div>
+													<p class="text-xs font-semibold group-hover:text-primary transition-colors font-bold text-primary">Hesap Rotasyonu (Hızlı & Güvenli)</p>
+													<p class="text-[10px] text-muted-foreground leading-tight">Yükü tüm hazır hesaplara dağıtır. Toplam gönderim hızını artırmak için daha fazla hesap ekleyin.</p>
+												</div>
+												<Switch
+													disabled={accounts.filter((a: any) => a.status === 'ready').length <= 1}
+													checked={userSettings.useAccountRotation}
+													onCheckedChange={(checked) => toggleAccountRotation(checked === true)}
+													class="scale-90"
+												/>
+											</div>
+										</div>
+									</Collapsible.Content>
+								</Collapsible.Root>
+
+								<div class="p-4 rounded-2xl border bg-muted/5 flex items-center justify-between gap-3 group">
 									<div>
-										<p class="text-sm font-semibold">Mesaj Red Kontrolü</p>
-										<p class="text-xs text-muted-foreground">Mesaj red yanıtı veren numaralara gönderim yapılmaz.</p>
+										<p class="text-xs font-semibold group-hover:text-primary transition-colors font-bold uppercase tracking-tight">Mesaj Red Kontrolü</p>
+										<p class="text-[10px] text-muted-foreground leading-tight">"İptal", "Red" gibi yanıt verenlere otomatik gönderimi durdurur.</p>
 									</div>
 									<Switch
 										checked={userSettings.rejectMessageCheckEnabled}

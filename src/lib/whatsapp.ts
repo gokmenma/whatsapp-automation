@@ -20,9 +20,19 @@ import { building } from '$app/environment';
 
 const logger = pino({ level: 'silent' });
 const USER_DATA_PATH = process.env.USER_DATA_PATH;
-const ACCOUNTS_FILE = USER_DATA_PATH ? path.join(USER_DATA_PATH, 'accounts.json') : './accounts.json';
-const AUTH_PATH = USER_DATA_PATH ? path.join(USER_DATA_PATH, '.baileys_auth') : '.baileys_auth';
-const MEDIA_PATH = USER_DATA_PATH ? path.join(USER_DATA_PATH, 'media') : './media';
+const ROOT_PATH = path.resolve('.');
+// We no longer use a suffix for dev/prod to ensure sessions persist across builds
+const ACCOUNTS_FILE = USER_DATA_PATH ? path.join(USER_DATA_PATH, 'accounts.json') : path.join(ROOT_PATH, 'accounts.json');
+const AUTH_PATH = USER_DATA_PATH ? path.join(USER_DATA_PATH, '.baileys_auth') : path.join(ROOT_PATH, '.baileys_auth');
+const MEDIA_PATH = USER_DATA_PATH ? path.join(USER_DATA_PATH, 'media') : path.join(ROOT_PATH, 'media');
+
+console.log('--- STORAGE CONFIGURATION ---');
+console.log('USER_DATA_PATH (Env):', USER_DATA_PATH || 'Not set');
+console.log('ACCOUNTS_FILE:', ACCOUNTS_FILE);
+console.log('AUTH_PATH:', AUTH_PATH);
+console.log('MEDIA_PATH:', MEDIA_PATH);
+console.log('CWD:', ROOT_PATH);
+console.log('-----------------------------');
 
 // Ensure the auth path exists
 if (!fs.existsSync(AUTH_PATH)) {
@@ -110,7 +120,8 @@ function classifyConnectionIssue(reason: unknown): "dns" | "offline" | "unknown"
         text.includes('etimedout') ||
         text.includes('econnreset') ||
         text.includes('network') ||
-        text.includes('internet')
+        text.includes('internet') ||
+        text.includes('stream errored')
     ) {
         return 'offline';
     }
@@ -229,6 +240,11 @@ async function recoverFromBadMac(reason: unknown) {
         }
     } finally {
         globalRef.baileysBadMacRecoveryRunning = false;
+        
+        // Force version refetch in dev mode to ensure compatibility
+        globalRef.baileysVersion = null; 
+        
+        console.log('[BOOT] WhatsApp module booted successfully.');
     }
 }
 
@@ -264,20 +280,34 @@ function acquireSessionLock(accountId: string) {
 
     try {
         if (fs.existsSync(lockPath)) {
-            const existingPid = Number(fs.readFileSync(lockPath, 'utf-8').trim());
+            const fileContent = fs.readFileSync(lockPath, 'utf-8').trim();
+            const existingPid = Number(fileContent);
+
             if (existingPid && existingPid !== process.pid && isPidAlive(existingPid)) {
-                console.warn(`[${accountId}] Session lock is held by PID ${existingPid}. Skipping duplicate connection.`);
+                console.warn(`[${accountId}] Session lock is active (PID ${existingPid}).`);
                 return false;
             }
-            try { fs.unlinkSync(lockPath); } catch {}
+            
+            // If we are here, either the PID is dead or it's us.
+            // Extra safety: double check if we can actually delete it (avoid EBUSY on Windows if possible)
+            try { 
+                if (fs.existsSync(lockPath)) {
+                    console.log(`[${accountId}] Removing ${existingPid === process.pid ? 'own' : 'stale'} lock file (PID ${existingPid})...`);
+                    fs.unlinkSync(lockPath); 
+                }
+            } catch (e) {
+                console.warn(`[${accountId}] Could not remove lock file:`, e);
+                // On Windows, if we can't unlink because it's open, but isPidAlive was false, 
+                // we might still be able to overwrite it with writeFileSync.
+            }
         }
 
-        fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+        fs.writeFileSync(lockPath, String(process.pid), { flag: 'w' });
         heldSessionLocks.add(lockPath);
         return true;
     } catch (e: any) {
         if (e?.code === 'EEXIST') {
-            console.warn(`[${accountId}] Session lock already exists. Skipping duplicate connection.`);
+            console.warn(`[${accountId}] Session lock already exists.`);
             return false;
         }
         console.error(`[${accountId}] Failed to acquire session lock:`, e);
@@ -619,12 +649,8 @@ function extractMessageText(content: any) {
     body = String(body || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
     if (!body && content?.documentMessage?.fileName) body = String(content.documentMessage.fileName).trim();
     if (!body && content?.audioMessage) body = '[Ses mesajı]';
-    if (!body && content?.stickerMessage) body = '[Çıkartma]';
-    if (!body && (content?.imageMessage || content?.videoMessage)) body = '';
-    if (!body && content?.locationMessage) body = '[Konum]';
-    if (!body && (content?.contactMessage || content?.contactsArrayMessage)) body = '[Kişi bilgisi]';
-    if (!body && content?.pollCreationMessage) body = '[Anket]';
     if (!body && content?.liveLocationMessage) body = '[Canlı konum]';
+    if (!body && content?.stickerMessage) body = '[Çıkartma]';
     return body;
 }
 
@@ -641,24 +667,39 @@ function isUsableAvatarUrl(value: string | undefined | null) {
 }
 
 export async function initializeWhatsApp(accountId: string, syncHistory: boolean = false) {
-    console.log(`[${accountId}] initializeWhatsApp called with syncHistory=${syncHistory}`);
-    manualStops.delete(accountId);
-    const pendingReconnect = reconnectTimers.get(accountId);
-    if (pendingReconnect) {
-        clearTimeout(pendingReconnect);
-        reconnectTimers.delete(accountId);
-    }
-
-    if (!acquireSessionLock(accountId)) {
-        const existing = statuses.get(accountId) || { id: accountId, status: 'disconnected', qr: null };
-        existing.status = 'disconnected';
-        existing.qr = null;
-        existing.qrRaw = null;
-        existing.lastError = null;
-        existing.connectionIssue = null;
-        statuses.set(accountId, existing);
+    // Prevention of duplicate initialization
+    if (clients.has(accountId) && statuses.get(accountId)?.status === 'ready') {
+        console.log(`[${accountId}] WhatsApp already fully connected. Skipping redundant init.`);
         return;
     }
+
+    console.log(`[Connect] [PID ${process.pid}] Init requested for ${accountId} (syncHistory=${syncHistory})`);
+    
+    // Immediate UI Feedback: Set to loading
+    const initialStatus = statuses.get(accountId) || { id: accountId, status: 'loading', qr: null };
+    initialStatus.status = 'loading';
+    initialStatus.qr = null;
+    initialStatus.lastError = null;
+    statuses.set(accountId, initialStatus);
+
+    let sock: any;
+    try {
+        manualStops.delete(accountId);
+        const pendingReconnect = reconnectTimers.get(accountId);
+        if (pendingReconnect) {
+            clearTimeout(pendingReconnect);
+            reconnectTimers.delete(accountId);
+        }
+
+        if (!acquireSessionLock(accountId)) {
+            console.warn(`[${accountId}] Lock acquisition failed.`);
+            initialStatus.status = 'disconnected';
+            initialStatus.lastError = 'Bu hesap başka bir işlemde aktif. Lütfen 30 saniye sonra tekrar deneyin.';
+            statuses.set(accountId, initialStatus);
+            return;
+        }
+
+        console.log(`[${accountId}] [INIT-STEP] Lock acquired. Verifying database record...`);
 
     // CRITICAL: Verify if account still exists in Database before connecting
     try {
@@ -686,7 +727,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
     }
 
     if (clients.has(accountId)) {
-        console.log(`[${accountId}] Client already exists. Checking status...`);
+        console.log(`[${accountId}] [PID ${process.pid}] Client already exists. Checking status...`);
         const currentStatus = statuses.get(accountId);
         
         // If they want history sync, we MUST restart to trigger it in Baileys
@@ -694,24 +735,32 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
             console.log(`[${accountId}] History sync requested for existing client. Forcing restart...`);
             await stopWhatsApp(accountId);
             manualStops.delete(accountId); // Clear the stop we just did
-        } else if (currentStatus?.status === "ready" || currentStatus?.status === "loading" || currentStatus?.status === "connecting") {
+        } else if (currentStatus?.status === "ready") {
+            console.log(`[${accountId}] Skipping init: already in state ${currentStatus?.status}`);
             return;
         }
+        // If it's 'loading' or 'connecting' but we have a client record, it might be stale.
+        // We allow it to continue to clean up and re-establish.
+        console.log(`[${accountId}] Client exists but status is ${currentStatus?.status}. Continuing init...`);
     }
 
+    console.log(`[${accountId}] [INIT-STEP] Client setup starting. Loading state...`);
     const { state, saveCreds } = await useMultiFileAuthState(path.join(AUTH_PATH, `session-${accountId}`));
-    // Cache Baileys version to avoid multiple network calls
-    if (!globalRef.baileysVersion) {
-        try {
-            const { version, isLatest } = await fetchLatestBaileysVersion();
-            globalRef.baileysVersion = version;
-            console.log(`[${accountId}] Fetched Baileys version: ${version.join('.')} (Latest: ${isLatest})`);
-        } catch (e) {
-            console.error(`[${accountId}] Failed to fetch Baileys version, using default:`, e);
-            globalRef.baileysVersion = [2, 3000, 1015901307]; // Fallback version
+    console.log(`[${accountId}] [INIT-STEP] State loaded.`);
+    
+    // Safety watchdog: If we stay in "loading" too long, fail it
+    const watchdog = setTimeout(() => {
+        const current = statuses.get(accountId);
+        if (current && current.status === 'loading') {
+            console.error(`[${accountId}] CRITICAL: Initialization watchdog timeout (45s). Hanging detected.`);
+            current.status = 'disconnected';
+            current.lastError = 'Bağlantı yanıt vermedi (Zaman aşımı). Lütfen tekrar deneyin.';
+            releaseSessionLock(accountId);
         }
-    }
-    const version = globalRef.baileysVersion;
+    }, 45000);
+    
+    // Use a known stable Baileys version to avoid 405 errors (Community recommended)
+    const version: [number, number, number] = [2, 3000, 1033893291];
 
     const status: AccountStatus = {
         id: accountId,
@@ -722,15 +771,17 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
     };
     statuses.set(accountId, status);
 
-    const sock = makeWASocket({
-        version,
-        auth: {
-            creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, logger)
-        },
-        logger,
-        browser: Browsers.macOS('Desktop'),
-        syncFullHistory: syncHistory, // User preference
+    console.log(`[${accountId}] [INIT-STEP] Socket creation (v${version.join('.')})...`);
+    sock = makeWASocket({
+            version,
+            logger,
+            printQRInTerminal: false,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, logger),
+            },
+            browser: Browsers.ubuntu('Chrome'),
+            syncFullHistory: syncHistory,
         shouldSyncHistoryMessage: (msg: proto.IWebMessageInfo) => {
             if (!syncHistory) return false;
             try {
@@ -738,7 +789,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 if (tsValue > 0) {
                     const msgDate = new Date(tsValue * 1000);
                     const limitDate = new Date();
-                    limitDate.setDate(limitDate.getDate() - 90); // Last 90 days
+                    limitDate.setDate(limitDate.getDate() - 3650); // Last 10 years
                     return msgDate > limitDate;
                 }
             } catch (e) {}
@@ -749,8 +800,121 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
         },
         generateHighQualityLinkPreview: true,
         connectTimeoutMs: 60000,
-        markOnlineOnConnect: true
+        markOnlineOnConnect: false
     });
+
+    // CRITICAL: Attach connection listener IMMEDIATELY to avoid missing first events
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        console.log(`[${accountId}] Connection update:`, { connection, qr: !!qr });
+
+        if (connection === 'open' || qr || connection === 'close') {
+            clearTimeout(watchdog);
+        }
+
+        if (qr) {
+            console.log(`[${accountId}] QR RECEIVED! Please scan to connect.`);
+            status.qr = await qrcode.toDataURL(qr);
+            status.qrRaw = qr;
+            status.status = "connecting";
+            status.lastError = null;
+            status.connectionIssue = null;
+        }
+
+        if (connection === 'close') {
+            const errorObj = lastDisconnect?.error as any;
+            const statusCode = errorObj?.output?.statusCode;
+            const closeReason = errorObj?.message || String(lastDisconnect?.error || 'Bilinmeyen hata');
+            const connectionIssue = classifyConnectionIssue(closeReason);
+            const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+            const shouldReconnect = !isLoggedOut;
+            const wasManuallyStopped = manualStops.has(accountId);
+
+            // Log to a persistent file for debugging
+            try {
+                fs.appendFileSync('whatsapp_debug.log', `[${new Date().toISOString()}] [${accountId}] Close Code: ${statusCode}, Reason: ${closeReason}\n`);
+            } catch (e) {}
+            
+            console.warn(`[${accountId}] Connection CLOSED. Code: ${statusCode}, Reason: ${closeReason}, Reconnecting: ${shouldReconnect}`);
+            
+            // Cleanup current client reference immediately on close
+            clients.delete(accountId);
+            
+            if (isLoggedOut) {
+                status.lastError = 'Cihazdan çıkış yapıldı (Logged Out). Lütfen QR kodu tekrar okutun.';
+            } else if (statusCode === 401) {
+                status.lastError = 'Oturum bilgisi geçersiz. Lütfen tekrar bağlanın.';
+            } else {
+                status.lastError = closeReason;
+            }
+            
+            status.status = "disconnected";
+            status.qr = null;
+            status.qrRaw = null;
+            status.lastError = closeReason || null;
+            status.connectionIssue = connectionIssue;
+            
+            if (shouldReconnect && !wasManuallyStopped) {
+                const timer = setTimeout(async () => {
+                    reconnectTimers.delete(accountId);
+                    try {
+                        const dbInst = await getSharedDb();
+                        const { accounts: accountsTable } = await getSharedSchema();
+                        const { eq } = await import('drizzle-orm');
+                        const rows = await dbInst.select().from(accountsTable).where(eq(accountsTable.id, accountId)).limit(1);
+                        if (rows.length === 0) {
+                            console.warn(`[${accountId}] Reconnect aborted: Account no longer in database.`);
+                            clients.delete(accountId);
+                            statuses.delete(accountId);
+                            releaseSessionLock(accountId);
+                            return;
+                        }
+                    } catch (e) {}
+                    initializeWhatsApp(accountId).catch(e => console.error(`[${accountId}] Reconnect error:`, e));
+                }, 3000);
+                reconnectTimers.set(accountId, timer);
+            } else {
+                if (wasManuallyStopped) {
+                    console.log(`[${accountId}] Connection closed by manual stop.`);
+                }
+                clients.delete(accountId);
+                stores.delete(accountId);
+                releaseSessionLock(accountId);
+                if (!wasManuallyStopped) {
+                    try {
+                        fs.rmSync(path.join(AUTH_PATH, `session-${accountId}`), { recursive: true, force: true });
+                    } catch (e) {}
+                }
+            }
+        } else if (connection === 'open') {
+            console.log(`[${accountId}] SUCCESS: WHATSAPP READY (BAILEYS)!`);
+            status.status = "ready";
+            status.qr = null;
+            status.qrRaw = null;
+            status.user = sock.user;
+            status.lastError = null;
+            status.connectionIssue = null;
+
+            if (sock.user?.name) {
+                void (async () => {
+                    try {
+                        const db = await getSharedDb();
+                        const { accounts } = await getSharedSchema();
+                        const { eq } = await import('drizzle-orm');
+                        const [acc] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
+                        const isPlaceholder = !acc.name || acc.name.replace(/\D/g, '').length > 8 || acc.name.length > 20 && acc.name.includes('-');
+                        if (isPlaceholder && sock.user.name) {
+                            console.log(`[${accountId}] Syncing account name: ${acc.name} -> ${sock.user.name}`);
+                            await db.update(accounts).set({ name: sock.user.name }).where(eq(accounts.id, accountId));
+                        }
+                    } catch (e) {
+                         console.error(`[${accountId}] Failed to sync account name:`, e);
+                    }
+                })();
+            }
+        }
+    });
+
     console.log(`[${accountId}] Baileys socket initialized. syncFullHistory=${syncHistory}`);
 
     // DEBUG: Catch-all event listener to see what WhatsApp is actually sending
@@ -809,6 +973,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 store!.jidToLid.set(c.id, lidId);
             }
         });
+        saveStore(accountId);
     });
 
     sock.ev.on('contacts.update', (updates: any[]) => {
@@ -827,6 +992,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 }
             }
         });
+        saveStore(accountId);
     });
 
     (sock.ev as any).on('chats.set', (data: any) => {
@@ -836,6 +1002,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
             if (c.id) store!.chats.set(c.id, { ...(store!.chats.get(c.id) || {}), ...c });
         });
         saveStore(accountId);
+        void syncChatPreferencesToDb(accountId, list);
     });
 
     sock.ev.on('chats.upsert', (newChats: any[]) => {
@@ -845,6 +1012,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 store!.chats.set(c.id, { ...existing, ...c });
             }
         });
+        void syncChatPreferencesToDb(accountId, newChats);
     });
 
     sock.ev.on('chats.update', (updates: any[]) => {
@@ -875,6 +1043,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 }
             }
         });
+        void syncChatPreferencesToDb(accountId, updates);
     });
 
     // Robust listener for history/contacts (handling all possible event names)
@@ -898,6 +1067,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 const existing = store!.chats.get(c.id) || {};
                 store!.chats.set(c.id, { ...existing, ...c });
             });
+            void syncChatPreferencesToDb(accountId, chats);
         }
         
         // Process historical messages if present
@@ -915,6 +1085,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
             }
 
             // Sort messages newest-to-oldest to mark the last 'unreadCount' messages correctly
+            const seenCounts = new Map<string, number>();
             const sortedMessages = [...messages].sort((a, b) => {
                 const tsA = Number(a.messageTimestamp) || 0;
                 const tsB = Number(b.messageTimestamp) || 0;
@@ -937,12 +1108,12 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                     }
                 }
 
-                // Safety filter: Only store messages from last 90 days
+                // Safety filter: Only store messages from last 10 years
                 const tsValue = Number(msg.messageTimestamp) || 0;
                 if (tsValue > 0) {
                     const msgDate = new Date(tsValue * 1000);
                     const limitDate = new Date();
-                    limitDate.setDate(limitDate.getDate() - 90);
+                    limitDate.setDate(limitDate.getDate() - 3650);
                     if (msgDate < limitDate) return null;
                 }
                 
@@ -984,6 +1155,15 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 }
             }
             console.log(`[${accountId}] Finished processing historical messages.`);
+            
+            // Emit SSE event to trigger UI refresh after history sync
+            const sseData = {
+                type: 'messages',
+                accountId,
+                action: 'history_sync_finished'
+            };
+            const sseMsg = `event: ${sseData.type}\ndata: ${JSON.stringify(sseData)}\n\n`;
+            getMessageEmitter().emit('sse_raw', { accountId, message: sseMsg });
         }
 
         saveStore(accountId);
@@ -997,104 +1177,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
-            console.log(`[${accountId}] QR RECEIVED! Please scan to connect.`);
-            status.qr = await qrcode.toDataURL(qr);
-            status.qrRaw = qr;
-            status.status = "connecting";
-            status.lastError = null;
-            status.connectionIssue = null;
-        }
-
-        if (connection === 'close') {
-            const closeReason = (lastDisconnect?.error as any)?.message || String(lastDisconnect?.error || '');
-            const connectionIssue = classifyConnectionIssue(closeReason);
-            const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
-            const wasManuallyStopped = manualStops.has(accountId);
-            console.log(`[${accountId}] Connection closed due to ${lastDisconnect?.error}, reconnecting: ${shouldReconnect}`);
-            
-            status.status = "disconnected";
-            status.qr = null;
-            status.qrRaw = null;
-            status.lastError = closeReason || null;
-            status.connectionIssue = connectionIssue;
-            
-            if (shouldReconnect && !wasManuallyStopped) {
-                // Short delay to avoid infinite retry loops on network issues
-                const timer = setTimeout(async () => {
-                    reconnectTimers.delete(accountId);
-                    
-                    // Final safety check before background reconnect: is it still in DB?
-                    try {
-                        const dbInst = await getSharedDb();
-                        const { accounts: accountsTable } = await getSharedSchema();
-                        const { eq } = await import('drizzle-orm');
-                        const rows = await dbInst.select().from(accountsTable).where(eq(accountsTable.id, accountId)).limit(1);
-                        if (rows.length === 0) {
-                            console.warn(`[${accountId}] Reconnect aborted: Account no longer in database.`);
-                            clients.delete(accountId);
-                            statuses.delete(accountId);
-                            releaseSessionLock(accountId);
-                            return;
-                        }
-                    } catch (e) { /* Ignore DB errors here, initializeWhatsApp will catch it again */ }
-
-                    initializeWhatsApp(accountId).catch(e => console.error(`[${accountId}] Reconnect error:`, e));
-                }, 3000);
-                reconnectTimers.set(accountId, timer);
-            } else {
-                if (wasManuallyStopped) {
-                    console.log(`[${accountId}] Connection closed by manual stop. Auto reconnect disabled until explicit start.`);
-                } else {
-                    console.log(`[${accountId}] Connection closed. Device logged out.`);
-                }
-                clients.delete(accountId);
-                stores.delete(accountId);
-                releaseSessionLock(accountId);
-                if (!wasManuallyStopped) {
-                    // Remove session folder on logout
-                    try {
-                        fs.rmSync(path.join(AUTH_PATH, `session-${accountId}`), { recursive: true, force: true });
-                    } catch (e) {}
-                }
-            }
-        } else if (connection === 'open') {
-            console.log(`[${accountId}] SUCCESS: WHATSAPP READY (BAILEYS)!`);
-            status.status = "ready";
-            status.qr = null;
-            status.qrRaw = null;
-            status.user = sock.user;
-            status.lastError = null;
-            status.connectionIssue = null;
-
-            // Sync account name with device profile name if currently using a placeholder
-            if (sock.user?.name) {
-                void (async () => {
-                    try {
-                        const db = await getSharedDb();
-                        const { accounts } = await getSharedSchema();
-                        const { eq } = await import('drizzle-orm');
-                        const [acc] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
-                        
-                        // If current name is a phone number or UUID-like, update it with real name
-                        const isPlaceholder = !acc.name || 
-                                            acc.name.replace(/\D/g, '').length > 8 || 
-                                            acc.name.length > 20 && acc.name.includes('-');
-                        
-                        if (isPlaceholder && sock.user.name) {
-                            console.log(`[${accountId}] Syncing account name: ${acc.name} -> ${sock.user.name}`);
-                            await db.update(accounts).set({ name: sock.user.name }).where(eq(accounts.id, accountId));
-                        }
-                    } catch (e) {
-                         console.error(`[${accountId}] Failed to sync account name:`, e);
-                    }
-                })();
-            }
-        }
-    });
 
     async function markMessageAsDeleted(targetId?: string, source: string = 'unknown', remoteJid?: string) {
         if (!targetId) {
@@ -1554,6 +1637,65 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
         }
     });
 
+    async function syncChatPreferencesToDb(accountId: string, chats: any[]) {
+        if (!chats || chats.length === 0) return;
+        try {
+            const dbRef = await getSharedDb();
+            const { conversationPreferences } = await getSharedSchema();
+            const { sql } = await import('drizzle-orm');
+            const now = new Date();
+            
+            for (const chat of chats) {
+                const jid = chat.id;
+                if (!jid || jid === 'undefined') continue;
+                
+                const isGroup = jid.endsWith('@g.us');
+                const contactKey = isGroup ? jid : normalizeDigits(jid);
+                if (!contactKey) continue;
+                
+                // archive is boolean, mute/muteExpiration is number (timestamp) or null
+                const rawMute = chat.mute ?? chat.muteExpiration;
+                let isMuted = false;
+                if (typeof rawMute === 'number') {
+                    if (rawMute === -1) isMuted = true;
+                    else if (rawMute > 0) {
+                        // If it's a timestamp, check if it's in the future
+                        const ts = rawMute < 1e12 ? rawMute * 1000 : rawMute;
+                        isMuted = ts > Date.now();
+                    }
+                }
+                
+                const isArchived = Boolean(chat.archive);
+
+                // Use a simple atomic check-then-set approach
+                const [existing]: any = await dbRef.execute(sql`
+                    SELECT id FROM conversation_preferences 
+                    WHERE account_id = ${accountId} AND contact_key = ${contactKey} 
+                    LIMIT 1
+                `);
+                
+                const rowId = (existing as any[])[0]?.id;
+                if (rowId) {
+                    await dbRef.execute(sql`
+                        UPDATE conversation_preferences
+                        SET muted = ${isMuted ? 1 : 0},
+                            archived = ${isArchived ? 1 : 0},
+                            updated_at = ${now}
+                        WHERE id = ${rowId}
+                    `);
+                } else if (isMuted || isArchived) {
+                    // Only insert if it's actually muted or archived to save space
+                    await dbRef.execute(sql`
+                        INSERT INTO conversation_preferences (account_id, contact_key, muted, archived, created_at, updated_at)
+                        VALUES (${accountId}, ${contactKey}, ${isMuted ? 1 : 0}, ${isArchived ? 1 : 0}, ${now}, ${now})
+                    `);
+                }
+            }
+        } catch (e: any) {
+            console.error(`[${accountId}] Preference sync error:`, e.message);
+        }
+    }
+
     async function markConversationReadInDbFromRemoteJid(remoteJid: string) {
         const normalizedRemoteJid = String(remoteJid || '').trim();
         if (!normalizedRemoteJid) return;
@@ -1785,7 +1927,8 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                 const mediaType = (content as any)?.imageMessage ? 'image' :
                     (content as any)?.videoMessage ? 'video' :
                     (content as any)?.audioMessage ? 'audio' :
-                    (content as any)?.documentMessage ? 'document' : null;
+                    (content as any)?.documentMessage ? 'document' :
+                    (content as any)?.stickerMessage ? 'sticker' : null;
 
                 const isProtocolMessage = Boolean((content as any)?.protocolMessage);
                 if (isProtocolMessage || (!body && !mediaType)) {
@@ -1923,10 +2066,7 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
                     ? jidForSave
                     : (canonicalDirectNumber ? `${canonicalDirectNumber}@s.whatsapp.net` : jidForSave);
 
-                if (!isGroupJid && !canonicalDirectNumber && !isLidJid) {
-                    console.log(`[STORE] Skipping message with NO canonical number for account=${accountId}, jid=${jidForSave}`);
-                    return;
-                }
+                // Proceed even if we don't have a canonical number, using the raw JID as fallback.
 
                 const msgStatus = normalizeMessageStatus(msg.status);
                 const isRead = isFromMe || (msgStatus === 'read' || msgStatus === 'played') || (isHistory && !forceUnread);
@@ -2093,6 +2233,15 @@ export async function initializeWhatsApp(accountId: string, syncHistory: boolean
             }
         }
     });
+
+    } catch (err: any) {
+        console.error(`[${accountId}] CRITICAL INITIALIZATION ERROR:`, err);
+        const currentStatus = statuses.get(accountId) || { id: accountId, status: 'disconnected', qr: null };
+        currentStatus.status = 'disconnected';
+        currentStatus.lastError = `Başlatma hatası: ${err.message || 'Bilinmeyen hata'}`;
+        statuses.set(accountId, currentStatus);
+        releaseSessionLock(accountId);
+    }
 }
 
 export function getAccountStatus(accountId: string) {
@@ -2273,9 +2422,10 @@ export async function sendWhatsAppMessage(
         }
     }
 
+    const settingsRes = await db.select().from(userSettings).where(eq(userSettings.userId, Number(account.userId))).limit(1);
+    const settings = settingsRes[0];
+
     if (!isGroupTarget) {
-        const settingsRes = await db.select().from(userSettings).where(eq(userSettings.userId, account.userId));
-        const settings = settingsRes[0];
         const shouldCheckReject = Boolean(settings?.rejectMessageCheckEnabled);
 
         if (shouldCheckReject) {
@@ -2338,8 +2488,16 @@ export async function sendWhatsAppMessage(
             }
             : undefined;
 
-        if (!batchId && !isGroupTarget) {
-            await simulateTypingPresence(client, jid, message);
+        const shouldSimulateTyping = Boolean(settings?.humanTyping);
+        const shouldSimulateOnline = Boolean(settings?.simulateOnline);
+
+        if (!isGroupTarget) {
+            if (shouldSimulateOnline && Math.random() < 0.2) {
+                await client.sendPresenceUpdate('available', jid);
+            }
+            if (shouldSimulateTyping) {
+                await simulateTypingPresence(client, jid, message);
+            }
         }
 
         if (media) {
@@ -2486,6 +2644,13 @@ export async function editWhatsAppMessage(accountId: string, remoteJid: string, 
     }
 }
 
+export function getContactStatus(accountId: string, jid: string): string {
+    const store = stores.get(accountId);
+    if (!store) return '';
+    const contact = store.contacts.get(jid);
+    return String(contact?.status || contact?.description || '').trim();
+}
+
 export async function getWhatsAppContacts(accountId: string) {
     const storePath = getStorePath(accountId);
     console.log(`[Backend-API] getWhatsAppContacts called for ID: ${accountId}. Reading from: ${storePath}`);
@@ -2512,42 +2677,53 @@ export async function getWhatsAppContacts(accountId: string) {
     }
     
     // Merge contacts and chats for richer labels, including lid<->phone mapping.
-    const combined = new Map<string, any>((store?.contacts && typeof (store.contacts as any).get === 'function') ? (store.contacts as Map<string, any>) : new Map());
+    const combined = new Map<string, any>();
+    
+    // First, seed with contacts from store
+    if (store?.contacts) {
+        if (typeof (store.contacts as any).forEach === 'function') {
+            (store.contacts as any).forEach((contact: any, jid: string) => {
+                combined.set(jid, { id: jid, ...contact });
+            });
+        }
+    }
+
+    // Then, merge with chats to get missing names or group details
     if (store?.chats && typeof (store.chats as any).forEach === 'function') {
-        store.chats.forEach((chat, jid) => {
-            if (!combined.has(jid)) {
-                combined.set(jid, {
-                    id: jid,
-                    name: chat.name,
-                    pushName: chat.pushName,
-                    notify: chat.notify
-                });
-            }
+        store.chats.forEach((chat: any, jid: string) => {
+            const existing = combined.get(jid) || {};
+            combined.set(jid, {
+                ...existing,
+                id: jid,
+                name: chat.name || existing.name,
+                pushName: chat.pushName || existing.pushName,
+                notify: chat.notify || existing.notify,
+                description: chat.description || existing.description
+            });
         });
     }
 
-    const contactsArray = Array.from(combined.values())
+    return Array.from(combined.values())
         .filter((c: any) => {
             const jid = String(c?.id || '');
-            return jid.endsWith('@s.whatsapp.net') || jid.endsWith('@g.us');
+            return jid.endsWith('@s.whatsapp.net') || jid.endsWith('@g.us') || jid.endsWith('@lid');
         })
         .map((c: any) => {
             const jid = String(c?.id || '');
             const isGroup = jid.endsWith('@g.us');
-            const number = isGroup ? jid.split('@')[0] : normalizeDigits(jid);
+            const name = String(c?.name || c?.verifiedName || c?.notify || jid.split('@')[0]).trim();
+            const status = String(c?.status || c?.description || (isGroup ? 'Grup' : '')).trim();
 
             return {
                 id: jid,
-                name: getContactName(accountId, jid),
-                number,
-                isMyContact: Boolean(c?.name),
-                isGroup
+                name: name,
+                number: jid.split('@')[0],
+                status: status,
+                isGroup: isGroup,
+                isMyContact: Boolean(c?.name)
             };
-        });
-
-    console.log(`[${accountId}] getWhatsAppContacts: Returning ${contactsArray.length} contacts.`);
-
-    return contactsArray.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
+        })
+        .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'tr'));
 }
 
 export async function getWhatsAppConversations(accountId: string) {
@@ -2631,7 +2807,7 @@ export async function stopWhatsApp(accountId: string) {
             client.end();
         } catch (e) {}
         clients.delete(accountId);
-        stores.delete(accountId);
+        // We do NOT delete the store here, to keep contact names/status in memory
     }
 
     const intervalKey = `interval-${accountId}`;
@@ -3141,18 +3317,26 @@ export async function initAllAccounts() {
         const { accounts } = await getSharedSchema();
         const storedAccounts = await db.select().from(accounts);
         
-        console.log(`Auto-initializing ${storedAccounts.length} accounts with Baileys...`);
+        console.log(`Auto-initializing ${storedAccounts.length} accounts with Baileys (Parallel)...`);
+        
+        // Use a throttled parallel approach to avoid blocking the module load
         for (const account of storedAccounts) {
-            if (manualStops.has(account.id)) {
-                console.log(`[${account.id}] Skipping auto-init because account was manually stopped.`);
-                continue;
-            }
-            // CRITICAL: Auto-initialization (restarts) should NEVER sync history.
-            // History sync is strictly reserved for the initial "Account Addition" phase.
-            await initializeWhatsApp(account.id, false);
-            await delay(2000); 
+            if (manualStops.has(account.id)) continue;
+            
+            // Fire and forget with a small delay between each start to staggered resource usage
+            (async () => {
+                try {
+                    await initializeWhatsApp(account.id, false);
+                } catch (e) {
+                    console.error(`[${account.id}] Auto-init failed:`, e);
+                }
+            })();
+            
+            await delay(500); // 0.5s stagger
         }
-    } catch (e) {}
+    } catch (e) {
+        console.error('initAllAccounts failed:', e);
+    }
 }
 
 if (!building) {

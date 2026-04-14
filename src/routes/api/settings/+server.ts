@@ -24,6 +24,9 @@ export const GET = async ({ locals }) => {
             rejectMessageCheckEnabled: false,
             rejectKeywords: 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum',
             banProtectionEnabled: true,
+            humanTyping: true,
+            simulateOnline: true,
+            useAccountRotation: false,
         };
         await db.insert(userSettings).values(newSettings);
         settings = newSettings;

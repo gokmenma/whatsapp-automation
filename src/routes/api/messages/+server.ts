@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { accounts } from '$lib/server/db/schema';
 import { eq, sql } from 'drizzle-orm';
-import { getAccountStatus, getCanonicalContactNumber, getContactName, normalizeDigits } from '$lib/whatsapp';
+import { getAccountStatus, getCanonicalContactNumber, getContactName, normalizeDigits, getContactStatus } from '$lib/whatsapp';
 
 let messagesConversationIndexEnsured = false;
 
@@ -154,6 +154,7 @@ export const GET: RequestHandler = async ({ url, locals }) => {
             contactJid: jid,
             name: getContactName(accountId, contactName) || jid.split('@')[0],
             number: number,
+            description: isGroup ? (getContactStatus(accountId, jid) || '') : '',
             lastMessage: String(row.lastMessageBody || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim(),
             lastMessageAt: Math.floor(date.getTime() / 1000),
             lastMessageFromMe: Boolean(row.fromMe),

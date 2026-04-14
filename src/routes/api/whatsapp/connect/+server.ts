@@ -42,41 +42,36 @@ export const POST = async ({ request, locals }) => {
 
         const isPrivate = !shouldGoToPool && canAddAccountPermission;
 
-        // Limit Check (Only for direct user assignments, pool accounts are exempt)
-        if (!shouldGoToPool) {
-            const currentCountResult = await db.select({ count: sql`count(*)` }).from(accounts).where(eq(accounts.userId, userIdStr));
-            const currentCount = Number((currentCountResult[0] as any)?.count || 0);
+        // Limit checks and account creation permissions are now handled below AFTER 
+        // determining if we are connecting an existing account or creating a new one.
+
+        // 1. Try finding by ID first (UUID) - Prioritize this as it's definitive
+        let existingRows = await db.select().from(accounts).where(eq(accounts.id, inputIdOrName)).limit(1);
+        let existing = existingRows[0];
+
+        // 2. Permission Check for existing account found by ID
+        if (existing) {
+            const isOwner = String(existing.userId) === userIdStr;
+            const isScannerOfAccount = String(existing.scannerId) === userIdStr;
+            const canManagePoolAccount = isAdminForPool && !existing.isPrivate;
             
-            const activeSub = await remoteDb.select({ limit: subscriptionPackages.accountLimit })
-                .from(userSubscriptions)
-                .innerJoin(subscriptionPackages, eq(userSubscriptions.packageId, subscriptionPackages.id))
-                .where(and(eq(userSubscriptions.userId, userIdInt), eq(userSubscriptions.status, 'active'), gt(userSubscriptions.endDate, new Date())))
-                .limit(1);
-            
-            const userLimit = activeSub[0]?.limit ?? 1;
-            if (currentCount >= userLimit) {
-                return json({ success: false, error: `Hesap limitine ulaştınız (${userLimit}). Lütfen paketinizi yükseltin.` });
+            if (!isOwner && !isScannerOfAccount && !canManagePoolAccount && !isSuperAdmin) {
+                 return json({ success: false, error: 'Bu hesabı yönetme yetkiniz yok.' }, { status: 403 });
             }
         }
 
-        // 1. Try finding by ID first in Local SQLite
-        let existingRows = await db.select().from(accounts).where(
-            and(
-                shouldGoToPool ? isNull(accounts.userId) : eq(accounts.userId, userIdStr),
-                eq(accounts.id, inputIdOrName)
-            )
-        ).limit(1);
-        let existing = existingRows[0];
-
-        // 2. If not found by ID, try finding by Name in Local SQLite
+        // 3. If not found by ID, try finding by Name (only if it doesn't look like a UUID)
         if (!existing) {
-            const existingByName = await db.select().from(accounts).where(
-                and(
-                    shouldGoToPool ? isNull(accounts.userId) : eq(accounts.userId, userIdStr),
-                    eq(accounts.name, inputIdOrName)
-                )
-            ).limit(1);
-            existing = existingByName[0];
+            const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(inputIdOrName);
+            if (!isUUID) {
+                const existingByName = await db.select().from(accounts).where(
+                    and(
+                        shouldGoToPool ? isNull(accounts.userId) : eq(accounts.userId, userIdStr),
+                        eq(accounts.name, inputIdOrName)
+                    )
+                ).limit(1);
+                existing = existingByName[0];
+            }
         }
 
         let targetId = existing?.id;

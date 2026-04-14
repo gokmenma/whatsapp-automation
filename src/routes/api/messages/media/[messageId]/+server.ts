@@ -87,6 +87,7 @@ export const GET: RequestHandler = async ({ params, locals }) => {
                 content?.imageMessage?.mimetype ||
                 content?.videoMessage?.mimetype ||
                 content?.audioMessage?.mimetype ||
+                content?.stickerMessage?.mimetype ||
                 content?.documentMessage?.mimetype || 'application/octet-stream';
             
             const extPart = mimeRaw.split('/')[1]?.split(';')[0]?.split('+')[0] || 'bin';

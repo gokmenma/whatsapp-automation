@@ -22,10 +22,11 @@
     let selectedAccount = $state(null);
     let targetUserId = $state("");
     let userSearchQuery = $state("");
-    let syncConfirmDialogOpen = $state(false);
-    let isSyncingHistory = $state(false);
     let accountIdToSync = $state("");
     let targetUser = $derived(users.find(u => String(u.id) === targetUserId));
+    
+    let startingMap = $state({});
+    let stoppingMap = $state({});
 
     let selectedScannerId = $state(null);
     let scannerSearchQuery = $state("");
@@ -146,34 +147,6 @@
     let isAddingAccount = $state(false);
     let syncHistory = $state(false);
 
-    function requestSyncHistory(id: string) {
-        accountIdToSync = id;
-        syncConfirmDialogOpen = true;
-    }
-
-    async function resyncAccount() {
-        if (!accountIdToSync) return;
-        isSyncingHistory = true;
-        try {
-            const res = await fetch(`/api/whatsapp/resync`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ accountId: accountIdToSync, syncHistory: true })
-            });
-            if (res.ok) {
-                toast.success('Senkronizasyon başlatıldı. Mesajlar kısa süre içinde yüklenecektir.');
-                syncConfirmDialogOpen = false;
-                await fetchPool();
-            } else {
-                const d = await res.json();
-                toast.error(d.error || 'Senkronizasyon başlatılamadı.');
-            }
-        } catch (e) {
-            toast.error('Bağlantı hatası oluştu.');
-        } finally {
-            isSyncingHistory = false;
-        }
-    }
 
     async function addAccount() {
         if (!newAccountName.trim()) return;
@@ -249,25 +222,49 @@
     }
 
     async function startAccount(accountId: string) {
+        startingMap[accountId] = true;
         try {
-            await fetch('/api/whatsapp/connect', {
+            const res = await fetch('/api/whatsapp/connect', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ accountId })
             });
+            const data = await res.json();
+            if (data.success) {
+                toast.success('Hesap başlatılıyor...');
+            } else {
+                toast.error(data.error || 'Hesap başlatılamadı');
+            }
             fetchPool();
-        } catch (e) { console.error(e); }
+        } catch (e: any) { 
+            console.error(e);
+            toast.error('Bağlantı hatası oluştu');
+        } finally {
+            startingMap[accountId] = false;
+        }
     }
 
     async function stopAccount(accountId: string) {
+        stoppingMap[accountId] = true;
         try {
-            await fetch('/api/whatsapp/stop', {
+            const res = await fetch('/api/whatsapp/stop', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ accountId })
             });
+            const data = await res.json();
+            if (data.success) {
+                toast.success('Hesap durduruldu');
+            } else {
+                toast.error(data.error || 'Hesap durdurulamadı');
+            }
             fetchPool();
-        } catch (e) { console.error(e); }
+        } catch (e: any) { 
+            console.error(e);
+            toast.error('Bağlantı hatası oluştu');
+        } finally {
+            stoppingMap[accountId] = false;
+        }
     }
 
     async function assignAccount() {
@@ -488,13 +485,18 @@
                         </div>
                         <div class="flex flex-col items-end gap-1.5 shrink-0 pt-1">
                             {#if acc.status === 'ready'}
-                                <Badge class="bg-green-500 text-[10px] py-0 h-4 px-1 shadow-[0_0_10px_rgba(34,197,94,0.3)]">Aktif</Badge>
+                                <Badge variant="success" class="bg-green-500/10 text-green-500 border-none px-2 py-0 h-5 text-[10px]">Aktif</Badge>
                             {:else if acc.status === 'connecting'}
-                                <Badge class="bg-blue-500 animate-pulse text-[10px] py-0 h-4 px-1">Bağlanıyor</Badge>
+                                <Badge variant="warning" class="bg-amber-500/10 text-amber-500 border-none px-2 py-0 h-5 text-[10px]">Bağlanıyor</Badge>
                             {:else if acc.status === 'loading'}
-                                <Badge variant="outline" class="animate-pulse text-[10px] py-0 h-4 px-1">...</Badge>
+                                <Badge class="bg-blue-500/10 text-blue-500 border-none px-2 py-0 h-5 text-[10px]">Bekliyor</Badge>
                             {:else}
-                                <Badge variant="secondary" class="text-[10px] py-0 h-4 px-1">Pasif</Badge>
+                                <div class="flex flex-col items-end gap-1">
+                                    <Badge variant="secondary" class="bg-slate-500/10 text-slate-500 border-none px-2 py-0 h-5 text-[10px]">Pasif</Badge>
+                                    {#if acc.connectionIssue}
+                                        <span class="text-[8px] text-destructive/70 font-bold uppercase">{acc.connectionIssue === 'dns' ? 'DNS HATASI' : 'AĞ HATASI'}</span>
+                                    {/if}
+                                </div>
                             {/if}
                         </div>
                     </Card.Header>
@@ -519,14 +521,23 @@
                                     <RefreshCcw class="w-3 h-3 animate-spin" /> QR'ı okutun
                                 </p>
                             </div>
-                        {:else if acc.status === "loading"}
-                            <Loader2 class="w-8 h-8 animate-spin text-muted-foreground opacity-20" />
+                        {:else if acc.status === "loading" || (acc.status === "connecting" && !acc.qr)}
+                            <div class="flex flex-col items-center justify-center space-y-4">
+                                <Loader2 class="w-10 h-10 animate-spin text-primary/30" />
+                                <p class="text-[10px] text-muted-foreground animate-pulse font-medium">Başlatılıyor...</p>
+                            </div>
                         {:else}
-                            <div class="flex flex-col items-center space-y-4 opacity-40">
-                                <div class="w-16 h-16 bg-muted rounded-full flex items-center justify-center">
-                                    <QrCode class="w-8 h-8 text-muted-foreground" />
+                            <div class="flex flex-col items-center space-y-4">
+                                <div class="w-16 h-16 bg-muted rounded-full flex items-center justify-center {acc.lastError ? 'text-destructive/50 ring-2 ring-destructive/10' : 'text-muted-foreground/30'}">
+                                    <QrCode class="w-8 h-8" />
                                 </div>
-                                <p class="text-[10px] font-medium">Bağlantı Yok</p>
+                                <div class="text-center px-4">
+                                    {#if acc.lastError}
+                                        <p class="text-[10px] text-destructive font-bold line-clamp-2 max-w-[180px]">{acc.lastError}</p>
+                                    {:else}
+                                        <p class="text-[10px] font-medium opacity-40">Bağlantı Yok</p>
+                                    {/if}
+                                </div>
                             </div>
                         {/if}
                     </Card.Content>
@@ -534,8 +545,12 @@
                     <Card.Footer class="bg-muted/10 p-3 gap-2 border-t">
                         {#if acc.status === "disconnected" || (!["ready", "connecting", "loading"].includes(acc.status))}
                             {#if canManagePool}
-                                <Button variant="default" size="sm" class="flex-1 h-8 text-[11px]" onclick={() => startAccount(acc.id)}>
-                                    <Power class="w-3 h-3 mr-1" /> Başlat
+                                <Button variant="default" size="sm" class="flex-1 h-8 text-[11px]" onclick={() => startAccount(acc.id)} disabled={startingMap[acc.id]}>
+                                    {#if startingMap[acc.id]}
+                                        <Loader2 class="w-3 h-3 animate-spin mr-1" /> Başlatılıyor...
+                                    {:else}
+                                        <Power class="w-3 h-3 mr-1" /> Başlat
+                                    {/if}
                                 </Button>
                             {:else}
                                 <div class="flex-1 text-[10px] text-center text-muted-foreground py-1 bg-muted/20 rounded-md">
@@ -543,22 +558,16 @@
                                 </div>
                             {/if}
                         {:else if canStopPool}
-                            <Button variant="outline" size="sm" class="flex-1 h-8 text-[11px]" onclick={() => stopAccount(acc.id)}>
-                                Durdur
+                            <Button variant="outline" size="sm" class="flex-1 h-8 text-[11px]" onclick={() => stopAccount(acc.id)} disabled={stoppingMap[acc.id]}>
+                                {#if stoppingMap[acc.id]}
+                                    <Loader2 class="w-3 h-3 animate-spin mr-1" /> Durduruluyor...
+                                {:else}
+                                    Durdur
+                                {/if}
                             </Button>
                         {/if}
                         
                         <div class="flex items-center gap-2 flex-1">
-                            {#if acc.status === "ready"}
-                                <Button variant="outline" size="sm" class="flex-1 h-8 text-[11px] gap-1 px-2 group-hover:border-primary/50 transition-colors" onclick={() => requestSyncHistory(acc.id)} disabled={isSyncingHistory && accountIdToSync === acc.id}>
-                                    {#if isSyncingHistory && accountIdToSync === acc.id}
-                                        <Loader2 class="w-3 h-3 animate-spin text-primary" />
-                                    {:else}
-                                        <History class="w-3 h-3 text-primary" />
-                                    {/if}
-                                    Senkronize
-                                </Button>
-                            {/if}
 
                             {#if canManagePool}
                                 <Button variant="outline" size="sm" class="flex-1 h-8 text-[11px] gap-1" onclick={() => openAssignDialog(acc)}>
@@ -615,15 +624,6 @@
                             }
                         }}
                     />
-                </div>
-                <div class="flex items-center space-x-2 py-1">
-                    <input type="checkbox" id="sync-history" bind:checked={syncHistory} class="w-4 h-4 rounded border-gray-300 text-primary focus:ring-primary" />
-                    <Label
-                        for="sync-history"
-                        class="text-xs font-medium leading-none cursor-pointer"
-                    >
-                        Geçmiş Mesajları Senkronize Et
-                    </Label>
                 </div>
             </div>
             <Dialog.Footer>
@@ -826,27 +826,3 @@
     </Dialog.Content>
 </Dialog.Root>
 
-<AlertDialog.Root bind:open={syncConfirmDialogOpen}>
-    <AlertDialog.Content>
-        <AlertDialog.Header>
-            <AlertDialog.Title>Geçmiş Senkronizasyonu</AlertDialog.Title>
-            <AlertDialog.Description>
-                Geçmiş mesajlar senkronize edilecek. Bu işlem sırasında hesap kısa süreliğine çevrimdışı olup tekrar bağlanacaktır. Devam edilsin mi?
-            </AlertDialog.Description>
-        </AlertDialog.Header>
-        <AlertDialog.Footer>
-            <AlertDialog.Cancel disabled={isSyncingHistory}>Vazgeç</AlertDialog.Cancel>
-            <AlertDialog.Action 
-                class="bg-primary text-primary-foreground hover:bg-primary/90 min-w-[100px]" 
-                onclick={(e) => { e.preventDefault(); resyncAccount(); }}
-                disabled={isSyncingHistory}
-            >
-                {#if isSyncingHistory}
-                    <Loader2 class="w-4 h-4 animate-spin mr-2" /> İşleniyor...
-                {:else}
-                    Tamam, Devam Et
-                {/if}
-            </AlertDialog.Action>
-        </AlertDialog.Footer>
-    </AlertDialog.Content>
-</AlertDialog.Root>

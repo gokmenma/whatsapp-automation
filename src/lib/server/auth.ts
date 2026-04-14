@@ -112,6 +112,7 @@ export async function getSession(sessionId: string) {
             ).limit(1);
         
         const sessionData = result[0];
+        console.log(`[Auth] getSession result for ${sessionId}:`, sessionData ? 'FOUND' : 'NOT FOUND');
         
         if (!sessionData) return null;
         

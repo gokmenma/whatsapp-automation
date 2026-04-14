@@ -3,25 +3,31 @@ import { getWhatsAppContacts, initializeWhatsApp, getAccountStatus } from '$lib/
 
 export async function GET({ url }) {
     const accountId = url.searchParams.get('accountId');
+    const refresh = url.searchParams.get('refresh') === 'true';
     
     if (!accountId) {
         return json({ success: false, error: "AccountId is required" }, { status: 400 });
     }
 
     try {
-        // Otomatik Başlatma (Lazy Load): Eğer hesap memory'de yoksa ama veritabanında varsa başlat.
-        const status = getAccountStatus(accountId);
-        if (status.status === 'disconnected') {
+        const liveStatus = getAccountStatus(accountId);
+        
+        if (refresh) {
+            console.log(`[API] Manual refresh requested for account=${accountId}`);
+            const { resyncWhatsAppAccount } = await import('$lib/whatsapp');
+            // We don't force history sync unless explicitly requested elsewhere, 
+            // but resyncWhatsAppAccount(accountId, false) will restart the connection which triggers contact sync.
+            await resyncWhatsAppAccount(accountId, false);
+            // Wait a tiny bit for the connection to re-establish and events to fire
+            await new Promise(resolve => setTimeout(resolve, 3000));
+        } else if (liveStatus.status === 'disconnected') {
             console.log(`[API] Account ${accountId} is disconnected, attempting auto-initialization for contacts...`);
-            // Arka planda başlat, ancak rehber için 1-2 saniye bekleyebiliriz veya 
-            // kullanıcıya hesabın bağlandığını bildirebiliriz.
             initializeWhatsApp(accountId).catch(console.error);
         }
 
         const contacts = await getWhatsAppContacts(accountId);
         
-        // Eğer rehber hala boşsa ve hesap yeni bağlanıyorsa kullanıcıya bilgi verelim
-        if (contacts.length === 0 && (status.status === 'connecting' || status.status === 'loading')) {
+        if (contacts.length === 0 && (liveStatus.status === 'connecting' || liveStatus.status === 'loading')) {
             return json({ success: true, contacts: [], message: "Rehber senkronize ediliyor..." });
         }
 

@@ -1,5 +1,6 @@
 import { loginUser } from '$lib/server/auth';
 import { fail, redirect } from '@sveltejs/kit';
+import { dev } from '$app/environment';
 
 export const actions = {
     default: async ({ request, cookies }) => {
@@ -13,7 +14,8 @@ export const actions = {
 
         try {
             const session = await loginUser(email, password);
-            cookies.set('session_id', session.id, {
+            const cookieName = dev ? 'session_id_dev' : 'session_id';
+            cookies.set(cookieName, session.id, {
                 path: '/',
                 httpOnly: true,
                 sameSite: 'strict',

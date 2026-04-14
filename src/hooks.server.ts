@@ -1,8 +1,10 @@
 import { getSession } from '$lib/server/auth';
-import { redirect } from '@sveltejs/kit';
+import { redirect, type Handle } from '@sveltejs/kit';
+import { dev } from '$app/environment';
 
-export const handle = async ({ event, resolve }) => {
-	const sessionId = event.cookies.get('session_id');
+export const handle: Handle = async ({ event, resolve }) => {
+    const cookieName = dev ? 'session_id_dev' : 'session_id';
+	const sessionId = event.cookies.get(cookieName);
 	
 	if (sessionId) {
 		try {
@@ -10,7 +12,7 @@ export const handle = async ({ event, resolve }) => {
 			if (session) {
 				event.locals.user = session.user;
 			} else {
-				event.cookies.delete('session_id', { path: '/' });
+				event.cookies.delete(cookieName, { path: '/' });
 			}
 		} catch (error) {
 			console.error('Session retrieval failed (retention mode):', error);

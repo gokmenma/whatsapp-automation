@@ -1,14 +1,17 @@
 import { drizzle as drizzleMysql } from 'drizzle-orm/mysql2';
 import mysql from 'mysql2/promise';
+import { dev } from '$app/environment';
 import * as schema from './schema';
 import * as remoteSchema from './remote-schema';
 
 // --- MYSQL CONFIGURATION ---
+const dbName = process.env.MYSQL_DATABASE || (dev ? 'whatsapp_automation_dev' : 'whatsapp_automation');
+
 const mysqlPool = mysql.createPool({
     host: process.env.MYSQL_HOST || 'localhost',
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
-    database: process.env.MYSQL_DATABASE || 'whatsapp_automation',
+    database: dbName,
     timezone: 'Z',
     charset: 'utf8mb4',
     waitForConnections: true,
@@ -33,7 +36,31 @@ async function initDb() {
         
         // Use a faster way to check columns/indexes than running full ALTERs
         // 1. Core tables
-        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, username VARCHAR(255) NOT NULL, password VARCHAR(255) NOT NULL, email VARCHAR(255) NOT NULL, role ENUM('superadmin', 'admin', 'user', 'qrcode_scanner') DEFAULT 'user', status ENUM('active', 'inactive') DEFAULT 'active', can_add_sources TINYINT(1) DEFAULT 1, account_limit INT DEFAULT 5, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, full_name VARCHAR(100), user_type ENUM('self_source', 'pool_source') DEFAULT 'self_source', last_login TIMESTAMP NULL, deleted TINYINT(1) DEFAULT 0)`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY, 
+            username VARCHAR(255) NOT NULL, 
+            password VARCHAR(255) NOT NULL, 
+            email VARCHAR(255) NOT NULL, 
+            role ENUM('superadmin', 'admin', 'user', 'qrcode_scanner') DEFAULT 'user', 
+            status ENUM('active', 'inactive') DEFAULT 'active', 
+            can_add_sources TINYINT(1) DEFAULT 1, 
+            can_add_account TINYINT(1) DEFAULT 0,
+            account_limit INT DEFAULT 5, 
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
+            full_name VARCHAR(100), 
+            user_type ENUM('self_source', 'pool_source') DEFAULT 'self_source', 
+            last_login TIMESTAMP NULL, 
+            deleted TINYINT(1) DEFAULT 0
+        )`);
+        
+        // Ensure can_add_account column exists (migration)
+        const [userCols]: any = await mysqlPool.query("SHOW COLUMNS FROM users LIKE 'can_add_account'");
+        if (userCols.length === 0) {
+            console.log('Adding can_add_account column to users table...');
+            await mysqlPool.query("ALTER TABLE users ADD COLUMN can_add_account TINYINT(1) DEFAULT 0 AFTER can_add_sources");
+        }
+
         await mysqlPool.query(`CREATE TABLE IF NOT EXISTS role_permissions (id INT AUTO_INCREMENT PRIMARY KEY, role ENUM('superadmin', 'admin', 'user', 'qrcode_scanner') NOT NULL, resource VARCHAR(255) NOT NULL, can_access TINYINT(1) DEFAULT 1)`);
         await mysqlPool.query(`CREATE TABLE IF NOT EXISTS sessions (id VARCHAR(255) PRIMARY KEY, user_id INT NOT NULL, expires BIGINT NOT NULL)`);
         await mysqlPool.query(`CREATE TABLE IF NOT EXISTS subscription_packages (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, price INT NOT NULL, account_limit INT DEFAULT 1)`);
@@ -104,6 +131,38 @@ async function initDb() {
         if (accountTsIdx.length === 0) {
             console.log('Adding account_timestamp index...');
             await mysqlPool.query("ALTER TABLE messages ADD INDEX messages_account_timestamp_idx (account_id, timestamp DESC)");
+        }
+
+        // 3. User Settings and Migrations
+        await mysqlPool.query(`
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INT PRIMARY KEY,
+                read_receipt TINYINT(1) NOT NULL DEFAULT 1,
+                dark_mode TINYINT(1) NOT NULL DEFAULT 1,
+                message_delay INT NOT NULL DEFAULT 2000,
+                batch_size INT NOT NULL DEFAULT 25,
+                batch_wait_minutes INT NOT NULL DEFAULT 5,
+                use_greeting_variations TINYINT(1) NOT NULL DEFAULT 1,
+                use_intro_variations TINYINT(1) NOT NULL DEFAULT 1,
+                use_closing_variations TINYINT(1) NOT NULL DEFAULT 1,
+                reject_message_check_enabled TINYINT(1) NOT NULL DEFAULT 0,
+                reject_keywords TEXT NOT NULL,
+                ban_protection_enabled TINYINT(1) NOT NULL DEFAULT 1
+            )
+        `);
+
+        // Migration: Add human_typing, simulate_online, and use_account_rotation columns individually
+        const [hasHumanTyping]: any = await mysqlPool.query("SHOW COLUMNS FROM user_settings LIKE 'human_typing'");
+        if (hasHumanTyping.length === 0) {
+            await mysqlPool.query("ALTER TABLE user_settings ADD COLUMN human_typing TINYINT(1) NOT NULL DEFAULT 1");
+        }
+        const [hasSimulateOnline]: any = await mysqlPool.query("SHOW COLUMNS FROM user_settings LIKE 'simulate_online'");
+        if (hasSimulateOnline.length === 0) {
+            await mysqlPool.query("ALTER TABLE user_settings ADD COLUMN simulate_online TINYINT(1) NOT NULL DEFAULT 1");
+        }
+        const [hasRotation]: any = await mysqlPool.query("SHOW COLUMNS FROM user_settings LIKE 'use_account_rotation'");
+        if (hasRotation.length === 0) {
+            await mysqlPool.query("ALTER TABLE user_settings ADD COLUMN use_account_rotation TINYINT(1) NOT NULL DEFAULT 0");
         }
 
         console.log('MySQL Database initialized successfully.');

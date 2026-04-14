@@ -30,6 +30,9 @@ export const userSettings = mysqlTable('user_settings', {
     rejectMessageCheckEnabled: boolean('reject_message_check_enabled').notNull().default(false),
     rejectKeywords: text('reject_keywords').notNull(),
     banProtectionEnabled: boolean('ban_protection_enabled').notNull().default(true),
+    humanTyping: boolean('human_typing').notNull().default(true),
+    simulateOnline: boolean('simulate_online').notNull().default(true),
+    useAccountRotation: boolean('use_account_rotation').notNull().default(false),
 });
 
 export const autoReplyHistory = mysqlTable('auto_reply_history', {

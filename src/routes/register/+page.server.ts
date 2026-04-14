@@ -1,5 +1,6 @@
 import { registerUser } from '$lib/server/auth';
 import { fail, redirect } from '@sveltejs/kit';
+import { dev } from '$app/environment';
 
 export const actions = {
     default: async ({ request, cookies }) => {
@@ -7,19 +8,15 @@ export const actions = {
         const name = data.get('name') as string;
         const email = data.get('email') as string;
         const password = data.get('password') as string;
-        const confirmPassword = data.get('confirmPassword') as string;
 
-        if (!name || !email || !password || !confirmPassword) {
+        if (!name || !email || !password) {
             return fail(400, { message: 'Tüm alanlar gereklidir.' });
-        }
-
-        if (password !== confirmPassword) {
-            return fail(400, { message: 'Şifreler eşleşmiyor.' });
         }
 
         try {
             const session = await registerUser(name, email, password);
-            cookies.set('session_id', session.id, {
+            const cookieName = dev ? 'session_id_dev' : 'session_id';
+            cookies.set(cookieName, session.id, {
                 path: '/',
                 httpOnly: true,
                 sameSite: 'strict',

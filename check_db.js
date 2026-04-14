@@ -1,15 +1,14 @@
 import { db } from './src/lib/server/db/index.js';
-import { messages } from './src/lib/server/db/schema.js';
 import { sql } from 'drizzle-orm';
 
 async function main() {
     try {
-        const results = await db.execute(sql`
+        const [rows] = await db.execute(sql`
             SELECT account_id, COUNT(*) as count, MIN(timestamp) as oldest, MAX(timestamp) as newest 
             FROM messages 
             GROUP BY account_id
         `);
-        console.log(JSON.stringify(results, null, 2));
+        console.log(JSON.stringify(rows, null, 2));
         process.exit(0);
     } catch (e) {
         console.error(e);
