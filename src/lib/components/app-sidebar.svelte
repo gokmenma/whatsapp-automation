@@ -139,47 +139,51 @@
     const filteredSections = $derived([
         {
             title: "Platform",
-            items: resources.filter(res => res.category === 'page').map(res => {
+            items: resources.filter(res => {
+                if (res.category !== 'page') return false;
+                
+                // Superadmin her şeyi görür ama biz "Platform" ve "Yönetim" olarak ayırmak istiyoruz.
+                // Admin yolları '/admin/' veya '/hesap-havuzu' ile başlayabilir.
+                const adminPaths = ['/admin', '/hesap-havuzu'];
+                const isAdminPath = adminPaths.some(p => res.path.startsWith(p));
+                
+                if (user?.role === 'superadmin') {
+                    // Superadmin için bile Platform kısmında yönetim sayfalarını gösterme
+                    return !isAdminPath;
+                }
+                
+                return !isAdminPath;
+            }).map(res => {
                 let url = res.path;
                 if ((url === '/mesajlar' || url === '/mesaj-gonder') && currentAccountId) {
                     url = `${url}?account=${currentAccountId}`;
                 }
                 return { title: res.name, url, icon: iconMap[res.icon] || GlobeIcon };
             }).filter(item => {
-                const baseUrl = item.url.split('?')[0];
-                const adminPaths = ['/admin/', '/hesap-havuzu'];
-                const isManagement = adminPaths.some(p => baseUrl.startsWith(p));
-                if (isManagement) return false;
-                
-                // Superadmin bypass
                 if (user?.role === 'superadmin') return true;
-
-                // Dashboard (/) is always visible
+                const baseUrl = item.url.split('?')[0];
                 if (baseUrl === '/') return true;
-
-                // Explicit Check
                 const perm = permissions.find(p => p.resource === baseUrl);
-                if (perm) return !!perm.canAccess;
-
-                // Full dynamic check: Deny by default for everyone else if no record
-                return false;
+                return perm ? !!perm.canAccess : false;
             }).sort((a, b) => (a.url === '/' ? -1 : b.url === '/' ? 1 : 0))
         },
         {
             title: "Yönetim",
             items: resources
-                .filter(res => res.category === 'page' && res.path !== '/admin/permissions') // Hide permissions link as it's now a tab
+                .filter(res => {
+                    if (res.category !== 'page' || res.path === '/admin/permissions') return false;
+                    const adminPaths = ['/admin', '/hesap-havuzu'];
+                    const isAdminPath = adminPaths.some(p => res.path.startsWith(p));
+                    
+                    if (user?.role === 'superadmin') return isAdminPath;
+                    
+                    return isAdminPath;
+                })
                 .map(res => {
                     let url = res.path;
                     let name = res.name;
-
-                    if (url === '/admin/users') {
-                        name = 'Kullanıcı/Rol Yönetimi';
-                    }
-
-                    if (url === '/hesap-havuzu' && currentAccountId) {
-                        url = `${url}?account=${currentAccountId}`;
-                    }
+                    if (url === '/admin/users') name = 'Kullanıcı/Rol Yönetimi';
+                    if (url === '/hesap-havuzu' && currentAccountId) url = `${url}?account=${currentAccountId}`;
 
                     return { 
                         title: name, 
@@ -188,19 +192,10 @@
                         adminOnly: res.path.startsWith('/admin') 
                     };
                 }).filter(item => {
-                    const baseUrl = item.url.split('?')[0];
-                    const adminPaths = ['/admin/', '/hesap-havuzu'];
-                    const isManagement = adminPaths.some(p => baseUrl.startsWith(p));
-                    if (!isManagement) return false;
-
-                    // Superadmin bypass
                     if (user?.role === 'superadmin') return true;
-
-                    // Explicit Check
+                    const baseUrl = item.url.split('?')[0];
                     const perm = permissions.find(p => p.resource === baseUrl);
-                    if (perm) return !!perm.canAccess;
-
-                    return false;
+                    return perm ? !!perm.canAccess : false;
                 })
         }
     ]);

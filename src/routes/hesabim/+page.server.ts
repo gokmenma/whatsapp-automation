@@ -12,16 +12,32 @@ export const load = async ({ locals }) => {
     const userIdInt = Number(locals.user.id);
 
     // Safe load pattern
-    const [user] = await remoteDb.select().from(users).where(eq(users.id, userIdInt)).limit(1).catch(() => []);
-    if (!user) throw redirect(303, '/login');
+    const userResult = await remoteDb.select().from(users).where(eq(users.id, userIdInt)).limit(1).catch((err) => {
+        console.error('[Hesabim] User fetch error:', err);
+        return [];
+    });
+    const user = userResult[0];
+    if (!user) {
+        console.warn(`[Hesabim] User not found for ID: ${userIdInt}`);
+        throw redirect(303, '/login');
+    }
 
-    const [creditRes] = await remoteDb.select().from(userCredits).where(eq(userCredits.userId, userIdInt)).limit(1).catch(() => []);
-    const balance = creditRes?.balance ?? 0;
+    const creditRes = await remoteDb.select().from(userCredits).where(eq(userCredits.userId, userIdInt)).limit(1).catch((err) => {
+        console.error('[Hesabim] Credits fetch error:', err);
+        return [];
+    });
+    const balance = creditRes[0]?.balance ?? 0;
 
-    const creditPacks = await remoteDb.select().from(creditPackages).catch(() => []);
-    const subPacks = await remoteDb.select().from(subscriptionPackages).catch(() => []);
+    const creditPacks = await remoteDb.select().from(creditPackages).catch((err) => {
+        console.error('[Hesabim] Credit packages fetch error:', err);
+        return [];
+    });
+    const subPacks = await remoteDb.select().from(subscriptionPackages).catch((err) => {
+        console.error('[Hesabim] Subscription packages fetch error:', err);
+        return [];
+    });
 
-    const [activeSub] = await remoteDb.select({
+    const activeSubRes = await remoteDb.select({
         packageName: subscriptionPackages.name,
         endDate: userSubscriptions.endDate
     })
@@ -33,12 +49,19 @@ export const load = async ({ locals }) => {
             eq(userSubscriptions.status, 'active')
         )
     )
-    .limit(1).catch(() => []);
+    .limit(1).catch((err) => {
+        console.error('[Hesabim] Active subscription fetch error:', err);
+        return [];
+    });
+    const activeSub = activeSubRes[0];
 
     const purchaseHistory = await remoteDb.select()
         .from(creditPurchases)
         .where(eq(creditPurchases.userId, userIdInt))
-        .orderBy(desc(creditPurchases.createdAt)).catch(() => []);
+        .orderBy(desc(creditPurchases.createdAt)).catch((err) => {
+            console.error('[Hesabim] Purchase history fetch error:', err);
+            return [];
+        });
 
     return {
         user: {

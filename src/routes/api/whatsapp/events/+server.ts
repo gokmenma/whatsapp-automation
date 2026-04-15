@@ -17,13 +17,29 @@ export const GET: RequestHandler = ({ locals }) => {
             const emitter = getMessageEmitter();
             const { db } = await import('$lib/server/db');
             const { accounts } = await import('$lib/server/db/schema');
-            const { eq } = await import('drizzle-orm');
+            const accountRows = await db
+                .select({
+                    id: accounts.id,
+                    userId: accounts.userId,
+                    scannerId: accounts.scannerId,
+                    isPrivate: accounts.isPrivate
+                })
+                .from(accounts);
 
-            // Get user's account IDs once on connect for filtering
-            const userAccountIds = (await db.select({ id: accounts.id })
-                .from(accounts)
-                .where(eq(accounts.userId, userId)))
-                .map(a => a.id);
+            const role = String(locals.user?.role || '').trim();
+            const userIdNum = Number(userId);
+
+            // Mirror the access model used across message APIs:
+            // owner can receive their own account events, scanners receive assigned accounts,
+            // admins/superadmins can receive non-private account events.
+            const userAccountIds = accountRows
+                .filter((account) => {
+                    const isOwner = String(account.userId || '') === String(userId);
+                    const isScanner = role === 'qrcode_scanner' && Number(account.scannerId) === userIdNum;
+                    const isAdminOrSuper = (role === 'admin' || role === 'superadmin') && !Boolean(account.isPrivate);
+                    return isOwner || isScanner || isAdminOrSuper;
+                })
+                .map((account) => String(account.id));
 
             let closed = false;
 

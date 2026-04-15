@@ -165,6 +165,14 @@ async function initDb() {
             await mysqlPool.query("ALTER TABLE user_settings ADD COLUMN use_account_rotation TINYINT(1) NOT NULL DEFAULT 0");
         }
 
+        // Migration: Add browser and proxy columns to accounts table
+        const [hasBrowserPlatform]: any = await mysqlPool.query("SHOW COLUMNS FROM accounts LIKE 'browser_platform'");
+        if (hasBrowserPlatform.length === 0) {
+            await mysqlPool.query("ALTER TABLE accounts ADD COLUMN browser_platform VARCHAR(255) DEFAULT NULL");
+            await mysqlPool.query("ALTER TABLE accounts ADD COLUMN browser_name VARCHAR(255) DEFAULT NULL");
+            await mysqlPool.query("ALTER TABLE accounts ADD COLUMN proxy_url VARCHAR(500) DEFAULT NULL");
+        }
+
         console.log('MySQL Database initialized successfully.');
 
     } catch (e) {

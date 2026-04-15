@@ -41,7 +41,8 @@
 		Code,
 		Quote,
 		List,
-		ListOrdered
+		ListOrdered,
+		Clock
 	} from "@lucide/svelte";
 	import * as Dialog from "$lib/components/ui/dialog";
 	import * as Tooltip from "$lib/components/ui/tooltip";
@@ -113,6 +114,29 @@
 	let errorCount = $state(0);
 	let currentRecipient = $state("");
 	let sendingResults: { to: string, message: string, status: string, error?: string }[] = $state([]);
+	let pauseRemainingSeconds = $state(0);
+	let isWaitingForBatch = $state(false);
+	let pauseInterval: any;
+
+	function formatTime(seconds: number) {
+		const mins = Math.floor(seconds / 60);
+		const secs = seconds % 60;
+		return `${mins}:${secs.toString().padStart(2, '0')}`;
+	}
+
+	function startPauseCountdown(ms: number) {
+		isWaitingForBatch = true;
+		pauseRemainingSeconds = Math.round(ms / 1000);
+		if (pauseInterval) clearInterval(pauseInterval);
+		pauseInterval = setInterval(() => {
+			if (pauseRemainingSeconds > 0) {
+				pauseRemainingSeconds--;
+			} else {
+				clearInterval(pauseInterval);
+				isWaitingForBatch = false;
+			}
+		}, 1000);
+	}
 
 	let mediaData: { data: string, mimetype: string, filename: string } | null = $state(null);
 	let mediaPreview: string | null = $state(null);
@@ -851,8 +875,15 @@
 			const hasMoreRecipients = i < finalRecipients.length - 1;
 			if (userSettings.banProtectionEnabled && antiBan.batchPauseEnabled && hasMoreRecipients && sentInCurrentBatch >= randomBatchTarget) {
 				const randomPauseMs = getRandomPauseDurationMs(maxWaitMinutes);
-				currentRecipient = `⏸ ${sentInCurrentBatch} mesaj gönderildi - ${Math.round(randomPauseMs / 60000)} dk bekleniyor...`;
-				await new Promise((r) => setTimeout(r, randomPauseMs));
+				startPauseCountdown(randomPauseMs);
+				
+				// Wait for countdown to finish or sendStatus to change
+				while (pauseRemainingSeconds > 0 && sendStatus === "sending") {
+					await new Promise(r => setTimeout(r, 200));
+				}
+				
+				if (pauseInterval) clearInterval(pauseInterval);
+				isWaitingForBatch = false;
 				if (sendStatus !== "sending") break;
 
 				sentInCurrentBatch = 0;
@@ -1504,9 +1535,15 @@
 									{/if}
 								</div>
 
-								{#if currentRecipient && sendStatus === "sending"}
+								{#if sendStatus === "sending"}
 									<div class="text-[10px] text-center text-muted-foreground truncate opacity-70">
-										Son işlem: <span class="font-mono text-foreground">{currentRecipient}</span>
+										{#if isWaitingForBatch}
+											<span class="flex items-center justify-center gap-2 text-primary font-bold animate-pulse">
+												<Clock class="w-3 h-3" /> Son işlem sonrası bekleniyor: {formatTime(pauseRemainingSeconds)}
+											</span>
+										{:else if currentRecipient}
+											Son işlem: <span class="font-mono text-foreground">{currentRecipient}</span>
+										{/if}
 									</div>
 								{/if}
 							</div>

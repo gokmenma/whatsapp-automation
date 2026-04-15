@@ -11,7 +11,10 @@ export const accounts = mysqlTable('accounts', {
     autoReplyMessage: text('auto_reply_message').notNull(),
     isDefault: boolean('is_default').notNull().default(false),
     isPrivate: boolean('is_private').notNull().default(false),
-    syncHistory: boolean('sync_history').notNull().default(true)
+    syncHistory: boolean('sync_history').notNull().default(true),
+    browserPlatform: varchar('browser_platform', { length: 255 }),
+    browserName: varchar('browser_name', { length: 255 }),
+    proxyUrl: varchar('proxy_url', { length: 500 }),
 }, (t) => ({
     userIdIdx: index('accounts_user_id_idx').on(t.userId),
     scannerIdIdx: index('accounts_scanner_id_idx').on(t.scannerId)

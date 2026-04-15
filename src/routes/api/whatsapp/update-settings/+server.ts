@@ -6,7 +6,7 @@ import { eq, and } from 'drizzle-orm';
 export const POST = async ({ request, locals }) => {
     if (!locals.user) return json({ error: 'Unauthorized' }, { status: 401 });
 
-    const { accountId, autoReply, autoReplyMessage, isDefault } = await request.json();
+    const { accountId, autoReply, autoReplyMessage, isDefault, proxyUrl } = await request.json();
     
     if (isDefault) {
         // Clear default for all other accounts of this user
@@ -18,7 +18,7 @@ export const POST = async ({ request, locals }) => {
 
     const userIdNum = Number(locals.user.id);
     const [updateResult]: any = await db.update(accounts)
-        .set({ autoReply, autoReplyMessage, isDefault })
+        .set({ autoReply, autoReplyMessage, isDefault, proxyUrl })
         .where(and(eq(accounts.id, accountId), eq(accounts.userId, userIdNum)));
 
     if (updateResult.affectedRows === 0) {

@@ -25,10 +25,9 @@ export const GET: RequestHandler = async ({ params, locals }) => {
         const { db } = await import('$lib/server/db');
         const { accounts } = await import('$lib/server/db/schema');
         const { eq, and } = await import('drizzle-orm');
-        const accountResult = await db.select().from(accounts)
+        const account = await db.select().from(accounts)
             .where(and(eq(accounts.id, accountId), eq(accounts.userId, locals.user.id)))
-            .limit(1);
-        const account = accountResult[0];
+            .get();
         if (!account) return new Response('Forbidden', { status: 403 });
     } catch {
         return new Response('Internal Server Error', { status: 500 });

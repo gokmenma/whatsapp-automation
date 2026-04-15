@@ -2,7 +2,7 @@
 	import * as Collapsible from "$lib/components/ui/collapsible/index.js";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
-	import { page } from "$app/stores";
+	import { page } from "$app/state";
 
 	let {
 		items,
@@ -26,9 +26,9 @@
 	function isItemActive(url: string) {
 		const path = url.split('?')[0];
 		if (path === "/") {
-			return $page.url.pathname === "/";
+			return page.url.pathname === "/";
 		}
-		return $page.url.pathname === path || $page.url.pathname.startsWith(path + '/');
+		return page.url.pathname === path || page.url.pathname.startsWith(path + '/');
 	}
 
 	function isGroupActive(item: any) {

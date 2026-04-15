@@ -53,6 +53,7 @@
                             timestamp: log.timestamp,
                             accountId: log.accountId,
                             accountName: log.accountName || log.accountId,
+                            allAccountNames: [log.accountName || log.accountId],
                             recipient: "Toplu Gönderim",
                             message: log.message,
                             status: "success",
@@ -68,6 +69,7 @@
                         timestamp: log.timestamp,
                         accountId: log.accountId,
                         accountName: log.accountName || log.accountId,
+                        allAccountNames: [log.accountName || log.accountId],
                         recipient: log.recipient,
                         message: log.message,
                         status: log.status,
@@ -78,6 +80,15 @@
             });
 
             groups.forEach(g => {
+                if (g.isBatch) {
+                    const uniqueNames = new Set(g.logs.map((l: any) => l.accountName || l.accountId));
+                    g.allAccountNames = Array.from(uniqueNames);
+                    if (g.allAccountNames.length > 1) {
+                        g.accountName = `${g.allAccountNames.length} Hesap (Rotasyon)`;
+                    } else {
+                        g.accountName = g.allAccountNames[0];
+                    }
+                }
                 const total = g.logs.length;
                 const success = g.logs.filter((l: any) => l.status === 'success').length;
                 const error = g.logs.filter((l: any) => l.status === 'error').length;
@@ -323,8 +334,12 @@
                             <p class="font-medium">{new Date(selectedGroup.timestamp).toLocaleString()}</p>
                         </div>
                         <div class="space-y-1">
-                            <p class="text-muted-foreground text-[10px] uppercase font-bold">Hesap</p>
-                            <p class="font-medium">{selectedGroup.accountName}</p>
+                            <p class="text-muted-foreground text-[10px] uppercase font-bold">Hesap(lar)</p>
+                            <div class="flex flex-wrap gap-1">
+                                {#each selectedGroup.allAccountNames as name}
+                                    <Badge variant="secondary" class="text-[10px] py-0">{name}</Badge>
+                                {/each}
+                            </div>
                         </div>
                     </div>
 
@@ -348,7 +363,10 @@
                                             <div class="w-7 h-7 bg-background rounded-full border flex items-center justify-center">
                                                 <Users class="w-3 h-3 text-muted-foreground" />
                                             </div>
-                                            <span class="font-mono font-medium text-xs tracking-tight">{log.recipient}</span>
+                                            <div class="flex flex-col">
+                                                <span class="font-mono font-medium text-xs tracking-tight">{log.recipient}</span>
+                                                <span class="text-[9px] text-muted-foreground italic">Hesap: {log.accountName || log.accountId}</span>
+                                            </div>
                                         </div>
                                         <div class="flex items-center gap-2">
                                             {#if log.status === 'success'}

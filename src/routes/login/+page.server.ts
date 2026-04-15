@@ -13,7 +13,9 @@ export const actions = {
         }
 
         try {
+            console.log(`[LoginAction] Attempting login for: ${email}`);
             const session = await loginUser(email, password);
+            console.log(`[LoginAction] Login successful for: ${email}, session: ${session.id}`);
             const cookieName = dev ? 'session_id_dev' : 'session_id';
             cookies.set(cookieName, session.id, {
                 path: '/',
@@ -23,6 +25,7 @@ export const actions = {
                 maxAge: 60 * 60 * 24 * 7 // 7 days
             });
         } catch (e: any) {
+            console.error(`[LoginAction] Login error for ${email}:`, e);
             return fail(400, { message: e.message || 'Giriş yapılamadı.' });
         }
 

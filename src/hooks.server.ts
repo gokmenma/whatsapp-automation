@@ -1,22 +1,18 @@
 import { getSession } from '$lib/server/auth';
-import { redirect, type Handle } from '@sveltejs/kit';
+import { redirect } from '@sveltejs/kit';
 import { dev } from '$app/environment';
 
-export const handle: Handle = async ({ event, resolve }) => {
-    const cookieName = dev ? 'session_id_dev' : 'session_id';
+export const handle = async ({ event, resolve }) => {
+	const isDev = dev;
+	const cookieName = isDev ? 'session_id_dev' : 'session_id';
 	const sessionId = event.cookies.get(cookieName);
 	
 	if (sessionId) {
-		try {
-			const session = await getSession(sessionId);
-			if (session) {
-				event.locals.user = session.user;
-			} else {
-				event.cookies.delete(cookieName, { path: '/' });
-			}
-		} catch (error) {
-			console.error('Session retrieval failed (retention mode):', error);
-			// We DO NOT delete the cookie here because it might be a temporary DB failure.
+		const session = await getSession(sessionId);
+		if (session) {
+			event.locals.user = session.user;
+		} else {
+			event.cookies.delete(cookieName, { path: '/' });
 		}
 	}
 	
@@ -34,42 +30,36 @@ export const handle: Handle = async ({ event, resolve }) => {
             try {
                 const { remoteDb } = await import('$lib/server/db');
                 const { rolePermissions } = await import('$lib/server/db/remote-schema');
-                const { eq, and, or } = await import('drizzle-orm');
+                const { eq, and } = await import('drizzle-orm');
                 
-                // Normalizing path
-                let path = event.url.pathname;
-                if (path.endsWith('/') && path.length > 1) path = path.slice(0, -1);
-                const pathWithoutSlash = path.startsWith('/') ? path.slice(1) : path;
-
                 // Default allowed paths
-                const publicPaths = ['/hesabim', '/logout', '/ayarlar', '/unauthorized'];
-                const isPublic = publicPaths.some(p => path.startsWith(p));
+                const publicPaths = ['/hesabim', '/logout', '/ayarlar'];
+                const isPublic = publicPaths.some(p => event.url.pathname.startsWith(p));
                 
-                const [dbPermission] = await remoteDb.select()
-                    .from(rolePermissions)
-                    .where(
-                        and(
-                            eq(rolePermissions.role, userRole), 
-                            or(
-                                eq(rolePermissions.resource, path),
-                                eq(rolePermissions.resource, pathWithoutSlash)
-                            )
-                        )
-                    )
-                    .limit(1);
-                
-                if (dbPermission) {
-                    if (!dbPermission.canAccess) {
-                        console.warn(`[Hook] Access DENIED for role ${userRole} to ${path}`);
-                        throw redirect(303, '/unauthorized');
+                if (!isPublic) {
+                    const permissions = await remoteDb.select()
+                        .from(rolePermissions)
+                        .where(and(eq(rolePermissions.role, userRole), eq(rolePermissions.resource, event.url.pathname)))
+                        .limit(1);
+                    
+                    if (permissions.length === 0 || !permissions[0].canAccess) {
+                        // Specific fallback checks
+                        if (userRole === 'qrcode_scanner' && (event.url.pathname === '/hesaplar' || event.url.pathname === '/hesap-havuzu')) {
+                            // Allow
+                        } else if (userRole === 'admin' && event.url.pathname.startsWith('/admin')) {
+                            // Allow
+                        } else if (userRole === 'user' && (event.url.pathname === '/hesaplar' || event.url.pathname === '/mesaj-gonder')) {
+                            // Allow
+                        } else {
+                            throw redirect(303, '/?error=unauthorized');
+                        }
                     }
-                } else if (!isPublic) {
-                    console.warn(`[Hook] No record found. Default DENY for role ${userRole} to ${path}`);
-                    throw redirect(303, '/unauthorized');
                 }
             } catch (e: any) {
-                if (e.status === 303 || e.status === 302 || e.status === 307) throw e;
+                if (e.status === 303) throw e; // Pass through redirects
                 console.error('Permission check error:', e);
+                // In case of DB error, we allow the request to proceed to avoid "Internal Error" (or you could block it)
+                // However, the dashboard logic likely handles missing data gracefully.
             }
         }
     }
