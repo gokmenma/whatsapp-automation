@@ -70,4 +70,5 @@ export const GET = async ({ locals }) => {
         console.error('API Status Error:', error);
         return json({ accounts: [], credits: 0, limit: 1, error: error.message }, { status: 500 });
     }
+
 };

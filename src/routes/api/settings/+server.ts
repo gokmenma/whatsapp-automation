@@ -15,9 +15,16 @@ export const GET = async ({ locals }) => {
             userId: locals.user.id,
             readReceipt: true,
             darkMode: true,
+            humanBehaviorEnabled: false,
+            humanBehaviorLevel: 'balanced',
+            accountRotationEnabled: false,
+            accountRotationMessageCount: 1,
             messageDelay: 2000,
             batchSize: 25,
             batchWaitMinutes: 5,
+            useMessageDelay: true,
+            useBatchSizeLimit: true,
+            useBatchWait: true,
             useGreetingVariations: true,
             useIntroVariations: true,
             useClosingVariations: true,
@@ -57,6 +64,38 @@ export const POST = async ({ request, locals }) => {
         if (body.batchWaitMinutes < 3 || body.batchWaitMinutes > 30) {
             return json({ error: 'Batch wait time must be between 3 and 30 minutes' }, { status: 400 });
         }
+    }
+
+    if (body.humanBehaviorLevel !== undefined) {
+        const level = String(body.humanBehaviorLevel || '').toLowerCase();
+        if (!['light', 'balanced', 'aggressive'].includes(level)) {
+            return json({ error: 'Invalid human behavior level' }, { status: 400 });
+        }
+        body.humanBehaviorLevel = level;
+    }
+
+    if (body.accountRotationMessageCount !== undefined) {
+        const count = Number(body.accountRotationMessageCount);
+        if (!Number.isFinite(count) || count < 1 || count > 100) {
+            return json({ error: 'Account rotation count must be between 1 and 100' }, { status: 400 });
+        }
+        body.accountRotationMessageCount = Math.floor(count);
+    }
+
+    if (body.accountRotationEnabled !== undefined) {
+        body.accountRotationEnabled = Boolean(body.accountRotationEnabled);
+    }
+
+    if (body.useMessageDelay !== undefined) {
+        body.useMessageDelay = Boolean(body.useMessageDelay);
+    }
+
+    if (body.useBatchSizeLimit !== undefined) {
+        body.useBatchSizeLimit = Boolean(body.useBatchSizeLimit);
+    }
+
+    if (body.useBatchWait !== undefined) {
+        body.useBatchWait = Boolean(body.useBatchWait);
     }
 
     if (body.rejectKeywords !== undefined) {

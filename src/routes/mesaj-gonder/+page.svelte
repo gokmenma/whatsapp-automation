@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, untrack } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { building } from '$app/environment';
 	import { toast } from 'svelte-sonner';
@@ -104,8 +104,8 @@
 	);
 
 	let selectedAccountId = $state("");
-	let userCredits = $state(data.credits || 0);
-	let accounts: any[] = $state(data.accounts || []);
+	let userCredits = $state(0);
+	let accounts: any[] = $state([]);
 	let isBulk = $state(false);
 	
 	let sendStatus = $state("idle"); // idle, sending, finished, error
@@ -203,6 +203,13 @@
 				    selectedAccountId = defaultAccount ? defaultAccount.id : (accounts[0]?.id || "");
                 }
 			}
+
+			console.log('[ACCOUNTS] Loaded accounts:', {
+				totalReady: accounts.length,
+				accountIds: accounts.map(a => a.id),
+				selectedAccountId,
+				hasDefault: !!accounts.find((a: any) => a.isDefault)
+			});
 		});
 	});
 
@@ -234,11 +241,6 @@
 			selectedContacts.clear();
 		}
 
-		if (allContacts.length > 0) {
-			filterContacts();
-			return;
-		}
-		
 		isLoadingContacts = true;
 		try {
 			console.log(`[Frontend] Fetching contacts for account: ${selectedAccountId}`);
@@ -431,8 +433,13 @@
 
 	let userSettings = $state({
 		messageDelay: 2000,
+		useMessageDelay: true,
 		batchSize: 25,
+		useBatchSizeLimit: true,
 		batchWaitMinutes: 5,
+		useBatchWait: true,
+		accountRotationEnabled: false,
+		accountRotationMessageCount: 0,
 		rejectMessageCheckEnabled: false,
 		useGreetingVariations: true,
 		useIntroVariations: true,
@@ -703,8 +710,15 @@
 			const data = await res.json();
 			if (data) {
 				if (typeof data.messageDelay === 'number') userSettings.messageDelay = data.messageDelay;
+				if (typeof data.useMessageDelay === 'boolean') userSettings.useMessageDelay = data.useMessageDelay;
 				if (typeof data.batchSize === 'number') userSettings.batchSize = data.batchSize;
+				if (typeof data.useBatchSizeLimit === 'boolean') userSettings.useBatchSizeLimit = data.useBatchSizeLimit;
 				if (typeof data.batchWaitMinutes === 'number') userSettings.batchWaitMinutes = data.batchWaitMinutes;
+				if (typeof data.useBatchWait === 'boolean') userSettings.useBatchWait = data.useBatchWait;
+				if (typeof data.accountRotationEnabled === 'boolean') userSettings.accountRotationEnabled = data.accountRotationEnabled;
+				if (typeof data.accountRotationMessageCount === 'number') {
+					userSettings.accountRotationMessageCount = Math.max(1, Math.min(100, Math.floor(data.accountRotationMessageCount)));
+				}
 				if (typeof data.rejectMessageCheckEnabled === 'boolean') userSettings.rejectMessageCheckEnabled = data.rejectMessageCheckEnabled;
 				if (typeof data.useGreetingVariations === 'boolean') antiBan.useGreetingVariations = data.useGreetingVariations;
 				if (typeof data.useIntroVariations === 'boolean') antiBan.useIntroVariations = data.useIntroVariations;
@@ -713,13 +727,84 @@
 				if (typeof data.humanTyping === 'boolean') userSettings.humanTyping = data.humanTyping;
 				if (typeof data.simulateOnline === 'boolean') userSettings.simulateOnline = data.simulateOnline;
 				if (typeof data.useAccountRotation === 'boolean') userSettings.useAccountRotation = data.useAccountRotation;
+				
+				console.log('[SETTINGS] Loaded user settings:', {
+					accountRotationEnabled: userSettings.accountRotationEnabled,
+					accountRotationMessageCount: userSettings.accountRotationMessageCount,
+					messageDelay: userSettings.messageDelay,
+					batchSize: userSettings.batchSize
+				});
+
 			}
 		} catch (e) {
 			console.error("Settings fetch error:", e);
 		}
 	}
 
+	function isAccountNotReadyError(errorText: unknown) {
+		const text = String(errorText || '').toLowerCase();
+		if (!text) return false;
+		return (
+			text.includes('is not ready') ||
+			text.includes('logged out') ||
+			text.includes('connection closed') ||
+			text.includes('oturum kapandi') ||
+			text.includes('oturum kapandı') ||
+			text.includes('kisit') ||
+			text.includes('kısıt') ||
+			text.includes('banned') ||
+			text.includes('hesap bagli degil') ||
+			text.includes('hesap bağlı değil')
+		);
+	}
+
+	async function ensureSelectedAccountReadyForSend() {
+		await fetchAccounts();
+		await tick();
+
+		if (!accounts.length) {
+			selectedAccountId = '';
+			return false;
+		}
+
+		const selectedId = String(selectedAccountId || '').trim();
+		const currentIsReady = accounts.find((acc: any) => String(acc?.id || '').trim() === selectedId);
+		if (currentIsReady) return true;
+
+		const defaultAccount = accounts.find((acc: any) => acc.isDefault);
+		selectedAccountId = String(defaultAccount?.id || accounts[0]?.id || '').trim();
+		return Boolean(selectedAccountId);
+	}
+
+	async function switchToAnotherReadyAccount(currentAccountId: string, excludedIds: Set<string> = new Set()) {
+		const previousId = String(currentAccountId || '').trim();
+
+		await fetchAccounts();
+		await tick();
+
+		const readyIds = accounts
+			.map((acc: any) => String(acc?.id || '').trim())
+			.filter((id) => id.length > 0 && !excludedIds.has(id));
+
+		if (readyIds.length === 0) return null;
+
+		const currentIndex = readyIds.indexOf(previousId);
+		const nextId = currentIndex >= 0
+			? readyIds[(currentIndex + 1) % readyIds.length]
+			: readyIds[0];
+
+		if (!nextId || nextId === previousId) return null;
+
+		selectedAccountId = nextId;
+		return accounts.find((acc: any) => acc.id === nextId) || null;
+	}
+
 	async function startSending() {
+		const hasReadyAccount = await ensureSelectedAccountReadyForSend();
+		if (!hasReadyAccount) {
+			return alert('Gönderime başlamak için hazır en az bir hesap olmalı.');
+		}
+
 		const finalRecipients = phoneNumberText.split(/\r?\n/)
 			.filter(line => line.trim().length > 0)
 			.map(line => {
@@ -758,6 +843,10 @@
         const batchId = finalRecipients.length > 1 ? Math.random().toString(36).substr(2, 9) : undefined;
 
 		antiBan = normalizeAntiBanSettings(antiBan);
+		const useMessageDelay = Boolean(userSettings.useMessageDelay);
+		const useBatchSizeLimit = Boolean(userSettings.useBatchSizeLimit);
+		const useBatchWait = Boolean(userSettings.useBatchWait);
+		const effectiveBatchPauseEnabled = Boolean(antiBan.batchPauseEnabled && useBatchSizeLimit && useBatchWait);
 		const maxMessageDelayMs = Math.max(
 			MIN_MESSAGE_DELAY_MS,
 			Math.floor(Number(userSettings.messageDelay || MIN_MESSAGE_DELAY_MS))
@@ -769,12 +858,28 @@
 		);
 		let sentInCurrentBatch = 0;
 		let randomBatchTarget = getRandomBatchTarget(maxBatchSize);
+<<<<<<< HEAD
 		let rotationIndex = 0;
 
 		const readyAccounts = accounts.filter((a: any) => a.status === 'ready');
 		if (userSettings.useAccountRotation && readyAccounts.length === 0) {
 			return alert("Rotasyon için hazır hesap bulunamadı!");
 		}
+=======
+		const rotationEvery = userSettings.accountRotationEnabled
+			? Math.max(1, Math.floor(Number(userSettings.accountRotationMessageCount || 1)))
+			: 0;
+		let sentOnCurrentAccount = 0;
+		const disabledAccountIds = new Set<string>();
+
+		console.log('[SEND] Rotation Config:', {
+			accountRotationEnabled: userSettings.accountRotationEnabled,
+			accountRotationMessageCount: userSettings.accountRotationMessageCount,
+			rotationEvery,
+			readyAccountCount: accounts.length,
+			readyAccountIds: accounts.map(a => a.id)
+		});
+>>>>>>> origin/main
 
 		for (let i = 0; i < finalRecipients.length; i++) {
 			const item = finalRecipients[i];
@@ -823,6 +928,7 @@
 			}
 
 			currentRecipient = item.to;
+<<<<<<< HEAD
 			try {
 				let activeAccountId = selectedAccountId;
 				if (userSettings.useAccountRotation && readyAccounts.length > 0) {
@@ -848,32 +954,137 @@
 					sendingResults.push({ to: item.to, message: item.message, status: "Başarılı" });
 					if (resData.remainingCredits !== undefined) {
 						userCredits = resData.remainingCredits;
+=======
+			let failoverTried = false;
+			while (true) {
+				try {
+					const res = await fetch('/api/whatsapp/send', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({
+							accountId: selectedAccountId,
+							to: item.to,
+							message: finalMessage,
+							media: useFileMedia ? null : mediaData,
+							filePath: item.filePath,
+							batchId: batchId
+						})
+					});
+					const resData: any = await res.json();
+
+					if (resData.success) {
+						sentCount++;
+						sendingResults.push({ to: item.to, message: item.message, status: "Başarılı" });
+						if (resData.remainingCredits !== undefined) {
+							userCredits = resData.remainingCredits;
+						}
+						break;
+>>>>>>> origin/main
 					}
-				} else if (resData.skipped) {
+
+					if (resData.skipped) {
+						errorCount++;
+						sendingResults.push({ to: item.to, message: item.message, status: "Atlandı", error: resData.error || "Mesaj red kontrolü nedeniyle atlandı" });
+						if (resData.remainingCredits !== undefined) {
+							userCredits = resData.remainingCredits;
+						}
+						break;
+					}
+
+					const errorText = String(resData.error || "Bilinmeyen hata");
+					if (!failoverTried && isAccountNotReadyError(errorText)) {
+						const previousAccountId = selectedAccountId;
+						disabledAccountIds.add(String(previousAccountId || '').trim());
+						const switchedAccount = await switchToAnotherReadyAccount(previousAccountId, disabledAccountIds);
+						if (switchedAccount) {
+							failoverTried = true;
+							toast.success(`${switchedAccount.name || switchedAccount.id} hesabina gecildi.`);
+							currentRecipient = `${item.to} (hesap değiştirildi: ${switchedAccount.name || switchedAccount.id})`;
+							continue;
+						}
+
+						toast.error('Hazir baska hesap bulunamadi. Toplu gonderim durduruldu.');
+						sendStatus = "finished";
+						break;
+					}
+
 					errorCount++;
-					sendingResults.push({ to: item.to, message: item.message, status: "Atlandı", error: resData.error || "Mesaj red kontrolü nedeniyle atlandı" });
+					sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: errorText });
 					if (resData.remainingCredits !== undefined) {
 						userCredits = resData.remainingCredits;
 					}
-				} else {
-					errorCount++;
-					sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: resData.error || "Bilinmeyen hata" });
-					if (resData.remainingCredits !== undefined) {
-						userCredits = resData.remainingCredits;
+					break;
+				} catch (e: any) {
+					const errorText = e?.message || "Bağlantı hatası";
+					if (!failoverTried && isAccountNotReadyError(errorText)) {
+						const previousAccountId = selectedAccountId;
+						disabledAccountIds.add(String(previousAccountId || '').trim());
+						const switchedAccount = await switchToAnotherReadyAccount(previousAccountId, disabledAccountIds);
+						if (switchedAccount) {
+							failoverTried = true;
+							toast.success(`${switchedAccount.name || switchedAccount.id} hesabina gecildi.`);
+							currentRecipient = `${item.to} (hesap değiştirildi: ${switchedAccount.name || switchedAccount.id})`;
+							continue;
+						}
+
+						toast.error('Hazir baska hesap bulunamadi. Toplu gonderim durduruldu.');
+						sendStatus = "finished";
+						break;
 					}
+
+					errorCount++;
+					sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: errorText });
+					break;
 				}
-			} catch (e: any) {
-				errorCount++;
-				sendingResults.push({ to: item.to, message: item.message, status: "Hata", error: e.message || "Bağlantı hatası" });
 			}
 
-			// Batch içindeki mesajlar için 600 ms ile kullanıcı max gecikmesi arasında rastgele bekleme
-			const finalDelay = getRandomMessageDelayMs(maxMessageDelayMs);
+			if (sendStatus !== "sending") break;
+
+			sentOnCurrentAccount++;
+			const hasMoreRecipients = i < finalRecipients.length - 1;
+			
+			console.log(`[SEND] After message #${sentCount + 1}:`, {
+				sentOnCurrentAccount,
+				rotationEvery,
+				hasMoreRecipients,
+				shouldCheckRotation: rotationEvery > 0 && hasMoreRecipients
+			});
+
+			if (rotationEvery > 0 && hasMoreRecipients) {
+				const readyIds = accounts
+					.map((acc: any) => String(acc?.id || '').trim())
+					.filter((id) => id.length > 0 && !disabledAccountIds.has(id));
+
+				console.log('[SEND] Ready IDs for rotation:', {
+					readyIds,
+					readyCount: readyIds.length,
+					canRotate: readyIds.length > 1,
+					sentOnCurrentAccount,
+					shouldRotate: sentOnCurrentAccount >= rotationEvery
+				});
+
+				if (readyIds.length > 1 && sentOnCurrentAccount >= rotationEvery) {
+					const previousAccountId = selectedAccountId;
+					const switchedTo = await switchToAnotherReadyAccount(previousAccountId, disabledAccountIds);
+					if (switchedTo) {
+						console.log('[SEND] Account switched successfully to:', switchedTo?.name || switchedTo.id);
+						toast.success(`Döngü: ${switchedTo?.name || switchedTo.id} hesabına geçildi.`);
+					}
+					sentOnCurrentAccount = 0;
+				}
+			}
+
+			// Delay switch kapalıysa sabit 10ms kullan.
+			const finalDelay = useMessageDelay ? getRandomMessageDelayMs(maxMessageDelayMs) : 10;
 			await new Promise(r => setTimeout(r, finalDelay));
 
 			sentInCurrentBatch++;
+<<<<<<< HEAD
 			const hasMoreRecipients = i < finalRecipients.length - 1;
 			if (userSettings.banProtectionEnabled && antiBan.batchPauseEnabled && hasMoreRecipients && sentInCurrentBatch >= randomBatchTarget) {
+=======
+			if (effectiveBatchPauseEnabled && hasMoreRecipients && sentInCurrentBatch >= randomBatchTarget) {
+>>>>>>> origin/main
 				const randomPauseMs = getRandomPauseDurationMs(maxWaitMinutes);
 				startPauseCountdown(randomPauseMs);
 				

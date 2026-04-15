@@ -100,6 +100,7 @@ export const POST = async ({ request, locals }) => {
                 )
                 .limit(1);
 
+
                 const limit = activeSub[0]?.limit ?? 1;
 
                 if (count >= limit) {

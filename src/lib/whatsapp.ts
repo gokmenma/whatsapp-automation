@@ -16,6 +16,8 @@ import qrcode from 'qrcode';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { building } from '$app/environment';
 
 const logger = pino({ level: 'silent' });
@@ -46,6 +48,8 @@ if (!globalRef.messageEventEmitter) globalRef.messageEventEmitter = new EventEmi
 
 export const getMessageEmitter = () => globalRef.messageEventEmitter as EventEmitter;
 
+type HumanBehaviorLevel = 'light' | 'balanced' | 'aggressive';
+
 interface AccountStatus {
     id: string;
     status: "disconnected" | "connecting" | "ready" | "loading";
@@ -73,12 +77,71 @@ function classifyConnectionIssue(reason: unknown): "dns" | "offline" | "unknown"
     return 'unknown';
 }
 
-async function simulateTypingPresence(client: any, jid: string, text: string, minMs = 700, maxMs = 2200) {
+async function simulateTypingPresence(
+    client: any,
+    jid: string,
+    text: string,
+    minMs = 700,
+    maxMs = 2200,
+    behaviorLevel: HumanBehaviorLevel = 'balanced'
+) {
     const targetJid = String(jid || '').trim();
     if (!targetJid || targetJid.endsWith('@g.us')) return;
 
-    const contentLength = Math.max(1, String(text || '').trim().length);
-    const estimated = Math.max(minMs, Math.min(maxMs, Math.round(contentLength * 35)));
+    const normalized = String(text || '').trim();
+    const compact = normalized.replace(/\s+/g, ' ');
+    const contentLength = Math.max(1, compact.length);
+    const wordCount = Math.max(1, compact.split(' ').filter(Boolean).length);
+    const punctuationCount = (compact.match(/[.,!?;:]/g) || []).length;
+    const lineBreakCount = (normalized.match(/\r?\n/g) || []).length;
+
+    const randomInt = (min: number, max: number) =>
+        Math.floor(Math.random() * (max - min + 1)) + min;
+
+    const profile = {
+        light: {
+            perCharMin: 22, perCharMax: 40,
+            punctuationMin: 35, punctuationMax: 90,
+            lineMin: 80, lineMax: 170,
+            wordMin: 6, wordMax: 16,
+            jitterMin: 60, jitterMax: 320,
+            burstMin: 240, burstMax: 760,
+            gapMin: 40, gapMax: 140
+        },
+        balanced: {
+            perCharMin: 30, perCharMax: 56,
+            punctuationMin: 55, punctuationMax: 120,
+            lineMin: 120, lineMax: 260,
+            wordMin: 10, wordMax: 24,
+            jitterMin: 120, jitterMax: 520,
+            burstMin: 320, burstMax: 980,
+            gapMin: 70, gapMax: 230
+        },
+        aggressive: {
+            perCharMin: 42, perCharMax: 76,
+            punctuationMin: 90, punctuationMax: 190,
+            lineMin: 180, lineMax: 360,
+            wordMin: 16, wordMax: 34,
+            jitterMin: 200, jitterMax: 850,
+            burstMin: 420, burstMax: 1300,
+            gapMin: 110, gapMax: 320
+        }
+    }[behaviorLevel];
+
+    // Human-like estimate: character typing + short pauses at punctuation/new lines + jitter.
+    const perCharMs = randomInt(profile.perCharMin, profile.perCharMax);
+    const punctuationPauseMs = punctuationCount * randomInt(profile.punctuationMin, profile.punctuationMax);
+    const linePauseMs = lineBreakCount * randomInt(profile.lineMin, profile.lineMax);
+    const wordCadenceMs = wordCount * randomInt(profile.wordMin, profile.wordMax);
+    const jitterMs = randomInt(profile.jitterMin, profile.jitterMax);
+
+    const estimated = Math.max(
+        minMs,
+        Math.min(
+            maxMs,
+            Math.round(contentLength * perCharMs + punctuationPauseMs + linePauseMs + wordCadenceMs + jitterMs)
+        )
+    );
 
     try {
         await client.presenceSubscribe(targetJid);
@@ -88,7 +151,20 @@ async function simulateTypingPresence(client: any, jid: string, text: string, mi
 
     try {
         await client.sendPresenceUpdate('composing', targetJid);
-        await delay(estimated);
+
+        // Split typing into short bursts to avoid robotic constant-composing duration.
+        let remaining = estimated;
+        while (remaining > 0) {
+            const burst = Math.min(remaining, randomInt(profile.burstMin, profile.burstMax));
+            await delay(burst);
+            remaining -= burst;
+
+            if (remaining > 0) {
+                await client.sendPresenceUpdate('paused', targetJid);
+                await delay(randomInt(profile.gapMin, profile.gapMax));
+                await client.sendPresenceUpdate('composing', targetJid);
+            }
+        }
     } finally {
         try {
             await client.sendPresenceUpdate('paused', targetJid);
@@ -327,6 +403,53 @@ function normalizeDigits(value: string | undefined | null) {
     return String(value || '').split('@')[0].split(':')[0].replace(/\D/g, '');
 }
 
+function isLikelyInternalWaId(number: string, displayName: string, isMyContact: boolean) {
+    const digits = normalizeDigits(number);
+    const name = String(displayName || '').trim();
+    const genericName = !name || name === digits;
+    const nameIsNumericOnly = name && /^\d+$/.test(name);
+
+    // If it's a saved contact in phone book, always show it
+    if (isMyContact) {
+        return false;
+    }
+
+    // For chat history only (not in phone book):
+    // Hide if:
+    // - Generic/numeric name + 10+ digits = likely fake ID (no real contact name)
+    // - All same digit pattern (000000, 111111) = definitely synthetic
+    if (genericName && digits.length >= 10) {
+        // Phone number format (10+ digits) with NO real name attached = hide
+        return true;
+    }
+    if (nameIsNumericOnly && digits.length >= 10) {
+        // Name is purely numeric = hide
+        return true;
+    }
+    if (digits.length >= 15 && /^(\d)\1+$/.test(digits)) {
+        // Very long with all same digits = suspicious
+        return true;
+    }
+
+    return false;
+}
+
+function hasMeaningfulContactName(name: unknown, number: string) {
+    const text = String(name || '').trim();
+    if (!text) return false;
+
+    const nameDigits = normalizeDigits(text);
+    const numberDigits = normalizeDigits(number);
+    const hasLetter = /\p{L}/u.test(text);
+
+    // Numeric-only (or numeric formatted like +90, spaces, dashes) is not a meaningful name.
+    if (!hasLetter && nameDigits && numberDigits && nameDigits === numberDigits) {
+        return false;
+    }
+
+    return true;
+}
+
 function extractMessageText(content: any) {
     let body = content?.conversation ||
         content?.extendedTextMessage?.text ||
@@ -353,6 +476,45 @@ function extractContextInfo(content: any) {
 
 function isUsableAvatarUrl(value: string | undefined | null) {
     return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function transcodeAudioToOggOpus(inputBuffer: Buffer, inputMimeType: string) {
+    const ffmpegPath = process.env.FFMPEG_PATH || 'C:\\ffmpeg\\bin\\ffmpeg.exe' || 'ffmpeg';
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-audio-'));
+    const inputExt = String(inputMimeType || '').toLowerCase().includes('ogg')
+        ? 'ogg'
+        : String(inputMimeType || '').toLowerCase().includes('webm')
+            ? 'webm'
+            : String(inputMimeType || '').toLowerCase().includes('mp4')
+                ? 'm4a'
+                : 'audio';
+    const inputPath = path.join(tempRoot, `input.${inputExt}`);
+    const outputPath = path.join(tempRoot, 'output.ogg');
+
+    try {
+        fs.writeFileSync(inputPath, inputBuffer);
+
+        const result = spawnSync(ffmpegPath, [
+            '-y',
+            '-i', inputPath,
+            '-vn',
+            '-c:a', 'libopus',
+            '-b:a', '48k',
+            '-ac', '1',
+            '-ar', '48000',
+            outputPath
+        ], { stdio: 'pipe' });
+
+        if (result.status !== 0 || !fs.existsSync(outputPath)) {
+            const stderr = String(result.stderr || '').trim();
+            const stdout = String(result.stdout || '').trim();
+            throw new Error(stderr || stdout || 'OGG/Opus dönüştürme başarısız');
+        }
+
+        return fs.readFileSync(outputPath);
+    } finally {
+        try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch {}
+    }
 }
 
 export async function initializeWhatsApp(accountId: string) {
@@ -1088,6 +1250,7 @@ export async function initializeWhatsApp(accountId: string) {
     // Messaging Upsert - Auto Reply Logic + Contact Harvesting + Message Persistence
     sock.ev.on('messages.upsert', async (m) => {
         const isNotify = m.type === 'notify';
+        const isAppend = m.type === 'append';
 
         for (const msg of m.messages) {
             // Harvest/update contact names from incoming message metadata.
@@ -1397,7 +1560,23 @@ export async function initializeWhatsApp(accountId: string) {
                 }
             }
 
-            if (!isNotify) continue; // Auto-reply only for real-time notifications
+            // Some fresh inbound messages can arrive as "append" depending on sync state.
+            // Allow recent append events so auto-reply does not get skipped unexpectedly.
+            if (!isNotify && !isAppend) continue;
+
+            if (isAppend) {
+                const rawTs: any = (msg as any).messageTimestamp;
+                const tsSeconds = typeof rawTs === 'number'
+                    ? rawTs
+                    : typeof rawTs === 'string'
+                        ? Number(rawTs)
+                        : typeof rawTs?.toNumber === 'function'
+                            ? rawTs.toNumber()
+                            : Number(rawTs ?? 0);
+
+                // Avoid sending auto-replies for old history sync payloads.
+                if (!tsSeconds || Date.now() - tsSeconds * 1000 > 120000) continue;
+            }
 
             if (!msg.message || msg.key.fromMe) continue;
             
@@ -1578,6 +1757,14 @@ export async function sendWhatsAppMessage(
     }
 
     const shouldPersistLog = Boolean(batchId);
+    const settings = await db.select().from(userSettings).where(eq(userSettings.userId, account.userId)).get();
+    const humanBehaviorEnabled = Boolean(settings?.humanBehaviorEnabled);
+    const useMessageDelay = Boolean(settings?.useMessageDelay ?? true);
+    const rawBehaviorLevel = String(settings?.humanBehaviorLevel || 'balanced').toLowerCase();
+    const humanBehaviorLevel: HumanBehaviorLevel =
+        rawBehaviorLevel === 'light' || rawBehaviorLevel === 'aggressive'
+            ? (rawBehaviorLevel as HumanBehaviorLevel)
+            : 'balanced';
 
     let jid = toJid(to);
     const isGroupTarget = jid.endsWith('@g.us');
@@ -1641,7 +1828,6 @@ export async function sendWhatsAppMessage(
     }
 
     if (!isGroupTarget) {
-        const settings = await db.select().from(userSettings).where(eq(userSettings.userId, account.userId)).get();
         const shouldCheckReject = Boolean(settings?.rejectMessageCheckEnabled);
 
         if (shouldCheckReject) {
@@ -1704,8 +1890,20 @@ export async function sendWhatsAppMessage(
             }
             : undefined;
 
-        if (!batchId && !isGroupTarget) {
-            await simulateTypingPresence(client, jid, message);
+        if (!isGroupTarget && useMessageDelay) {
+            // Always show a minimal typing presence for direct chats.
+            // When human behavior is enabled, keep the richer and longer simulation profile.
+            const minTypingMs = humanBehaviorEnabled ? 1200 : (batchId ? 500 : 700);
+            const maxTypingMs = humanBehaviorEnabled ? 4200 : (batchId ? 1400 : 2200);
+
+            await simulateTypingPresence(
+                client,
+                jid,
+                message,
+                minTypingMs,
+                maxTypingMs,
+                humanBehaviorEnabled ? humanBehaviorLevel : 'balanced'
+            );
         }
 
         if (media) {
@@ -1714,18 +1912,32 @@ export async function sendWhatsAppMessage(
             const isImage = media.mimetype.startsWith('image/');
             const isVideo = media.mimetype.startsWith('video/');
             const isAudio = media.mimetype.startsWith('audio/');
-            
-            const messageObj: any = {
-                caption: message
-            };
 
-            if (isImage) messageObj.image = mediaBuffer;
-            else if (isVideo) messageObj.video = mediaBuffer;
-            else if (isAudio) messageObj.audio = mediaBuffer;
+            const messageObj: any = {};
+
+            if (isImage) {
+                messageObj.image = mediaBuffer;
+                if (message) messageObj.caption = message;
+            }
+            else if (isVideo) {
+                messageObj.video = mediaBuffer;
+                if (message) messageObj.caption = message;
+            }
+            else if (isAudio) {
+                const normalizedMime = String(media.mimetype || '').toLowerCase();
+                const looksLikeOpusOgg = normalizedMime.includes('ogg') && normalizedMime.includes('opus');
+                const oggBuffer = looksLikeOpusOgg ? mediaBuffer : transcodeAudioToOggOpus(mediaBuffer, media.mimetype);
+                const oggFileName = String(media.filename || 'voice-note').replace(/\.[^.]+$/, '') + '.ogg';
+                messageObj.audio = oggBuffer;
+                messageObj.mimetype = 'audio/ogg; codecs=opus';
+                messageObj.fileName = oggFileName;
+                messageObj.ptt = true;
+            }
             else {
                 messageObj.document = mediaBuffer;
                 messageObj.mimetype = media.mimetype;
                 messageObj.fileName = media.filename;
+                if (message) messageObj.caption = message;
             }
 
             sentMsg = await client.sendMessage(jid, messageObj, quotedMessage ? { quoted: quotedMessage as any } : undefined);
@@ -1868,36 +2080,106 @@ export async function getWhatsAppContacts(accountId: string) {
     }
     
     // Merge contacts and chats for richer labels, including lid<->phone mapping.
-    const combined = new Map<string, any>(store.contacts as Map<string, any>);
-    store.chats.forEach((chat, jid) => {
-        if (!combined.has(jid)) {
-            combined.set(jid, {
-                id: jid,
-                name: chat.name,
-                pushName: chat.pushName,
-                notify: chat.notify
-            });
-        }
+    // IMPORTANT: Merge correctly - enrich contacts with chat metadata (pushName/notify)
+    const combined = new Map<string, any>();
+    
+    // First add all contacts as base
+    store.contacts.forEach((contact, jid) => {
+        combined.set(jid, { ...contact, id: jid });
     });
+    
+    // Then merge in chat data (overwrites/enriches with pushName and notify)
+    store.chats.forEach((chat, jid) => {
+        const existing = combined.get(jid) || { id: jid };
+        combined.set(jid, {
+            ...existing,
+            id: jid,
+            name: existing.name || chat.name,  // Prefer contact name, fall back to chat name
+            pushName: chat.pushName || existing.pushName,  // Enrich with chat pushName
+            notify: chat.notify || existing.notify        // Enrich with chat notify
+        });
+    });
+    const normalizedByKey = new Map<string, any>();
 
-    const contactsArray = Array.from(combined.values())
-        .filter((c: any) => {
-            const jid = String(c?.id || '');
-            return jid.endsWith('@s.whatsapp.net') || jid.endsWith('@g.us');
-        })
-        .map((c: any) => {
-            const jid = String(c?.id || '');
-            const isGroup = jid.endsWith('@g.us');
-            const number = isGroup ? jid.split('@')[0] : normalizeDigits(jid);
+    for (const c of Array.from(combined.values())) {
+        const jid = String(c?.id || '').trim();
+        if (!jid) continue;
 
-            return {
+        const isGroup = jid.endsWith('@g.us');
+        if (!isGroup && !jid.endsWith('@s.whatsapp.net') && !jid.endsWith('@c.us') && !jid.endsWith('@lid')) {
+            continue;
+        }
+
+        if (isGroup) {
+            const number = jid.split('@')[0];
+            const name = getContactName(accountId, jid) || number;
+            normalizedByKey.set(`group:${jid}`, {
                 id: jid,
-                name: getContactName(accountId, jid),
+                name,
                 number,
                 isMyContact: Boolean(c?.name),
-                isGroup
-            };
-        });
+                isGroup: true
+            });
+            continue;
+        }
+
+        const canonicalNumber = getCanonicalContactNumber(accountId, jid) || normalizeDigits(jid);
+        if (!canonicalNumber) continue;
+
+        // Filter out obviously garbage data: too short, or suspicious patterns
+        if (canonicalNumber.length < 5) continue;  // Valid phones are 5+ digits
+        if (canonicalNumber.length >= 15 && /^(\d)\1+$/.test(canonicalNumber)) {
+            // All same digit (like 000000..., 111111...) = suspicious
+            continue;
+        }
+
+        const canonicalJid = `${canonicalNumber}@s.whatsapp.net`;
+        
+        // Check if this contact has a real name (from contacts list OR from chat)
+        const contactInStore = store.contacts.get(canonicalJid);
+        const hasNameInContacts = hasMeaningfulContactName(c?.name || contactInStore?.name, canonicalNumber);
+        const hasNameInChat =
+            hasMeaningfulContactName(c?.pushName, canonicalNumber) ||
+            hasMeaningfulContactName(c?.notify, canonicalNumber);
+        const isMyContact = hasNameInContacts || hasNameInChat;
+
+        const resolvedName =
+            getContactName(accountId, canonicalJid) ||
+            getContactName(accountId, jid) ||
+            c?.pushName ||
+            c?.notify ||
+            canonicalNumber;
+
+        const nextItem = {
+            id: canonicalJid,
+            name: resolvedName || canonicalNumber,
+            number: canonicalNumber,
+            isMyContact,
+            isGroup: false
+        };
+
+        if (isLikelyInternalWaId(nextItem.number, nextItem.name, nextItem.isMyContact)) {
+            continue;
+        }
+
+        const key = `direct:${canonicalNumber}`;
+        const existing = normalizedByKey.get(key);
+        if (!existing) {
+            normalizedByKey.set(key, nextItem);
+            continue;
+        }
+
+        const existingName = String(existing.name || '').trim();
+        const nextName = String(nextItem.name || '').trim();
+        const existingLooksGeneric = !existingName || existingName === existing.number;
+        const nextLooksGeneric = !nextName || nextName === nextItem.number;
+        
+        if ((existingLooksGeneric && !nextLooksGeneric) || (!existing.isMyContact && nextItem.isMyContact)) {
+            normalizedByKey.set(key, nextItem);
+        }
+    }
+
+    const contactsArray = Array.from(normalizedByKey.values());
 
     console.log(`[${accountId}] getWhatsAppContacts: Returning ${contactsArray.length} contacts.`);
 
@@ -1910,17 +2192,64 @@ export async function getWhatsAppConversations(accountId: string) {
 
     const chatsArray = Array.from(store.chats.values());
     
-    return chatsArray
-        .filter((c: any) => c.id.endsWith('@s.whatsapp.net'))
-        .map((c: any) => {
-            return {
-                id: c.id,
-                name: getContactName(accountId, c.id),
-                number: c.id.split('@')[0],
-                isMyContact: !!store.contacts.get(c.id)?.name
-            };
-        })
-        .sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
+    const byNumber = new Map<string, any>();
+
+    for (const c of chatsArray) {
+        const rawJid = String((c as any)?.id || '').trim();
+        if (!rawJid || (!rawJid.endsWith('@s.whatsapp.net') && !rawJid.endsWith('@c.us') && !rawJid.endsWith('@lid'))) {
+            continue;
+        }
+
+        const number = getCanonicalContactNumber(accountId, rawJid) || normalizeDigits(rawJid);
+        if (!number) continue;
+
+        // Filter out obviously garbage data: too short, or suspicious patterns
+        if (number.length < 5) continue;  // Valid phones are 5+ digits
+        if (number.length >= 15 && /^(\d)\1+$/.test(number)) {
+            // All same digit = suspicious
+            continue;
+        }
+
+        const canonicalJid = `${number}@s.whatsapp.net`;
+        
+        // Check if this contact has a real name
+        const contactInStore = store.contacts.get(canonicalJid);
+        const hasNameInContacts = hasMeaningfulContactName(contactInStore?.name, number);
+        const hasNameInChat =
+            hasMeaningfulContactName((c as any)?.pushName, number) ||
+            hasMeaningfulContactName((c as any)?.notify, number) ||
+            hasMeaningfulContactName((c as any)?.name, number);
+        const isMyContact = hasNameInContacts || hasNameInChat;
+        
+        const item = {
+            id: canonicalJid,
+            name: getContactName(accountId, canonicalJid) || getContactName(accountId, rawJid) || (c as any)?.pushName || (c as any)?.name || number,
+            number,
+            isMyContact: isMyContact
+        };
+
+        if (isLikelyInternalWaId(item.number, item.name, item.isMyContact)) {
+            continue;
+        }
+
+        const existing = byNumber.get(number);
+        if (!existing) {
+            byNumber.set(number, item);
+            continue;
+        }
+
+        const existingName = String(existing.name || '').trim();
+        const nextName = String(item.name || '').trim();
+        const existingLooksGeneric = !existingName || existingName === existing.number;
+        const nextLooksGeneric = !nextName || nextName === item.number;
+        
+        // Keep better representation (prefer real name over number)
+        if ((existingLooksGeneric && !nextLooksGeneric) || (!existing.isMyContact && item.isMyContact)) {
+            byNumber.set(number, item);
+        }
+    }
+
+    return Array.from(byNumber.values()).sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
 }
 
 export async function resyncWhatsAppAccount(accountId: string) {
@@ -2331,6 +2660,91 @@ export function getCanonicalContactNumber(accountId: string, jidOrNumber: string
             if (!id || id.endsWith('@lid')) continue;
             if (normalizeUser(id) === userDigits) {
                 return normalizeUser(id);
+            }
+        }
+
+        // Some sessions keep lid mapping in chats as accountLid -> id.
+        for (const chat of store.chats.values()) {
+            const accountLid = String((chat as any)?.accountLid || '').trim();
+            const chatId = String((chat as any)?.id || '').trim();
+            if (!accountLid || !chatId) continue;
+            if (normalizeUser(accountLid) !== userDigits) continue;
+            if (chatId.endsWith('@lid')) continue;
+
+            const mapped = normalizeUser(chatId);
+            if (mapped) return mapped;
+        }
+
+        // Cross-store fallback for accountLid -> phone id mappings.
+        for (const candidateStore of stores.values()) {
+            for (const chat of candidateStore.chats.values()) {
+                const accountLid = String((chat as any)?.accountLid || '').trim();
+                const chatId = String((chat as any)?.id || '').trim();
+                if (!accountLid || !chatId) continue;
+                if (normalizeUser(accountLid) !== userDigits) continue;
+                if (chatId.endsWith('@lid')) continue;
+
+                const mapped = normalizeUser(chatId);
+                if (mapped) return mapped;
+            }
+        }
+
+        // LID-like direct identities can appear under @s.whatsapp.net with long non-phone digits.
+        // If we have a named lid contact for this identity, map it to a unique phone JID by name.
+        if (userDigits.length >= 15) {
+            let lidName = '';
+
+            // Prefer current account store first.
+            const currentLidContact = Array.from(store.contacts.values()).find((c) => {
+                const id = String((c as any)?.id || '').trim();
+                return id.endsWith('@lid') && normalizeUser(id) === userDigits;
+            }) as any;
+            lidName = normalizeNameValue(
+                String(currentLidContact?.name || currentLidContact?.notify || currentLidContact?.pushName || '').trim()
+            );
+
+            // If not found, look for the same lid identity in all loaded stores.
+            if (!lidName) {
+                for (const candidateStore of stores.values()) {
+                    const lidContact = Array.from(candidateStore.contacts.values()).find((c) => {
+                        const id = String((c as any)?.id || '').trim();
+                        return id.endsWith('@lid') && normalizeUser(id) === userDigits;
+                    }) as any;
+
+                    const candidateName = normalizeNameValue(
+                        String(lidContact?.name || lidContact?.notify || lidContact?.pushName || '').trim()
+                    );
+                    if (candidateName) {
+                        lidName = candidateName;
+                        break;
+                    }
+                }
+            }
+
+            if (lidName) {
+                const candidatePhones = new Set<string>();
+
+                for (const candidateStore of stores.values()) {
+                    for (const candidate of candidateStore.contacts.values()) {
+                        const id = String((candidate as any)?.id || '').trim();
+                        if (!id || id.endsWith('@lid')) continue;
+                        if (!id.endsWith('@s.whatsapp.net') && !id.endsWith('@c.us')) continue;
+
+                        const candidateName = normalizeNameValue(
+                            String((candidate as any)?.name || (candidate as any)?.notify || (candidate as any)?.pushName || '').trim()
+                        );
+                        if (!candidateName || candidateName !== lidName) continue;
+
+                        const digits = normalizeUser(id);
+                        if (digits.length >= 10 && digits.length <= 15) {
+                            candidatePhones.add(digits);
+                        }
+                    }
+                }
+
+                if (candidatePhones.size === 1) {
+                    return Array.from(candidatePhones)[0] || '';
+                }
             }
         }
 

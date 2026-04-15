@@ -47,6 +47,18 @@
     let messageText = $state('');
     let mediaInputEl = $state<HTMLInputElement | null>(null);
     let attachedMedia = $state<{ data: string; mimetype: string; filename: string } | null>(null);
+    let mediaRecorder: MediaRecorder | null = null;
+    let recordingStream: MediaStream | null = null;
+    let recordingChunks: Blob[] = [];
+    let recordingTimer: ReturnType<typeof setInterval> | null = null;
+    let recordingWaveRaf: number | null = null;
+    let recordingAudioContext: AudioContext | null = null;
+    let recordingAnalyser: AnalyserNode | null = null;
+    let shouldDiscardRecording = false;
+    let isRecordingAudio = $state(false);
+    let isPreparingAudioRecorder = $state(false);
+    let recordedAudioSeconds = $state(0);
+    let recordingWaveValues = $state(Array.from({ length: 16 }, () => 0.15));
     let searchQuery = $state('');
     let sendingMessage = $state(false);
     let loadingConversations = $state(false);
@@ -1295,6 +1307,226 @@
         if (mediaInputEl) mediaInputEl.value = '';
     }
 
+    function stopRecordingWaveMonitor() {
+        if (recordingWaveRaf !== null && typeof window !== 'undefined') {
+            window.cancelAnimationFrame(recordingWaveRaf);
+            recordingWaveRaf = null;
+        }
+
+        recordingAnalyser = null;
+
+        if (recordingAudioContext) {
+            const ctx = recordingAudioContext;
+            recordingAudioContext = null;
+            void ctx.close().catch(() => {});
+        }
+
+        recordingWaveValues = Array.from({ length: 16 }, () => 0.15);
+    }
+
+    function startRecordingWaveMonitor(stream: MediaStream) {
+        if (typeof window === 'undefined') return;
+        const ContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+        if (!ContextCtor) return;
+
+        stopRecordingWaveMonitor();
+
+        const context: AudioContext = new ContextCtor();
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.78;
+
+        const source = context.createMediaStreamSource(stream);
+        source.connect(analyser);
+
+        const data = new Uint8Array(new ArrayBuffer(analyser.fftSize));
+        recordingAudioContext = context;
+        recordingAnalyser = analyser;
+
+        const bars = 16;
+        const tickWave = () => {
+            if (!recordingAnalyser) return;
+
+            recordingAnalyser.getByteTimeDomainData(data);
+            const next = new Array<number>(bars).fill(0.15);
+            const step = Math.max(1, Math.floor(data.length / bars));
+
+            for (let i = 0; i < bars; i++) {
+                let sum = 0;
+                for (let j = 0; j < step; j++) {
+                    const idx = i * step + j;
+                    if (idx >= data.length) break;
+                    sum += Math.abs((data[idx] - 128) / 128);
+                }
+
+                const avg = sum / step;
+                next[i] = Math.max(0.12, Math.min(1, avg * 3));
+            }
+
+            recordingWaveValues = next;
+            recordingWaveRaf = window.requestAnimationFrame(tickWave);
+        };
+
+        recordingWaveRaf = window.requestAnimationFrame(tickWave);
+    }
+
+    function stopRecordingTimer() {
+        if (recordingTimer) {
+            clearInterval(recordingTimer);
+            recordingTimer = null;
+        }
+    }
+
+    function resetRecorderResources() {
+        stopRecordingWaveMonitor();
+
+        if (recordingStream) {
+            for (const track of recordingStream.getTracks()) {
+                track.stop();
+            }
+            recordingStream = null;
+        }
+        mediaRecorder = null;
+        recordingChunks = [];
+        stopRecordingTimer();
+        isRecordingAudio = false;
+        isPreparingAudioRecorder = false;
+        shouldDiscardRecording = false;
+        recordedAudioSeconds = 0;
+    }
+
+    function formatRecordDuration(totalSeconds: number) {
+        const safe = Math.max(0, Number(totalSeconds) || 0);
+        const mm = String(Math.floor(safe / 60)).padStart(2, '0');
+        const ss = String(safe % 60).padStart(2, '0');
+        return `${mm}:${ss}`;
+    }
+
+    async function attachRecordedAudio(blob: Blob) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.onerror = () => reject(new Error('Kayıt okunamadı'));
+            reader.readAsDataURL(blob);
+        });
+
+        const ext = blob.type.includes('ogg') ? 'ogg' : blob.type.includes('mp4') ? 'm4a' : 'webm';
+        attachedMedia = {
+            data: dataUrl,
+            mimetype: blob.type || 'audio/webm',
+            filename: `voice-${Date.now()}.${ext}`
+        };
+        toast.success('Ses kaydı eklendi. Gönderebilirsin.');
+    }
+
+    async function startAudioRecording() {
+        if (isPreparingAudioRecorder || isRecordingAudio) return;
+        if (attachedMedia) {
+            toast.error('Önce ekli dosyayı kaldır veya gönder.');
+            return;
+        }
+        if (typeof window === 'undefined' || typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+            toast.error('Tarayıcı mikrofon kaydını desteklemiyor.');
+            return;
+        }
+
+        isPreparingAudioRecorder = true;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            recordingStream = stream;
+            shouldDiscardRecording = false;
+            startRecordingWaveMonitor(stream);
+
+            const supportsOggOpus = MediaRecorder.isTypeSupported('audio/ogg;codecs=opus');
+            const supportsWebmOpus = MediaRecorder.isTypeSupported('audio/webm;codecs=opus');
+            const mimeType = supportsOggOpus
+                ? 'audio/ogg;codecs=opus'
+                : supportsWebmOpus
+                    ? 'audio/webm;codecs=opus'
+                    : 'audio/webm';
+
+            if (!supportsOggOpus) {
+                toast.warning('Cihaz OGG/Opus desteklemiyor, kayıt bazı telefonlarda açılamayabilir.');
+            }
+
+            const recorder = new MediaRecorder(stream, { mimeType });
+            mediaRecorder = recorder;
+            recordingChunks = [];
+            recordedAudioSeconds = 0;
+
+            recorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    recordingChunks.push(event.data);
+                }
+            };
+
+            recorder.onstop = async () => {
+                try {
+                    if (shouldDiscardRecording) {
+                        toast.info('Ses kaydı iptal edildi.');
+                        return;
+                    }
+
+                    const blob = new Blob(recordingChunks, { type: recorder.mimeType || mimeType });
+                    if (blob.size <= 0) {
+                        toast.error('Ses kaydı alınamadı.');
+                        return;
+                    }
+                    await attachRecordedAudio(blob);
+                } catch {
+                    toast.error('Ses kaydı hazırlanamadı.');
+                } finally {
+                    resetRecorderResources();
+                }
+            };
+
+            recorder.onerror = () => {
+                toast.error('Mikrofon kaydı sırasında hata oluştu.');
+                resetRecorderResources();
+            };
+
+            recorder.start();
+            isRecordingAudio = true;
+            isPreparingAudioRecorder = false;
+            recordingTimer = setInterval(() => {
+                recordedAudioSeconds += 1;
+            }, 1000);
+        } catch {
+            resetRecorderResources();
+            toast.error('Mikrofon izni verilmedi veya kayıt başlatılamadı.');
+        }
+    }
+
+    function stopAudioRecording() {
+        if (!mediaRecorder) return;
+        if (mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+        }
+    }
+
+    function cancelAudioRecording() {
+        if (!mediaRecorder) {
+            resetRecorderResources();
+            return;
+        }
+
+        shouldDiscardRecording = true;
+        if (mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+            return;
+        }
+
+        resetRecorderResources();
+    }
+
+    async function toggleAudioRecording() {
+        if (isRecordingAudio) {
+            stopAudioRecording();
+            return;
+        }
+        await startAudioRecording();
+    }
+
     async function sendMessage() {
         if ((!messageText.trim() && !attachedMedia) || !selectedContact || !selectedAccountId || sendingMessage) return;
         sendingMessage = true;
@@ -2128,6 +2360,10 @@
     onDestroy(() => {
         stopPolling();
         stopConversationsStream();
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+        }
+        resetRecorderResources();
         stopTypingStream();
     });
 
@@ -2943,11 +3179,14 @@
                                         <source src={mediaUrl} />
                                     </video>
                                 {:else if !isDeleted && mediaKind === 'audio'}
-                                    <div class="px-3 pt-2">
+                                    <div class="min-w-60 px-3 pt-2">
                                         <!-- svelte-ignore a11y_media_has_caption -->
                                         <audio controls class="w-full h-8" preload="metadata">
                                             <source src={mediaUrl} />
                                         </audio>
+                                        {#if !bodyText || ['[Medya]', '[Ses mesaji]', '[Cikartma]'].includes(bodyText)}
+                                            <p class="pt-1 text-[11px] {isFromMe ? 'text-primary-foreground/75' : 'text-muted-foreground'}">Ses kaydı</p>
+                                        {/if}
                                     </div>
                                 {:else if !isDeleted && mediaKind === 'document'}
                                     <div class="px-3 pt-2">
@@ -3276,6 +3515,32 @@
                         {/if}
                     </div>
                 {/if}
+                {#if isRecordingAudio}
+                    <div class="mb-2 flex items-center justify-between gap-2 rounded-2xl border border-red-300/70 bg-red-50/80 px-3 py-1.5 text-xs text-red-700">
+                        <div class="inline-flex min-w-0 items-center gap-2">
+                            <span class="inline-block h-2 w-2 rounded-full bg-red-500 animate-pulse"></span>
+                            <span class="shrink-0">Ses kaydediliyor {formatRecordDuration(recordedAudioSeconds)}</span>
+                            <div class="inline-flex h-4 items-end gap-0.5 rounded-full border border-red-200/80 bg-white/70 px-1.5 py-0.5">
+                                {#each recordingWaveValues as level}
+                                    <span
+                                        class="w-0.5 rounded-full bg-red-500/85 transition-[height] duration-75"
+                                        style={`height: ${Math.max(2, Math.round(level * 10))}px;`}
+                                    ></span>
+                                {/each}
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            onclick={cancelAudioRecording}
+                            class="inline-flex items-center gap-1 rounded-full border border-red-300 bg-white/80 px-2 py-1 text-[11px] font-medium text-red-700 transition-colors hover:bg-white"
+                            title="Kaydı sil ve vazgeç"
+                            aria-label="Kaydı sil ve vazgeç"
+                        >
+                            <TrashIcon class="h-3.5 w-3.5" />
+                            <span>Sil ve vazgeç</span>
+                        </button>
+                    </div>
+                {/if}
                 <div class="flex items-end gap-2">
                     <div class="flex-1 bg-muted/50 rounded-2xl border border-border px-4 py-2.5 flex items-end gap-2">
                         <div class="relative group shrink-0">
@@ -3455,17 +3720,29 @@
                             {/if}
                         </div>
                     </div>
-                    <button
-                        onclick={sendMessage}
-                        disabled={(!messageText.trim() && !attachedMedia) || sendingMessage || isTranslating}
-                        class="shrink-0 w-10 h-10 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground rounded-full flex items-center justify-center transition-all active:scale-95"
-                    >
-                        {#if sendingMessage || isTranslating}
-                            <div class="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin"></div>
-                        {:else}
-                            <SendIcon class="w-4 h-4" />
-                        {/if}
-                    </button>
+                    {#if !messageText.trim() && !attachedMedia && !sendingMessage && !isTranslating}
+                        <button
+                            onclick={toggleAudioRecording}
+                            disabled={isPreparingAudioRecorder}
+                            class="relative -top-1.25 shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed {isRecordingAudio ? 'bg-red-500 hover:bg-red-500/90 text-white' : 'bg-primary hover:bg-primary/90 text-primary-foreground'}"
+                            title={isRecordingAudio ? 'Kaydı durdur' : 'Ses kaydı başlat'}
+                            aria-label={isRecordingAudio ? 'Kaydı durdur' : 'Ses kaydı başlat'}
+                        >
+                            <MicIcon class="w-4 h-4" />
+                        </button>
+                    {:else}
+                        <button
+                            onclick={sendMessage}
+                            disabled={(!messageText.trim() && !attachedMedia) || sendingMessage || isTranslating}
+                            class="relative -top-1.25 shrink-0 w-10 h-10 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground rounded-full flex items-center justify-center transition-all active:scale-95"
+                        >
+                            {#if sendingMessage || isTranslating}
+                                <div class="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin"></div>
+                            {:else}
+                                <SendIcon class="w-4 h-4" />
+                            {/if}
+                        </button>
+                    {/if}
                 </div>
                 {#if attachedMedia}
                     <div class="mt-2 inline-flex items-center gap-2 px-2.5 py-1 rounded-md border border-border bg-muted/40 text-xs">

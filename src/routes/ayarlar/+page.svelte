@@ -15,9 +15,16 @@
 	let settings = $state({
 		readReceipt: true,
 		darkMode: true,
+		humanBehaviorEnabled: false,
+		humanBehaviorLevel: 'balanced',
+		accountRotationEnabled: false,
+		accountRotationMessageCount: 1,
 		messageDelay: 2000,
+		useMessageDelay: true,
 		batchSize: 25,
+		useBatchSizeLimit: true,
 		batchWaitMinutes: 5,
+		useBatchWait: true,
 		rejectMessageCheckEnabled: false,
 		rejectKeywords: 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum'
 	});
@@ -67,9 +74,18 @@
 				settings = {
 					readReceipt: readBooleanFlag(data.readReceipt),
 					darkMode: readBooleanFlag(data.darkMode),
+					humanBehaviorEnabled: readBooleanFlag(data.humanBehaviorEnabled),
+					humanBehaviorLevel: ['light', 'balanced', 'aggressive'].includes(String(data.humanBehaviorLevel || '').toLowerCase())
+						? String(data.humanBehaviorLevel).toLowerCase()
+						: 'balanced',
+					accountRotationEnabled: readBooleanFlag(data.accountRotationEnabled),
+					accountRotationMessageCount: Math.max(1, Math.min(100, Math.floor(Number(data.accountRotationMessageCount || 1)))),
 					messageDelay: data.messageDelay || 2000,
+					useMessageDelay: readBooleanFlag(data.useMessageDelay ?? true),
 					batchSize: data.batchSize || 25,
+					useBatchSizeLimit: readBooleanFlag(data.useBatchSizeLimit ?? true),
 					batchWaitMinutes: data.batchWaitMinutes || 5,
+					useBatchWait: readBooleanFlag(data.useBatchWait ?? true),
 					rejectMessageCheckEnabled: readBooleanFlag(data.rejectMessageCheckEnabled),
 					rejectKeywords: formatRejectKeywords(parseRejectKeywords(data.rejectKeywords)) || 'mesaj red\nred\nmesaj ret\nret\nmesaj almak istemiyorum'
 				};
@@ -116,6 +132,27 @@
 		(settings[key] as boolean) = nextValue;
 		if (key === 'darkMode') {
 			setMode(nextValue ? 'dark' : 'light');
+		}
+		saveSettings();
+	}
+
+	function setHumanBehaviorLevel(level: 'light' | 'balanced' | 'aggressive') {
+		if (!settings.humanBehaviorEnabled) return;
+		if (settings.humanBehaviorLevel === level) return;
+		settings.humanBehaviorLevel = level;
+		saveSettings();
+	}
+
+	function handleAccountRotationMessageCountChange(value: number) {
+		const next = Math.max(1, Math.min(100, Math.floor(Number(value) || 1)));
+		settings.accountRotationMessageCount = next;
+		saveSettings();
+	}
+
+	function setAccountRotationEnabled(nextValue: boolean) {
+		settings.accountRotationEnabled = nextValue;
+		if (nextValue && settings.accountRotationMessageCount < 1) {
+			settings.accountRotationMessageCount = 1;
 		}
 		saveSettings();
 	}
@@ -452,12 +489,55 @@
 						<Switch checked={settings.darkMode} onCheckedChange={(checked) => setBooleanValue('darkMode', checked === true)} />
 					</div>
 
+					<div class="flex items-center justify-between">
+						<div class="space-y-0.5">
+							<Label>İnsan Davranışı Ekle</Label>
+							<p class="text-sm text-muted-foreground">Açıksa mesaj öncesi yazıyor simülasyonu uygulanır.</p>
+						</div>
+						<Switch checked={settings.humanBehaviorEnabled} onCheckedChange={(checked) => setBooleanValue('humanBehaviorEnabled', checked === true)} />
+					</div>
+
+					{#if settings.humanBehaviorEnabled}
+						<div class="rounded-lg border p-2 -mt-2.5">
+							<div class="flex items-center gap-1.5">
+								<button
+									type="button"
+									onclick={() => setHumanBehaviorLevel('light')}
+									class={`h-6 px-2 text-[10px] rounded-md border transition-colors ${settings.humanBehaviorLevel === 'light' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted/60 border-border'}`}
+								>
+									Hafif
+								</button>
+								<button
+									type="button"
+									onclick={() => setHumanBehaviorLevel('balanced')}
+									class={`h-6 px-2 text-[10px] rounded-md border transition-colors ${settings.humanBehaviorLevel === 'balanced' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted/60 border-border'}`}
+								>
+									Dengeli
+								</button>
+								<button
+									type="button"
+									onclick={() => setHumanBehaviorLevel('aggressive')}
+									class={`h-6 px-2 text-[10px] rounded-md border transition-colors ${settings.humanBehaviorLevel === 'aggressive' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted/60 border-border'}`}
+								>
+									Agresif
+								</button>
+							</div>
+						</div>
+					{/if}
+
 					<div class="rounded-lg border p-3 space-y-3">
 						<div class="flex items-center justify-between">
-							<Label class="text-sm">Toplu Mesaj Gecikmesi</Label>
-							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.messageDelay} ms</span>
+							<Label class="text-sm">Mesajlar Arası Gecikme</Label>
+							<div class="flex items-center gap-2">
+								{#if settings.useMessageDelay}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.messageDelay} ms</span>
+								{:else}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">10 ms (Sabit)</span>
+								{/if}
+								<Switch checked={settings.useMessageDelay} onCheckedChange={(checked) => setBooleanValue('useMessageDelay', checked === true)} />
+							</div>
 						</div>
-						<div class="flex items-center gap-3">
+						<div class={`flex items-center gap-3 ${settings.useMessageDelay ? '' : 'opacity-50'}`}>
 							<input
 								type="range"
 								min="400"
@@ -465,6 +545,7 @@
 								step="100"
 								value={settings.messageDelay}
 								oninput={(e) => handleMessageDelayChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useMessageDelay}
 								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
 							/>
 							<Input
@@ -474,6 +555,7 @@
 								step="100"
 								value={settings.messageDelay}
 								onchange={(e) => handleMessageDelayChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useMessageDelay}
 								class="h-8 w-20 text-xs font-mono text-center"
 							/>
 						</div>
@@ -481,14 +563,26 @@
 							<span class="opacity-50">400 ms</span>
 							<span class="opacity-50">10.000 ms</span>
 						</div>
+						<p class="text-xs text-muted-foreground">
+							{settings.useMessageDelay
+								? 'Açıkken her mesaj arasında 400 ms ile belirlediğiniz değer arasında rastgele bekleme uygulanır.'
+								: 'Kapalıyken mesajlar arası bekleme sabit 10 ms uygulanır.'}
+						</p>
 					</div>
 
 					<div class="rounded-lg border p-3 space-y-3">
 						<div class="flex items-center justify-between">
 							<Label class="text-sm">Toplu Gönderimde Mesaj Sayısı</Label>
-							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchSize}</span>
+							<div class="flex items-center gap-2">
+								{#if settings.useBatchSizeLimit}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchSize}</span>
+								{:else}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">Sınırsız</span>
+								{/if}
+								<Switch checked={settings.useBatchSizeLimit} onCheckedChange={(checked) => setBooleanValue('useBatchSizeLimit', checked === true)} />
+							</div>
 						</div>
-						<div class="flex items-center gap-3">
+						<div class={`flex items-center gap-3 ${settings.useBatchSizeLimit ? '' : 'opacity-50'}`}>
 							<input
 								type="range"
 								min="20"
@@ -496,6 +590,7 @@
 								step="1"
 								value={settings.batchSize}
 								oninput={(e) => handleBatchSizeChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useBatchSizeLimit}
 								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
 							/>
 							<Input
@@ -505,18 +600,30 @@
 								step="1"
 								value={settings.batchSize}
 								onchange={(e) => handleBatchSizeChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useBatchSizeLimit}
 								class="h-8 w-20 text-xs font-mono text-center"
 							/>
 						</div>
-						<p class="text-xs text-muted-foreground">Her batch için 20 ile bu değer arasında rastgele hedef seçilir.</p>
+						<p class="text-xs text-muted-foreground">
+							{settings.useBatchSizeLimit
+								? 'Açıkken her batch için 20 ile bu değer arasında rastgele hedef seçilir.'
+								: 'Kapalıyken batch mesaj sayısı sınırı uygulanmaz.'}
+						</p>
 					</div>
 
 					<div class="rounded-lg border p-3 space-y-3">
 						<div class="flex items-center justify-between">
 							<Label class="text-sm">Toplu Gönderimde Bekleme (dk)</Label>
-							<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchWaitMinutes}</span>
+							<div class="flex items-center gap-2">
+								{#if settings.useBatchWait}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">{settings.batchWaitMinutes}</span>
+								{:else}
+									<span class="text-xs font-mono bg-muted px-2 py-1 rounded">Bekleme Yok</span>
+								{/if}
+								<Switch checked={settings.useBatchWait} onCheckedChange={(checked) => setBooleanValue('useBatchWait', checked === true)} />
+							</div>
 						</div>
-						<div class="flex items-center gap-3">
+						<div class={`flex items-center gap-3 ${settings.useBatchWait ? '' : 'opacity-50'}`}>
 							<input
 								type="range"
 								min="3"
@@ -524,6 +631,7 @@
 								step="1"
 								value={settings.batchWaitMinutes}
 								oninput={(e) => handleBatchWaitChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useBatchWait}
 								class="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
 							/>
 							<Input
@@ -533,10 +641,15 @@
 								step="1"
 								value={settings.batchWaitMinutes}
 								onchange={(e) => handleBatchWaitChange(parseInt((e.target as HTMLInputElement).value))}
+								disabled={!settings.useBatchWait}
 								class="h-8 w-20 text-xs font-mono text-center"
 							/>
 						</div>
-						<p class="text-xs text-muted-foreground">Batch tamamlandığında 3 ile bu değer arasında rastgele dakika beklenir.</p>
+						<p class="text-xs text-muted-foreground">
+							{settings.useBatchWait
+								? 'Açıkken batch tamamlandığında 3 ile bu değer arasında rastgele dakika beklenir.'
+								: 'Kapalıyken batch arası bekleme uygulanmaz.'}
+						</p>
 					</div>
 				</Card.Content>
 			</Card.Root>
@@ -583,6 +696,31 @@
 								</div>
 
 								<div class="space-y-2 rounded-lg border p-3">
+									<div class="flex items-start justify-between gap-3">
+										<div>
+											<Label class="text-sm">Hesap Başına Mesaj</Label>
+											<p class="text-xs text-muted-foreground mt-2.5">Aktifse her hesap bu sayı kadar mesaj gönderir, sonra sıradaki bağlı hesaba geçilir.</p>
+										</div>
+										<div class="flex flex-col items-end gap-2">
+											<Switch checked={settings.accountRotationEnabled} onCheckedChange={(checked) => setAccountRotationEnabled(checked === true)} />
+											{#if settings.accountRotationEnabled}
+												<Input
+													type="number"
+													min="1"
+													max="100"
+													step="1"
+													value={settings.accountRotationMessageCount}
+													onchange={(e) => handleAccountRotationMessageCountChange(parseInt((e.target as HTMLInputElement).value))}
+													class="h-7 w-18 text-[11px] font-mono text-center mr-4 -mt-1.5"
+												/>
+											{/if}
+										</div>
+									</div>
+								</div>
+							</div>
+
+							<div class="space-y-3">
+								<div class="space-y-2 rounded-lg border p-3">
 									<div class="flex items-center justify-between">
 										<Label class="text-sm">Selamlama Varyasyonu</Label>
 										<Switch checked={antiBan.useGreetingVariations} onCheckedChange={(checked) => antiBan.useGreetingVariations = checked === true} />
@@ -594,9 +732,7 @@
 										class="text-sm"
 									/>
 								</div>
-							</div>
 
-							<div class="space-y-3">
 								<div class="space-y-2 rounded-lg border p-3">
 									<div class="flex items-center justify-between">
 										<Label class="text-sm">Giriş Varyasyonu</Label>

@@ -36,6 +36,7 @@ export const userSettings = mysqlTable('user_settings', {
     humanTyping: boolean('human_typing').notNull().default(true),
     simulateOnline: boolean('simulate_online').notNull().default(true),
     useAccountRotation: boolean('use_account_rotation').notNull().default(false),
+
 });
 
 export const autoReplyHistory = mysqlTable('auto_reply_history', {

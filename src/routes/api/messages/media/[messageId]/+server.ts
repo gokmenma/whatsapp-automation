@@ -17,13 +17,37 @@ const MIME_TYPES: Record<string, string> = {
     webp: 'image/webp',
     gif: 'image/gif',
     mp4: 'video/mp4',
-    webm: 'video/webm',
+    webm: 'application/octet-stream',
     ogg: 'audio/ogg',
     oga: 'audio/ogg',
     mp3: 'audio/mpeg',
     m4a: 'audio/mp4',
     pdf: 'application/pdf',
 };
+
+function inferContentType(ext: string, mimeRaw: string, content: any) {
+    const normalizedExt = String(ext || '').toLowerCase();
+    const hasAudio = Boolean(content?.audioMessage);
+    const hasVideo = Boolean(content?.videoMessage);
+
+    if (normalizedExt === 'webm') {
+        return hasAudio ? 'audio/webm' : hasVideo ? 'video/webm' : 'application/octet-stream';
+    }
+
+    if (normalizedExt === 'ogg' || normalizedExt === 'oga') {
+        return 'audio/ogg';
+    }
+
+    if (normalizedExt === 'mp3') {
+        return 'audio/mpeg';
+    }
+
+    if (normalizedExt === 'm4a') {
+        return 'audio/mp4';
+    }
+
+    return MIME_TYPES[normalizedExt] || mimeRaw || 'application/octet-stream';
+}
 
 export const GET: RequestHandler = async ({ params, locals }) => {
     if (!locals.user) return new Response('Unauthorized', { status: 401 });
@@ -67,42 +91,50 @@ export const GET: RequestHandler = async ({ params, locals }) => {
         return new Response('Not Found', { status: 404 });
     }
 
-    if (!matchedFile) {
-        // No file on disk — try lazy download using stored proto bytes
-        const rawDir = path.join(MEDIA_PATH, accountId, 'raw');
-        const rawPath = path.join(rawDir, `${rawMsgId}.bin`);
-        if (!fs.existsSync(rawPath)) return new Response('Not Found', { status: 404 });
+    const rawDir = path.join(MEDIA_PATH, accountId, 'raw');
+    const rawPath = path.join(rawDir, `${rawMsgId}.bin`);
 
+    const readDecodedContent = () => {
+        if (!fs.existsSync(rawPath)) return null;
         try {
             const bytes = fs.readFileSync(rawPath);
             const decoded = proto.WebMessageInfo.decode(bytes) as any;
-
-            // Figure out media type and extension from the decoded message
-            const content = decoded.message?.ephemeralMessage?.message ||
+            return decoded.message?.ephemeralMessage?.message ||
                 decoded.message?.viewOnceMessage?.message ||
                 decoded.message?.viewOnceMessageV2?.message ||
-                decoded.message;
-            
+                decoded.message || null;
+        } catch {
+            return null;
+        }
+    };
+
+    if (!matchedFile) {
+        // No file on disk — try lazy download using stored proto bytes
+        const content = readDecodedContent();
+        if (!content) return new Response('Not Found', { status: 404 });
+
+        try {
             const mimeRaw: string =
                 content?.imageMessage?.mimetype ||
                 content?.videoMessage?.mimetype ||
                 content?.audioMessage?.mimetype ||
                 content?.stickerMessage?.mimetype ||
                 content?.documentMessage?.mimetype || 'application/octet-stream';
-            
+
             const extPart = mimeRaw.split('/')[1]?.split(';')[0]?.split('+')[0] || 'bin';
             const ext = extPart === 'jpeg' ? 'jpg' : extPart;
 
             const client = getWhatsAppClient(accountId) as any;
+            const decoded = proto.WebMessageInfo.decode(fs.readFileSync(rawPath)) as any;
             const buffer = await downloadMediaMessage(decoded, 'buffer', {}, {
                 reuploadRequest: client?.updateMediaMessage,
                 logger: mediaLogger
             }) as Buffer;
-            
+
             const filePath = path.join(MEDIA_PATH, accountId, `${rawMsgId}.${ext}`);
             fs.writeFileSync(filePath, buffer);
 
-            const contentType = MIME_TYPES[ext] || mimeRaw;
+            const contentType = inferContentType(ext, mimeRaw, content);
             return new Response(new Uint8Array(buffer), {
                 headers: {
                     'Content-Type': contentType,
@@ -118,7 +150,8 @@ export const GET: RequestHandler = async ({ params, locals }) => {
 
     const filePath = path.join(mediaDir, matchedFile);
     const ext = path.extname(matchedFile).slice(1).toLowerCase();
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    const decodedContent = readDecodedContent();
+    const contentType = inferContentType(ext, MIME_TYPES[ext] || 'application/octet-stream', decodedContent);
 
     try {
         const data = fs.readFileSync(filePath);

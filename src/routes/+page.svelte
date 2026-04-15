@@ -14,6 +14,27 @@
     let stats = $state({ total: 0, success: 0, error: 0 });
     let fetchedCredits = $state<number | null>(null);
     let credits = $derived(fetchedCredits ?? data.credits ?? 0);
+    const CREDIT_PRICE_TRY = 0.30;
+    let remainingBalance = $derived(credits * CREDIT_PRICE_TRY);
+    let remainingBalanceDisplay = $derived.by(() => {
+        const formatted = remainingBalance.toLocaleString('tr-TR', {
+            style: 'currency',
+            currency: 'TRY',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+
+        const commaIndex = formatted.lastIndexOf(',');
+        if (commaIndex === -1) {
+            return { main: formatted, cents: '' };
+        }
+
+        return {
+            main: formatted.slice(0, commaIndex),
+            cents: formatted.slice(commaIndex)
+        };
+    });
+
     let selectedGroup = $state<any>(null);
     let isDialogOpen = $state(false);
 
@@ -159,7 +180,7 @@
         </div>
     </div>
 
-	<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+    <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
 		<Card.Root>
 			<Card.Header class="flex flex-row items-center justify-between space-y-0 pb-2">
 				<Card.Title class="text-sm font-medium">Toplam İşlem</Card.Title>
@@ -196,6 +217,20 @@
 				<p class="text-muted-foreground text-xs">Hesabınızdaki mesaj hakkı</p>
 			</Card.Content>
 		</Card.Root>
+        <Card.Root>
+            <Card.Header class="flex flex-row items-center justify-between space-y-0 pb-2">
+                <Card.Title class="text-sm font-medium">Kalan Bakiye</Card.Title>
+            </Card.Header>
+            <Card.Content>
+                <div class="text-2xl font-bold text-blue-500">
+                    {remainingBalanceDisplay.main}
+                    {#if remainingBalanceDisplay.cents}
+                        <span class="text-[0.8em]">{remainingBalanceDisplay.cents}</span>
+                    {/if}
+                </div>
+                <p class="text-muted-foreground text-xs">Geçici hesap: 1 kredi = 0,30 TL</p>
+            </Card.Content>
+        </Card.Root>
 	</div>
 
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-7">

@@ -132,6 +132,8 @@
 		};
 		window.addEventListener('account:selected', onAccountSelected as EventListener);
 
+
+
 		const unreadFallbackInterval = window.setInterval(async () => {
 			if (isAuthPage) return;
 			try {
@@ -176,7 +178,7 @@
 						if ("Notification" in window && Notification.permission === "granted") {
 							const notification = new Notification(`WhatsApp (${String(acc?.name || 'Hesap')})`, {
 								body: 'Yeni okunmamis mesaj var',
-								icon: '/favicon.png'
+								icon: '/favicon.svg'
 							});
 							notification.onclick = () => window.focus();
 						}
